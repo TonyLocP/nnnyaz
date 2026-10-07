@@ -1,19 +1,25 @@
 use std::{
     collections::BTreeSet,
     env, fs,
-    io::{self, Read},
+    io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     DefaultTerminal, Frame,
+};
+use ratatui_image::{picker::Picker, FilterType, Resize, StatefulImage};
+
+use crate::{
+    preview::{Key as PreviewKey, Preview},
+    util::human,
 };
 
 // ───────────────────────── data ─────────────────────────
@@ -49,7 +55,7 @@ enum Mode {
     Prompt(Prompt),
 }
 
-struct App {
+pub struct App {
     cwd: PathBuf,
     entries: Vec<Entry>,
     state: ListState,
@@ -64,24 +70,11 @@ struct App {
     status: String,
     focus: Option<String>,
     page: usize,
+    preview: Preview,
+    preview_seek: usize,
 }
 
 // ───────────────────────── helpers ─────────────────────────
-
-fn human(n: u64) -> String {
-    const U: [&str; 5] = ["B", "K", "M", "G", "T"];
-    let mut v = n as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < U.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 {
-        format!("{n}B")
-    } else {
-        format!("{v:.1}{}", U[i])
-    }
-}
 
 fn remove(p: &Path) -> io::Result<()> {
     if fs::symlink_metadata(p)?.is_dir() {
@@ -119,93 +112,10 @@ fn unique(mut p: PathBuf) -> PathBuf {
     p
 }
 
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            '\t' => ' ',
-            c if c.is_control() => '·',
-            c => c,
-        })
-        .collect()
-}
-
-// ───────────────────────── preview ─────────────────────────
-
-/// Native preview: directories list their contents, text files show their
-/// head, binary files show a hex dump.
-fn preview(entry: &Entry, height: usize) -> Vec<Line<'static>> {
-    if entry.is_dir {
-        let mut names: Vec<(String, bool)> = match fs::read_dir(&entry.path) {
-            Ok(rd) => rd
-                .flatten()
-                .map(|e| {
-                    let is_dir = fs::metadata(e.path()).map(|m| m.is_dir()).unwrap_or(false);
-                    (e.file_name().to_string_lossy().into_owned(), is_dir)
-                })
-                .collect(),
-            Err(e) => return vec![Line::raw(format!("cannot read directory: {e}"))],
-        };
-        if names.is_empty() {
-            return vec![Line::styled("(empty)", Style::new().fg(Color::DarkGray))];
-        }
-        names.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.to_lowercase().cmp(&b.0.to_lowercase())));
-        return names
-            .into_iter()
-            .take(height)
-            .map(|(n, d)| {
-                if d {
-                    Line::styled(format!("{}/", sanitize(&n)), Style::new().fg(Color::Blue))
-                } else {
-                    Line::raw(sanitize(&n))
-                }
-            })
-            .collect();
-    }
-
-    let mut buf = Vec::new();
-    match fs::File::open(&entry.path) {
-        Ok(f) => {
-            if let Err(e) = f.take(32 * 1024).read_to_end(&mut buf) {
-                return vec![Line::raw(format!("cannot read file: {e}"))];
-            }
-        }
-        Err(e) => return vec![Line::raw(format!("cannot open file: {e}"))],
-    }
-    if buf.is_empty() {
-        return vec![Line::styled("(empty file)", Style::new().fg(Color::DarkGray))];
-    }
-
-    let sniff = &buf[..buf.len().min(1024)];
-    if sniff.contains(&0) {
-        let mut out = vec![
-            Line::styled(
-                format!("binary file, {}", human(entry.size)),
-                Style::new().fg(Color::Yellow),
-            ),
-            Line::raw(""),
-        ];
-        for (i, chunk) in buf.chunks(16).take(height.saturating_sub(2)).enumerate() {
-            let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-            let asc: String = chunk
-                .iter()
-                .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
-                .collect();
-            out.push(Line::raw(format!("{:06x}  {:<47}  {}", i * 16, hex.join(" "), asc)));
-        }
-        return out;
-    }
-
-    String::from_utf8_lossy(&buf)
-        .lines()
-        .take(height)
-        .map(|l| Line::raw(sanitize(l)))
-        .collect()
-}
-
 // ───────────────────────── app ─────────────────────────
 
 impl App {
-    fn new() -> io::Result<Self> {
+    pub fn new() -> io::Result<Self> {
         let start = env::args()
             .nth(1)
             .map(PathBuf::from)
@@ -225,9 +135,15 @@ impl App {
             status: String::new(),
             focus: None,
             page: 10,
+            preview: Preview::new(),
+            preview_seek: 0,
         };
         app.reload();
         Ok(app)
+    }
+
+    pub fn attach_picker(&mut self, picker: Picker) {
+        self.preview.attach_picker(picker);
     }
 
     fn current(&self) -> Option<&Entry> {
@@ -495,6 +411,8 @@ impl App {
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
+            KeyCode::Char('J') => self.preview_seek = self.preview_seek.saturating_add(5),
+            KeyCode::Char('K') => self.preview_seek = self.preview_seek.saturating_sub(5),
             KeyCode::PageDown => self.move_by(self.page as isize),
             KeyCode::PageUp => self.move_by(-(self.page as isize)),
             KeyCode::Char('g') | KeyCode::Home => self.state.select(if self.entries.is_empty() {
@@ -596,7 +514,7 @@ impl App {
     fn draw(&mut self, f: &mut Frame) {
         let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
         let cols = if self.show_preview {
-            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(rows[0])
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(rows[0])
         } else {
             Layout::horizontal([Constraint::Percentage(100)]).split(rows[0])
         };
@@ -633,15 +551,9 @@ impl App {
 
         // preview pane
         if self.show_preview {
-            let h = cols[1].height.saturating_sub(2) as usize;
-            let (title, lines) = match self.current() {
-                Some(e) => (format!(" {} ", e.name), preview(e, h)),
-                None => (" preview ".to_string(), vec![]),
-            };
-            f.render_widget(
-                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
-                cols[1],
-            );
+            self.draw_preview(f, cols[1]);
+        } else {
+            self.preview.set_target(None);
         }
 
         // status line
@@ -650,7 +562,7 @@ impl App {
             Sort::Size => "size",
             Sort::Time => "time",
         };
-        let text = match self.mode {
+        let mut text = match self.mode {
             Mode::Filter => format!("/{}", self.filter),
             Mode::Prompt(Prompt::Delete) => format!("delete {} item(s)? (y/N)", self.targets().len()),
             Mode::Prompt(p) => {
@@ -671,28 +583,105 @@ impl App {
                 if self.filter.is_empty() { String::new() } else { format!(" | filter:{}", self.filter) },
             ),
         };
+        if self.preview_seek > 0 {
+            text.push_str(&format!(" | seek +{}", self.preview_seek));
+        }
         f.render_widget(Paragraph::new(text), rows[1]);
     }
 
-    fn run(&mut self, term: &mut DefaultTerminal) -> io::Result<()> {
-        loop {
-            term.draw(|f| self.draw(f))?;
-            if let Event::Key(k) = event::read()? {
-                if k.kind != KeyEventKind::Press {
-                    continue;
+    fn draw_preview(&mut self, f: &mut Frame, area: Rect) {
+        let inner = Rect {
+            x: area.x + 1,
+            y: area.y + 1,
+            width: area.width.saturating_sub(2),
+            height: area.height.saturating_sub(2),
+        };
+
+        let target: Option<PreviewKey> = self
+            .current()
+            .map(|e| (e.path.clone(), e.modified, e.size));
+        if self.preview.set_target(target.as_ref()) {
+            self.preview_seek = 0;
+        }
+        let meta = self.preview.artifact_meta();
+        let name = self
+            .current()
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| "preview".into());
+
+        let mut title = format!(" {name} ");
+        if let Some((kind, is_image, total)) = meta {
+            title = format!(" {name} · {kind} ");
+            let h = inner.height as usize;
+            if !is_image && total > h {
+                let max_seek = total.saturating_sub(h);
+                self.preview_seek = self.preview_seek.min(max_seek);
+                let seek = self.preview_seek;
+                title.push_str(&format!("[{}–{} of {total}] ", seek + 1, (seek + h).min(total)));
+            }
+        }
+        if self.preview.is_loading() {
+            title.push('…');
+        }
+        f.render_widget(Block::default().borders(Borders::ALL).title(title), area);
+
+        let h = inner.height as usize;
+        match meta {
+            Some((_, true, _)) => {
+                if let Some(state) = self.preview.image_state_mut() {
+                    f.render_stateful_widget(
+                        StatefulImage::default().resize(Resize::Fit(Some(FilterType::Triangle))),
+                        inner,
+                        state,
+                    );
                 }
-                if self.handle_key(k, term)? {
-                    return Ok(());
-                }
+            }
+            Some((_, false, total)) => {
+                let seek = if total > h { self.preview_seek } else { 0 };
+                let lines = self.preview.lines_slice(seek, h).unwrap_or_default();
+                f.render_widget(Paragraph::new(lines), inner);
+            }
+            None => {
+                let msg = if self.preview.is_dead() {
+                    "preview worker died"
+                } else if self.preview.is_loading() {
+                    "loading…"
+                } else {
+                    "(no preview)"
+                };
+                f.render_widget(
+                    Paragraph::new(Line::styled(msg, Style::new().fg(Color::DarkGray))),
+                    inner,
+                );
             }
         }
     }
-}
 
-fn main() -> io::Result<()> {
-    let mut app = App::new()?;
-    let mut terminal = ratatui::init();
-    let res = app.run(&mut terminal);
-    ratatui::restore();
-    res
+    // ─────────────── main loop ───────────────
+
+    pub fn run(&mut self, term: &mut DefaultTerminal) -> io::Result<()> {
+        term.draw(|f| self.draw(f))?;
+        loop {
+            let mut dirty = false;
+            if event::poll(Duration::from_millis(50))? {
+                match event::read()? {
+                    Event::Key(k) if k.kind == KeyEventKind::Press => {
+                        if self.handle_key(k, term)? {
+                            return Ok(());
+                        }
+                        dirty = true;
+                    }
+                    Event::Resize(_, _) => dirty = true,
+                    _ => {}
+                }
+            }
+            self.preview.poll();
+            if self.preview.take_changed() {
+                dirty = true;
+            }
+            if dirty {
+                term.draw(|f| self.draw(f))?;
+            }
+        }
+    }
 }
