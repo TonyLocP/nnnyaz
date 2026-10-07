@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{List, ListItem, ListState, Paragraph},
     DefaultTerminal, Frame,
 };
 use ratatui_image::{picker::Picker, FilterType, Resize, StatefulImage};
@@ -72,6 +72,9 @@ pub struct App {
     page: usize,
     preview: Preview,
     preview_seek: usize,
+    list: List<'static>,
+    list_dirty: bool,
+    list_width: u16,
 }
 
 // ───────────────────────── helpers ─────────────────────────
@@ -137,6 +140,9 @@ impl App {
             page: 10,
             preview: Preview::new(),
             preview_seek: 0,
+            list: List::new(Vec::<ListItem>::new()),
+            list_dirty: true,
+            list_width: 0,
         };
         app.reload();
         Ok(app)
@@ -200,6 +206,7 @@ impl App {
                 .unwrap_or(0);
             self.state.select(Some(idx));
         }
+        self.list_dirty = true;
     }
 
     fn cd(&mut self, path: PathBuf, focus: Option<String>) {
@@ -453,17 +460,25 @@ impl App {
                     if !self.selected.remove(&p) {
                         self.selected.insert(p);
                     }
+                    self.list_dirty = true;
                     self.move_by(1);
                 }
             }
-            KeyCode::Char('a') => self.selected = self.entries.iter().map(|e| e.path.clone()).collect(),
-            KeyCode::Char('u') => self.selected.clear(),
+            KeyCode::Char('a') => {
+                self.selected = self.entries.iter().map(|e| e.path.clone()).collect();
+                self.list_dirty = true;
+            }
+            KeyCode::Char('u') => {
+                self.selected.clear();
+                self.list_dirty = true;
+            }
             KeyCode::Char('y') | KeyCode::Char('x') => {
                 let t = self.targets();
                 if !t.is_empty() {
                     self.status = format!("{} item(s) {}", t.len(), if key.code == KeyCode::Char('x') { "cut" } else { "yanked" });
                     self.yank = Some((t, key.code == KeyCode::Char('x')));
                     self.selected.clear();
+                    self.list_dirty = true;
                 }
             }
             KeyCode::Char('P') => self.paste(),
@@ -511,17 +526,8 @@ impl App {
 
     // ─────────────── drawing ───────────────
 
-    fn draw(&mut self, f: &mut Frame) {
-        let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
-        let cols = if self.show_preview {
-            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(rows[0])
-        } else {
-            Layout::horizontal([Constraint::Percentage(100)]).split(rows[0])
-        };
-        self.page = rows[0].height.saturating_sub(2) as usize;
-
-        // file list
-        let width = cols[0].width.saturating_sub(2) as usize;
+    fn rebuild_list(&mut self, width: u16) {
+        let inner = width.saturating_sub(1) as usize;
         let items: Vec<ListItem> = self
             .entries
             .iter()
@@ -530,7 +536,7 @@ impl App {
                 let left = format!("{mark}{}{}", e.name, if e.is_dir { "/" } else { "" });
                 let right = if e.is_dir { String::new() } else { human(e.size) };
                 let used = left.chars().count() + right.chars().count();
-                let pad = width.saturating_sub(used).max(1);
+                let pad = inner.saturating_sub(used).max(1);
                 let style = if e.is_dir {
                     Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD)
                 } else {
@@ -543,11 +549,33 @@ impl App {
                 ]))
             })
             .collect();
+        self.list = List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+        self.list_width = width;
+        self.list_dirty = false;
+    }
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(format!(" {} ", self.cwd.display())))
-            .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
-        f.render_stateful_widget(list, cols[0], &mut self.state);
+    fn draw(&mut self, f: &mut Frame) {
+        let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
+        let cols = if self.show_preview {
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(rows[0])
+        } else {
+            Layout::horizontal([Constraint::Percentage(100)]).split(rows[0])
+        };
+        self.page = rows[0].height.saturating_sub(1) as usize;
+
+        // file list
+        if self.list_dirty || self.list_width != cols[0].width {
+            self.rebuild_list(cols[0].width);
+        }
+        let title_area = Rect::new(cols[0].x, cols[0].y, cols[0].width.saturating_sub(1), cols[0].height.min(1));
+        let list_area = Rect::new(
+            cols[0].x,
+            cols[0].y + 1,
+            cols[0].width,
+            cols[0].height.saturating_sub(1),
+        );
+        f.render_widget(Paragraph::new(format!(" {} ", self.cwd.display())), title_area);
+        f.render_stateful_widget(&self.list, list_area, &mut self.state);
 
         // preview pane
         if self.show_preview {
@@ -590,12 +618,13 @@ impl App {
     }
 
     fn draw_preview(&mut self, f: &mut Frame, area: Rect) {
-        let inner = Rect {
-            x: area.x + 1,
-            y: area.y + 1,
-            width: area.width.saturating_sub(2),
-            height: area.height.saturating_sub(2),
-        };
+        let title_area = Rect::new(area.x, area.y, area.width, area.height.min(1));
+        let inner = Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(1),
+        );
 
         let target: Option<PreviewKey> = self
             .current()
@@ -623,7 +652,7 @@ impl App {
         if self.preview.is_loading() {
             title.push('…');
         }
-        f.render_widget(Block::default().borders(Borders::ALL).title(title), area);
+        f.render_widget(Paragraph::new(title), title_area);
 
         let h = inner.height as usize;
         match meta {

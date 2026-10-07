@@ -60,7 +60,7 @@ pub struct Preview {
 
 const CACHE_MAX: usize = 64;
 const DIR_LIST_MAX: usize = 5000;
-const IMAGE_MAX: (u32, u32) = (1920, 1080);
+const IMAGE_MAX: (u32, u32) = (1280, 720);
 
 impl Preview {
     pub fn new() -> Self {
