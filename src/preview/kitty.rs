@@ -8,13 +8,17 @@
 //! whose foreground color encodes the image id.
 
 use std::{
+    collections::hash_map::DefaultHasher,
+    fs,
+    hash::{Hash, Hasher},
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc, OnceLock,
     },
     thread,
+    time::SystemTime,
 };
 
 use image::{
@@ -44,13 +48,119 @@ pub fn next_id() -> u32 {
     base.wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed)) & 0xFF_FFFF
 }
 
-/// Decode an image file, capped to [`IMAGE_MAX`] (aspect preserved).
-pub fn open_image(path: &Path) -> io::Result<DynamicImage> {
+/// Decode an image file, capped to [`IMAGE_MAX`] (aspect preserved), reusing a
+/// downscaled on-disk copy when one exists.
+///
+/// Mirrors yazi's `precache` (`yazi-adapter/src/image.rs`): the first view
+/// decodes the (possibly huge) source and writes a small re-encoded copy into a
+/// temp cache dir, so later views — even after restarting rnn — skip the source
+/// decode entirely. `mtime`/`size` are part of the key, so edited files are
+/// re-decoded.
+pub fn load_image(path: &Path, mtime: Option<SystemTime>, size: u64) -> io::Result<DynamicImage> {
+    load_from(&cache_dir(), path, mtime, size)
+}
+
+/// On-disk preview cache root. `RNN_CACHE_DIR` overrides it (tests, config);
+/// otherwise a dir under the system temp dir, like yazi's default.
+fn cache_dir() -> PathBuf {
+    std::env::var_os("RNN_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("rnn-preview-cache"))
+}
+
+/// Stable content key for a source image (path + mtime + size).
+fn cache_stem(path: &Path, mtime: Option<SystemTime>, size: u64) -> String {
+    let mut h = DefaultHasher::new();
+    path.hash(&mut h);
+    mtime.hash(&mut h);
+    size.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+fn decode(path: &Path) -> Option<DynamicImage> {
+    ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()
+}
+
+fn load_from(
+    dir: &Path,
+    path: &Path,
+    mtime: Option<SystemTime>,
+    size: u64,
+) -> io::Result<DynamicImage> {
+    let stem = cache_stem(path, mtime, size);
+    if let Some(img) = ["png", "jpg"]
+        .iter()
+        .find_map(|ext| decode(&dir.join(format!("{stem}.{ext}"))))
+    {
+        return Ok(img);
+    }
+
     let img = ImageReader::open(path)?
         .with_guessed_format()?
         .decode()
         .map_err(io::Error::other)?;
-    Ok(cap_size(&img, IMAGE_MAX))
+    let capped = cap_size(&img, IMAGE_MAX);
+    let _ = write_cache(dir, &stem, &capped);
+    Ok(capped)
+}
+
+/// Re-encode `img` into the cache: PNG when it has alpha, otherwise a
+/// quality-90 JPEG (the same choice yazi makes). Written to a unique temp name
+/// and renamed, so a reader never sees a half-written file.
+fn write_cache(dir: &Path, stem: &str, img: &DynamicImage) -> io::Result<()> {
+    use image::codecs::{jpeg::JpegEncoder, png::PngEncoder};
+
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    fs::create_dir_all(dir)?;
+    let alpha = img.color().has_alpha();
+    let ext = if alpha { "png" } else { "jpg" };
+
+    let mut buf = Vec::new();
+    if alpha {
+        img.write_with_encoder(PngEncoder::new(&mut buf))
+            .map_err(io::Error::other)?;
+    } else {
+        img.write_with_encoder(JpegEncoder::new_with_quality(&mut buf, 90))
+            .map_err(io::Error::other)?;
+    }
+
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!("{stem}.{}.{n}.tmp", std::process::id()));
+    fs::write(&tmp, &buf)?;
+    fs::rename(&tmp, dir.join(format!("{stem}.{ext}")))?;
+    prune(dir);
+    Ok(())
+}
+
+/// Best-effort eviction so the temp cache cannot grow without bound.
+fn prune(dir: &Path) {
+    const MAX_FILES: usize = 512;
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, SystemTime)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("tmp") {
+                return None;
+            }
+            Some((p, e.metadata().ok()?.modified().ok()?))
+        })
+        .collect();
+    if files.len() <= MAX_FILES {
+        return;
+    }
+    files.sort_by_key(|(_, t)| *t);
+    let excess = files.len() - MAX_FILES;
+    for (p, _) in files.into_iter().take(excess) {
+        let _ = fs::remove_file(p);
+    }
 }
 
 /// Scale down to fit within `max`, never upscaling.
@@ -751,5 +861,36 @@ mod tests {
         assert_eq!(delete_seq(9, false), "\x1b_Gd=1,q=2,i=9\x1b\\");
         assert!(delete_seq(9, true).starts_with("\x1bPtmux;\x1b\x1b_Gd=1,q=2,i=9"));
         assert!(delete_seq(9, true).ends_with("\x1b\\"));
+    }
+
+    #[test]
+    fn cache_stem_is_stable_and_keyed() {
+        let p = |s: &'static str| Path::new(s);
+        assert_eq!(cache_stem(p("/a/b.png"), None, 10), cache_stem(p("/a/b.png"), None, 10));
+        assert_ne!(cache_stem(p("/a/b.png"), None, 10), cache_stem(p("/a/b.png"), None, 11));
+        assert_ne!(cache_stem(p("/a/b.png"), None, 10), cache_stem(p("/a/c.png"), None, 10));
+        let t = Some(SystemTime::UNIX_EPOCH);
+        assert_ne!(cache_stem(p("/a/b.png"), None, 10), cache_stem(p("/a/b.png"), t, 10));
+    }
+
+    #[test]
+    fn disk_cache_roundtrip() {
+        let base = std::env::temp_dir().join(format!("rnn-cache-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let cache = base.join("cache");
+        let src = base.join("src.png");
+        fs::create_dir_all(&base).unwrap();
+        make_img(80, 40).save(&src).unwrap();
+
+        let a = load_from(&cache, &src, None, 123).unwrap();
+        assert_eq!((a.width(), a.height()), (80, 40));
+        let cached_files = fs::read_dir(&cache).unwrap().count();
+        assert!(cached_files >= 1, "expected a cached copy");
+
+        // Second load must hit the cached file (same dimensions, no re-decode).
+        let b = load_from(&cache, &src, None, 123).unwrap();
+        assert_eq!((b.width(), b.height()), (80, 40));
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

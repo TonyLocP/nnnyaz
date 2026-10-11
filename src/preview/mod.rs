@@ -41,6 +41,7 @@ enum ImgState {
 
 struct Request {
     key: Key,
+    preload: bool,
 }
 
 pub struct Preview {
@@ -107,6 +108,22 @@ impl Preview {
             Some(ImgState::Kitty(k)) => Some(k),
             None => None,
         }
+    }
+
+    /// Whether images are displayed via kitty/ghostty (otherwise preloading
+    /// them would be wasted work).
+    pub fn kitty_enabled(&self) -> bool {
+        self.kitty
+    }
+
+    /// Eagerly load `key` (an image) into both caches so navigating to it
+    /// later is instant. A preload never changes `pending`, so it does not
+    /// affect the loading indicator.
+    pub fn preload(&mut self, key: Key) {
+        if self.cache.contains_key(&key) {
+            return;
+        }
+        let _ = self.tx.send(Request { key, preload: true });
     }
 
     fn clear_image(&mut self) {
@@ -180,7 +197,7 @@ impl Preview {
                     self.activate(k.clone());
                 } else if !self.dead && self.pending.as_ref() != Some(k) {
                     self.pending = Some(k.clone());
-                    let req = Request { key: k.clone() };
+                    let req = Request { key: k.clone(), preload: false };
                     if self.tx.send(req).is_err() {
                         self.dead = true;
                         self.pending = None;
@@ -284,14 +301,25 @@ impl Preview {
 }
 
 fn worker(rx: Receiver<Request>, tx: Sender<(Key, Artifact)>) {
-    // Latest-wins: before processing, drain anything newer than what we got.
-    while let Ok(mut current) = rx.recv() {
+    while let Ok(first) = rx.recv() {
+        // Batch a few pending requests; the newest display request supersedes
+        // older ones, but all preload requests still run.
+        let mut batch = vec![first];
         while let Ok(r) = rx.try_recv() {
-            current = r;
+            if batch.len() >= 16 {
+                break;
+            }
+            batch.push(r);
         }
-        let art = generate(&current.key);
-        if tx.send((current.key, art)).is_err() {
-            return;
+        let last_display = batch.iter().rposition(|r| !r.preload);
+        for (i, req) in batch.into_iter().enumerate() {
+            if !req.preload && Some(i) != last_display {
+                continue; // superseded by a newer display request
+            }
+            let art = generate(&req.key);
+            if tx.send((req.key, art)).is_err() {
+                return;
+            }
         }
     }
 }
@@ -328,9 +356,11 @@ fn generate(key: &Key) -> Artifact {
                 Err(e) => err(format!("{}: {e}", path.display())),
             },
         },
-        // Images are decoded off-thread; the decoded buffer is cached so
-        // revisiting a file never re-decodes. Video and PDFs show as binary.
-        detect::Kind::Image => match kitty::open_image(path) {
+        // Images are decoded off-thread and cached both in memory (this
+        // `cache`) and on disk (a downscaled copy in the temp cache dir), so
+        // revisiting — or restarting rnn — never re-decodes a large source.
+        // Video and PDFs show as binary.
+        detect::Kind::Image => match kitty::load_image(path, key.1, key.2) {
             Ok(img) => Artifact {
                 kind: "image",
                 data: Vec::new(),

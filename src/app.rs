@@ -17,7 +17,10 @@ use ratatui::{
 };
 
 use crate::{
-    preview::{Key as PreviewKey, Preview},
+    preview::{
+        Key as PreviewKey, Preview,
+        detect::{self, Kind},
+    },
     util::human,
 };
 
@@ -152,6 +155,27 @@ impl App {
 
     fn current(&self) -> Option<&Entry> {
         self.state.selected().and_then(|i| self.entries.get(i))
+    }
+
+    /// Preload up to two image neighbours on each side (into the preview's
+    /// disk + memory caches) so navigating to them is instant, like yazi's
+    /// image previewer does.
+    fn preload_neighbours(&mut self) {
+        if !self.preview.kitty_enabled() {
+            return;
+        }
+        let Some(i) = self.state.selected() else { return };
+        let n = self.entries.len();
+        for j in [i.saturating_sub(2), i.saturating_sub(1), i + 1, i + 2] {
+            if j >= n || j == i {
+                continue;
+            }
+            let Some(e) = self.entries.get(j) else { continue };
+            if e.is_dir || detect::detect(&e.path) != Kind::Image {
+                continue;
+            }
+            self.preview.preload((e.path.clone(), e.modified, e.size));
+        }
     }
 
     fn reload(&mut self) {
@@ -635,6 +659,7 @@ impl App {
             .map(|e| (e.path.clone(), e.modified, e.size));
         if self.preview.set_target(target.as_ref()) {
             self.preview.set_preview_seek(0);
+            self.preload_neighbours();
         }
         let meta = self.preview.artifact_meta();
         let name = self

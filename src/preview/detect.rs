@@ -1,5 +1,6 @@
 use std::{fs, io::Read, path::Path};
 
+#[derive(PartialEq)]
 pub enum Kind {
     Text,
     Json,
