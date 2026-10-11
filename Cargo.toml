@@ -6,12 +6,20 @@ description = "A small nnn-style terminal file manager with a native preview pan
 
 [dependencies]
 ratatui = "0.29"
-rustix = { version = "0.38", features = ["event"] }
+rustix = { version = "0.38", features = ["event", "fs", "shm"] }
 syntect = "5.3"
 two-face = "0.5"
 infer = "0.22"
+image = { version = "0.25", default-features = false, features = ["default"] }
+base64-simd = "0.8"
 
 [profile.release]
 lto = true
 opt-level = 3
 strip = true
+
+# Optimize dependencies (notably `image` decoding/resizing) in dev builds too,
+# so `cargo run` previews are fast without waiting on a release build. Our own
+# crate stays unoptimized and debuggable.
+[profile.dev.package."*"]
+opt-level = 2

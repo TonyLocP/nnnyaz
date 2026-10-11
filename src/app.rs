@@ -145,6 +145,11 @@ impl App {
         Ok(app)
     }
 
+    /// Enable kitty image previews (call before `run`).
+    pub fn preview_configure(&mut self, kitty_supported: bool, font: (u16, u16), shm: bool) {
+        self.preview.configure(kitty_supported, font, shm);
+    }
+
     fn current(&self) -> Option<&Entry> {
         self.state.selected().and_then(|i| self.entries.get(i))
     }
@@ -652,9 +657,31 @@ impl App {
         }
         f.render_widget(Paragraph::new(title), title_area);
 
-        let h = inner.height as usize;
-        let lines = self.preview.lines_slice(h).unwrap_or_default();
-        f.render_widget(Paragraph::new(lines), inner);
+        for y in inner.y..inner.y + inner.height {
+            for x in inner.x..inner.x + inner.width {
+                if let Some(c) = f.buffer_mut().cell_mut((x, y)) {
+                    *c = ratatui::buffer::Cell::default();
+                }
+            }
+        }
+        let is_image = meta.map(|(k, _)| k == "image").unwrap_or(false);
+        if is_image {
+            if let Some(s) = self.preview.image_state_mut() {
+                s.render(inner, f.buffer_mut());
+            } else {
+                f.render_widget(
+                    Paragraph::new(Line::styled(
+                        "image preview needs kitty or ghostty",
+                        Style::new().fg(Color::DarkGray),
+                    )),
+                    inner,
+                );
+            }
+        } else {
+            let h = inner.height as usize;
+            let lines = self.preview.lines_slice(h).unwrap_or_default();
+            f.render_widget(Paragraph::new(lines), inner);
+        }
     }
 
     // ─────────────── main loop ───────────────

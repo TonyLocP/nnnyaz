@@ -1,6 +1,8 @@
 pub mod detect;
 pub mod hex;
+pub mod kitty;
 pub mod media;
+pub mod shm;
 pub mod text;
 
 use std::{
@@ -12,12 +14,16 @@ use std::{
     time::SystemTime,
 };
 
+use image::DynamicImage;
 use ratatui::{
     style::{Color, Style},
     text::Line,
 };
 
-use crate::util::{human, sanitize};
+use crate::{
+    preview::kitty::KittyState,
+    util::{human, sanitize},
+};
 
 /// Everything a preview is keyed by: path, mtime and size.
 pub type Key = (PathBuf, Option<SystemTime>, u64);
@@ -26,6 +32,11 @@ pub type Key = (PathBuf, Option<SystemTime>, u64);
 pub struct Artifact {
     pub kind: &'static str,
     pub data: Vec<Line<'static>>,
+    img: Option<DynamicImage>,
+}
+
+enum ImgState {
+    Kitty(KittyState),
 }
 
 struct Request {
@@ -43,9 +54,15 @@ pub struct Preview {
     changed: bool,
     dead: bool,
     preview_seek: usize,
+    kitty: bool,
+    font: (u16, u16),
+    is_tmux: bool,
+    shm: bool,
+    image_state: Option<ImgState>,
+    last_streamed: u64,
 }
 
-const CACHE_MAX: usize = 64;
+const CACHE_MAX: usize = 16;
 const DIR_LIST_MAX: usize = 5000;
 
 impl Preview {
@@ -66,6 +83,35 @@ impl Preview {
             changed: false,
             dead: false,
             preview_seek: 0,
+            kitty: false,
+            font: (8, 16),
+            is_tmux: false,
+            shm: false,
+            image_state: None,
+            last_streamed: 0,
+        }
+    }
+
+    /// Enable kitty/ghostty image previews. Call once at startup. `shm` selects
+    /// the shared-memory transfer medium, which is far faster under tmux.
+    pub fn configure(&mut self, kitty_supported: bool, font: (u16, u16), shm: bool) {
+        self.kitty = kitty_supported;
+        self.font = font;
+        self.is_tmux = std::env::var_os("TMUX").is_some();
+        self.shm = shm;
+    }
+
+    /// The active kitty image renderer, if any.
+    pub fn image_state_mut(&mut self) -> Option<&mut KittyState> {
+        match &mut self.image_state {
+            Some(ImgState::Kitty(k)) => Some(k),
+            None => None,
+        }
+    }
+
+    fn clear_image(&mut self) {
+        if let Some(ImgState::Kitty(old)) = self.image_state.take() {
+            kitty::stream_delete(old.id(), self.is_tmux);
         }
     }
 
@@ -100,6 +146,16 @@ impl Preview {
     /// pressed (which is what triggers redraws).
     pub fn poll(&mut self) {
         self.drain();
+        if let Some(ImgState::Kitty(k)) = &self.image_state {
+            let g = k.transmitted_gen();
+            if g != self.last_streamed {
+                self.last_streamed = g;
+                self.changed = true;
+                if std::env::var_os("RNN_DEBUG").is_some() {
+                    eprintln!("preview: stream gen {g} -> redraw");
+                }
+            }
+        }
     }
 
     /// Point the preview at a new entry. Returns true when the target changed
@@ -108,6 +164,9 @@ impl Preview {
     pub fn set_target(&mut self, key: Option<&Key>) -> bool {
         let target_changed = self.wanted.as_ref() != key;
         self.wanted = key.cloned();
+        if key.is_none() {
+            self.clear_image();
+        }
         self.drain();
 
         if let Some(k) = key {
@@ -166,6 +225,27 @@ impl Preview {
             Some(a) => a.clone(),
             None => return,
         };
+        if art.img.is_some() {
+            if self.kitty {
+                if let Some(ImgState::Kitty(old)) = &self.image_state {
+                    kitty::stream_delete(old.id(), self.is_tmux);
+                }
+                if let Some(img) = &art.img {
+                    self.image_state = Some(ImgState::Kitty(KittyState::new(
+                        kitty::next_id(),
+                        self.font,
+                        self.is_tmux,
+                        self.shm,
+                        img.clone(),
+                    )));
+                    self.last_streamed = 0;
+                }
+            } else {
+                self.image_state = None;
+            }
+        } else {
+            self.image_state = None;
+        }
         self.active = Some((k, art));
         self.changed = true;
     }
@@ -221,40 +301,49 @@ fn generate(key: &Key) -> Artifact {
     let err = |msg: String| Artifact {
         kind: "error",
         data: vec![Line::styled(msg, Style::new().fg(Color::Red))],
+        img: None,
     };
 
     if path.is_dir() {
         return Artifact {
             kind: "dir",
             data: dir_listing(path),
+            img: None,
         };
     }
 
     match detect::detect(path) {
         detect::Kind::Text => match text::preview(path) {
-            Ok(lines) => Artifact { kind: "text", data: lines },
+            Ok(lines) => Artifact { kind: "text", data: lines, img: None },
             Err(e) => err(format!("{}: {e}", path.display())),
         },
         detect::Kind::Json => match media::json_pretty(path) {
             Ok(s) => Artifact {
                 kind: "json",
                 data: text::highlight(&s, "json", ""),
+                img: None,
             },
             Err(_) => match text::preview(path) {
-                Ok(lines) => Artifact { kind: "json", data: lines },
+                Ok(lines) => Artifact { kind: "json", data: lines, img: None },
                 Err(e) => err(format!("{}: {e}", path.display())),
             },
         },
-        // Images, video and PDFs are deliberately not decoded: decoding on
-        // every entry change is what makes scrolling feel slow. Show them as
-        // binary previews instead.
-        detect::Kind::Image | detect::Kind::Video | detect::Kind::Pdf => {
-            binary_preview(path)
-        }
+        // Images are decoded off-thread; the decoded buffer is cached so
+        // revisiting a file never re-decodes. Video and PDFs show as binary.
+        detect::Kind::Image => match kitty::open_image(path) {
+            Ok(img) => Artifact {
+                kind: "image",
+                data: Vec::new(),
+                img: Some(img),
+            },
+            Err(_) => binary_preview(path),
+        },
+        detect::Kind::Video | detect::Kind::Pdf => binary_preview(path),
         detect::Kind::Archive => match media::archive_listing(path) {
             Ok(s) => Artifact {
                 kind: "archive",
                 data: s.lines().map(|l| Line::raw(sanitize(l))).collect(),
+                img: None,
             },
             Err(e) => err(format!("{e}")),
         },
@@ -264,13 +353,18 @@ fn generate(key: &Key) -> Artifact {
 
 fn binary_preview(path: &Path) -> Artifact {
     match hex::preview(path) {
-        Ok(lines) => Artifact { kind: "binary", data: lines },
+        Ok(lines) => Artifact {
+            kind: "binary",
+            data: lines,
+            img: None,
+        },
         Err(e) => Artifact {
             kind: "error",
             data: vec![Line::styled(
                 format!("{}: {e}", path.display()),
                 Style::new().fg(Color::Red),
             )],
+            img: None,
         },
     }
 }
