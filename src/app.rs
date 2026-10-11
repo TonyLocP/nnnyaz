@@ -15,7 +15,6 @@ use ratatui::{
     widgets::{List, ListItem, ListState, Paragraph},
     DefaultTerminal, Frame,
 };
-use ratatui_image::{picker::Picker, FilterType, Resize, StatefulImage};
 
 use crate::{
     preview::{Key as PreviewKey, Preview},
@@ -71,7 +70,6 @@ pub struct App {
     focus: Option<String>,
     page: usize,
     preview: Preview,
-    preview_seek: usize,
     list: List<'static>,
     list_dirty: bool,
     list_width: u16,
@@ -139,17 +137,12 @@ impl App {
             focus: None,
             page: 10,
             preview: Preview::new(),
-            preview_seek: 0,
             list: List::new(Vec::<ListItem>::new()),
             list_dirty: true,
             list_width: 0,
         };
         app.reload();
         Ok(app)
-    }
-
-    pub fn attach_picker(&mut self, picker: Picker) {
-        self.preview.attach_picker(picker);
     }
 
     fn current(&self) -> Option<&Entry> {
@@ -418,8 +411,14 @@ impl App {
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
-            KeyCode::Char('J') => self.preview_seek = self.preview_seek.saturating_add(5),
-            KeyCode::Char('K') => self.preview_seek = self.preview_seek.saturating_sub(5),
+            KeyCode::Char('J') => {
+                let s = self.preview.preview_seek().saturating_add(5);
+                self.preview.set_preview_seek(s);
+            }
+            KeyCode::Char('K') => {
+                let s = self.preview.preview_seek().saturating_sub(5);
+                self.preview.set_preview_seek(s);
+            }
             KeyCode::PageDown => self.move_by(self.page as isize),
             KeyCode::PageUp => self.move_by(-(self.page as isize)),
             KeyCode::Char('g') | KeyCode::Home => self.state.select(if self.entries.is_empty() {
@@ -611,8 +610,8 @@ impl App {
                 if self.filter.is_empty() { String::new() } else { format!(" | filter:{}", self.filter) },
             ),
         };
-        if self.preview_seek > 0 {
-            text.push_str(&format!(" | seek +{}", self.preview_seek));
+        if self.preview.preview_seek() > 0 {
+            text.push_str(&format!(" | seek +{}", self.preview.preview_seek()));
         }
         f.render_widget(Paragraph::new(text), rows[1]);
     }
@@ -630,7 +629,7 @@ impl App {
             .current()
             .map(|e| (e.path.clone(), e.modified, e.size));
         if self.preview.set_target(target.as_ref()) {
-            self.preview_seek = 0;
+            self.preview.set_preview_seek(0);
         }
         let meta = self.preview.artifact_meta();
         let name = self
@@ -639,13 +638,12 @@ impl App {
             .unwrap_or_else(|| "preview".into());
 
         let mut title = format!(" {name} ");
-        if let Some((kind, is_image, total)) = meta {
+        if let Some((kind, total)) = meta {
             title = format!(" {name} · {kind} ");
             let h = inner.height as usize;
-            if !is_image && total > h {
+            if total > h {
                 let max_seek = total.saturating_sub(h);
-                self.preview_seek = self.preview_seek.min(max_seek);
-                let seek = self.preview_seek;
+                let seek = self.preview.preview_seek().min(max_seek);
                 title.push_str(&format!("[{}–{} of {total}] ", seek + 1, (seek + h).min(total)));
             }
         }
@@ -655,48 +653,27 @@ impl App {
         f.render_widget(Paragraph::new(title), title_area);
 
         let h = inner.height as usize;
-        match meta {
-            Some((_, true, _)) => {
-                if let Some(state) = self.preview.image_state_mut() {
-                    f.render_stateful_widget(
-                        StatefulImage::default().resize(Resize::Fit(Some(FilterType::Triangle))),
-                        inner,
-                        state,
-                    );
-                }
-            }
-            Some((_, false, total)) => {
-                let seek = if total > h { self.preview_seek } else { 0 };
-                let lines = self.preview.lines_slice(seek, h).unwrap_or_default();
-                f.render_widget(Paragraph::new(lines), inner);
-            }
-            None => {
-                let msg = if self.preview.is_dead() {
-                    "preview worker died"
-                } else if self.preview.is_loading() {
-                    "loading…"
-                } else {
-                    "(no preview)"
-                };
-                f.render_widget(
-                    Paragraph::new(Line::styled(msg, Style::new().fg(Color::DarkGray))),
-                    inner,
-                );
-            }
-        }
+        let lines = self.preview.lines_slice(h).unwrap_or_default();
+        f.render_widget(Paragraph::new(lines), inner);
     }
 
     // ─────────────── main loop ───────────────
 
     pub fn run(&mut self, term: &mut DefaultTerminal) -> io::Result<()> {
+        let time = std::env::var_os("RNN_TIME").is_some();
         term.draw(|f| self.draw(f))?;
         loop {
             let mut dirty = false;
-            if event::poll(Duration::from_millis(50))? {
+            let mut key_ms = None;
+            if event::poll(Duration::from_millis(10))? {
                 match event::read()? {
                     Event::Key(k) if k.kind == KeyEventKind::Press => {
+                        let t = std::time::Instant::now();
                         if self.handle_key(k, term)? {
                             return Ok(());
+                        }
+                        if time {
+                            key_ms = Some(t.elapsed());
                         }
                         dirty = true;
                     }
@@ -709,7 +686,22 @@ impl App {
                 dirty = true;
             }
             if dirty {
-                term.draw(|f| self.draw(f))?;
+                let t = std::time::Instant::now();
+                let mut closure = Duration::ZERO;
+                term.draw(|f| {
+                    let tc = std::time::Instant::now();
+                    self.draw(f);
+                    closure = tc.elapsed();
+                })?;
+                if time {
+                    eprintln!(
+                        "rnn-t: key={} draw={:?} render={:?} flush={:?}",
+                        key_ms.map(|d| format!("{d:?}")).unwrap_or_default(),
+                        t.elapsed(),
+                        closure,
+                        t.elapsed().saturating_sub(closure)
+                    );
+                }
             }
         }
     }

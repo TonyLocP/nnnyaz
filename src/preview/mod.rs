@@ -6,37 +6,26 @@ pub mod text;
 use std::{
     collections::{HashMap, VecDeque},
     fs,
-    io,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
     thread,
     time::SystemTime,
 };
 
-use image::{DynamicImage, GenericImageView};
 use ratatui::{
     style::{Color, Style},
     text::Line,
 };
-use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 
 use crate::util::{human, sanitize};
 
-/// Everything a preview is keyed by: path, mtime and size. The pane size is
-/// deliberately not part of the key - artifacts are size independent and get
-/// sliced/scaled at render time.
+/// Everything a preview is keyed by: path, mtime and size.
 pub type Key = (PathBuf, Option<SystemTime>, u64);
-
-#[derive(Clone)]
-pub enum Data {
-    Lines(Vec<Line<'static>>),
-    Image(DynamicImage),
-}
 
 #[derive(Clone)]
 pub struct Artifact {
     pub kind: &'static str,
-    pub data: Data,
+    pub data: Vec<Line<'static>>,
 }
 
 struct Request {
@@ -53,14 +42,11 @@ pub struct Preview {
     order: VecDeque<Key>,
     changed: bool,
     dead: bool,
-    picker: Option<Picker>,
-    image_state: Option<StatefulProtocol>,
-    image_key: Option<Key>,
+    preview_seek: usize,
 }
 
 const CACHE_MAX: usize = 64;
 const DIR_LIST_MAX: usize = 5000;
-const IMAGE_MAX: (u32, u32) = (1280, 720);
 
 impl Preview {
     pub fn new() -> Self {
@@ -79,14 +65,8 @@ impl Preview {
             order: VecDeque::new(),
             changed: false,
             dead: false,
-            picker: None,
-            image_state: None,
-            image_key: None,
+            preview_seek: 0,
         }
-    }
-
-    pub fn attach_picker(&mut self, picker: Picker) {
-        self.picker = Some(picker);
     }
 
     pub fn take_changed(&mut self) -> bool {
@@ -97,23 +77,22 @@ impl Preview {
         self.pending.is_some()
     }
 
-    /// `(kind, is_image, line_count)` of whatever is currently displayed.
-    pub fn artifact_meta(&self) -> Option<(&'static str, bool, usize)> {
-        self.active.as_ref().map(|(_, a)| match &a.data {
-            Data::Lines(l) => (a.kind, false, l.len()),
-            Data::Image(_) => (a.kind, true, 0),
-        })
+    pub fn preview_seek(&self) -> usize {
+        self.preview_seek
     }
 
-    pub fn lines_slice(&self, seek: usize, rows: usize) -> Option<Vec<Line<'static>>> {
-        match &self.active.as_ref()?.1.data {
-            Data::Lines(l) => Some(l.iter().skip(seek).take(rows).cloned().collect()),
-            Data::Image(_) => None,
-        }
+    pub fn set_preview_seek(&mut self, s: usize) {
+        self.preview_seek = s;
     }
 
-    pub fn image_state_mut(&mut self) -> Option<&mut StatefulProtocol> {
-        self.image_state.as_mut()
+    /// `(kind, line_count)` of whatever is currently displayed.
+    pub fn artifact_meta(&self) -> Option<(&'static str, usize)> {
+        self.active.as_ref().map(|(_, a)| (a.kind, a.data.len()))
+    }
+
+    pub fn lines_slice(&self, rows: usize) -> Option<Vec<Line<'static>>> {
+        let (_, a) = self.active.as_ref()?;
+        Some(a.data.iter().skip(self.preview_seek).take(rows).cloned().collect())
     }
 
     /// Drain finished results from the worker without changing the target.
@@ -142,7 +121,8 @@ impl Preview {
                     self.activate(k.clone());
                 } else if !self.dead && self.pending.as_ref() != Some(k) {
                     self.pending = Some(k.clone());
-                    if self.tx.send(Request { key: k.clone() }).is_err() {
+                    let req = Request { key: k.clone() };
+                    if self.tx.send(req).is_err() {
                         self.dead = true;
                         self.pending = None;
                     }
@@ -173,10 +153,6 @@ impl Preview {
         }
     }
 
-    pub fn is_dead(&self) -> bool {
-        self.dead
-    }
-
     fn activate(&mut self, k: Key) {
         if self
             .active
@@ -190,37 +166,11 @@ impl Preview {
             Some(a) => a.clone(),
             None => return,
         };
-        if matches!(art.data, Data::Image(_)) {
-            if self.image_key.as_ref() != Some(&k) {
-                if let Some(picker) = self.picker.clone() {
-                    if let Data::Image(img) = &art.data {
-                        self.image_state = Some(picker.new_resize_protocol(img.clone()));
-                        self.image_key = Some(k.clone());
-                    }
-                }
-            }
-        } else {
-            self.image_state = None;
-            self.image_key = None;
-        }
         self.active = Some((k, art));
         self.changed = true;
     }
 
     fn cache_put(&mut self, k: Key, art: Artifact) {
-        if matches!(art.data, Data::Image(_)) {
-            // Keep at most one decoded image around - they are the only
-            // artifact type with a meaningful memory footprint.
-            let stale: Vec<Key> = self
-                .cache
-                .iter()
-                .filter(|(kk, a)| matches!(a.data, Data::Image(_)) && **kk != k)
-                .map(|(kk, _)| kk.clone())
-                .collect();
-            for sk in stale {
-                self.cache_remove(&sk);
-            }
-        }
         if self.cache.insert(k.clone(), art).is_some() {
             if let Some(p) = self.order.iter().position(|x| *x == k) {
                 self.order.remove(p);
@@ -251,13 +201,6 @@ impl Preview {
             }
         }
     }
-
-    fn cache_remove(&mut self, k: &Key) {
-        self.cache.remove(k);
-        if let Some(p) = self.order.iter().position(|x| x == k) {
-            self.order.remove(p);
-        }
-    }
 }
 
 fn worker(rx: Receiver<Request>, tx: Sender<(Key, Artifact)>) {
@@ -277,99 +220,58 @@ fn generate(key: &Key) -> Artifact {
     let path = &key.0;
     let err = |msg: String| Artifact {
         kind: "error",
-        data: Data::Lines(vec![Line::styled(msg, Style::new().fg(Color::Red))]),
+        data: vec![Line::styled(msg, Style::new().fg(Color::Red))],
     };
 
     if path.is_dir() {
         return Artifact {
             kind: "dir",
-            data: Data::Lines(dir_listing(path)),
+            data: dir_listing(path),
         };
     }
 
     match detect::detect(path) {
         detect::Kind::Text => match text::preview(path) {
-            Ok(lines) => Artifact {
-                kind: "text",
-                data: Data::Lines(lines),
-            },
+            Ok(lines) => Artifact { kind: "text", data: lines },
             Err(e) => err(format!("{}: {e}", path.display())),
         },
         detect::Kind::Json => match media::json_pretty(path) {
             Ok(s) => Artifact {
                 kind: "json",
-                data: Data::Lines(text::highlight(&s, "json", "")),
+                data: text::highlight(&s, "json", ""),
             },
             Err(_) => match text::preview(path) {
-                Ok(lines) => Artifact {
-                    kind: "json",
-                    data: Data::Lines(lines),
-                },
+                Ok(lines) => Artifact { kind: "json", data: lines },
                 Err(e) => err(format!("{}: {e}", path.display())),
             },
         },
-        detect::Kind::Image => match open_image(path) {
-            Ok(img) => Artifact {
-                kind: "image",
-                data: Data::Image(img),
-            },
-            Err(e) => err(format!("image: {e}")),
-        },
-        detect::Kind::Video => match media::video_frame(path) {
-            Ok(img) => Artifact {
-                kind: "video",
-                data: Data::Image(downscale(img)),
-            },
-            Err(e) => err(format!("{e}")),
-        },
-        detect::Kind::Pdf => match media::pdf_page(path) {
-            Ok(img) => Artifact {
-                kind: "pdf",
-                data: Data::Image(img),
-            },
-            Err(e) => err(format!("{e}")),
-        },
+        // Images, video and PDFs are deliberately not decoded: decoding on
+        // every entry change is what makes scrolling feel slow. Show them as
+        // binary previews instead.
+        detect::Kind::Image | detect::Kind::Video | detect::Kind::Pdf => {
+            binary_preview(path)
+        }
         detect::Kind::Archive => match media::archive_listing(path) {
             Ok(s) => Artifact {
                 kind: "archive",
-                data: Data::Lines(
-                    s.lines().map(|l| Line::raw(sanitize(l))).collect(),
-                ),
+                data: s.lines().map(|l| Line::raw(sanitize(l))).collect(),
             },
             Err(e) => err(format!("{e}")),
         },
-        detect::Kind::Binary => match hex::preview(path) {
-            Ok(lines) => Artifact {
-                kind: "binary",
-                data: Data::Lines(lines),
-            },
-            Err(e) => err(format!("{}: {e}", path.display())),
-        },
+        detect::Kind::Binary => binary_preview(path),
     }
 }
 
-fn open_image(path: &Path) -> io::Result<DynamicImage> {
-    match image::open(path) {
-        Ok(img) => Ok(downscale(img)),
-        Err(decode_err) => match media::magick_image(path) {
-            Ok(img) => Ok(downscale(img)),
-            Err(magick_err) => Err(io::Error::other(format!(
-                "decode failed ({decode_err}); magick: {magick_err}"
-            ))),
+fn binary_preview(path: &Path) -> Artifact {
+    match hex::preview(path) {
+        Ok(lines) => Artifact { kind: "binary", data: lines },
+        Err(e) => Artifact {
+            kind: "error",
+            data: vec![Line::styled(
+                format!("{}: {e}", path.display()),
+                Style::new().fg(Color::Red),
+            )],
         },
-    }
-}
-
-fn downscale(img: DynamicImage) -> DynamicImage {
-    let (w, h) = GenericImageView::dimensions(&img);
-    if w > IMAGE_MAX.0 || h > IMAGE_MAX.1 {
-        img.resize(
-            IMAGE_MAX.0,
-            IMAGE_MAX.1,
-            image::imageops::FilterType::Triangle,
-        )
-    } else {
-        img
     }
 }
 

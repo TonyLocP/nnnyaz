@@ -7,10 +7,8 @@ description = "A small nnn-style terminal file manager with a native preview pan
 [dependencies]
 ratatui = "0.29"
 rustix = { version = "0.38", features = ["event"] }
-ratatui-image = { version = "9.0.0", default-features = false, features = ["crossterm", "image-defaults"] }
 syntect = "5.3"
 two-face = "0.5"
-image = "0.25"
 infer = "0.22"
 
 [profile.release]
