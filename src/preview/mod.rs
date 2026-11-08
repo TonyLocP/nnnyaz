@@ -4,6 +4,7 @@ pub mod kitty;
 pub mod media;
 pub mod shm;
 pub mod text;
+pub mod yazi;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -55,6 +56,7 @@ pub struct Preview {
     changed: bool,
     dead: bool,
     preview_seek: usize,
+    zoom_idx: usize,
     kitty: bool,
     font: (u16, u16),
     is_tmux: bool,
@@ -65,6 +67,8 @@ pub struct Preview {
 
 const CACHE_MAX: usize = 16;
 const DIR_LIST_MAX: usize = 5000;
+/// Zoom percentages: fit, 1.5x, 2x, 3x, 4x.
+const ZOOM_LEVELS: [u32; 5] = [100, 150, 200, 300, 400];
 
 impl Preview {
     pub fn new() -> Self {
@@ -84,6 +88,7 @@ impl Preview {
             changed: false,
             dead: false,
             preview_seek: 0,
+            zoom_idx: 0,
             kitty: false,
             font: (8, 16),
             is_tmux: false,
@@ -148,6 +153,52 @@ impl Preview {
         self.preview_seek = s;
     }
 
+    /// Current zoom factor, when an image is actually being displayed.
+    pub fn zoom(&self) -> Option<f32> {
+        self.image_state
+            .as_ref()
+            .map(|_| ZOOM_LEVELS[self.zoom_idx] as f32 / 100.0)
+    }
+
+    /// Zoom in one step. Returns the new factor, or `None` when the active
+    /// preview is not an image.
+    pub fn zoom_in(&mut self) -> Option<f32> {
+        self.zoom()?;
+        let idx = (self.zoom_idx + 1).min(ZOOM_LEVELS.len() - 1);
+        self.apply_zoom(idx)
+    }
+
+    /// Zoom out one step. Returns the new factor, or `None` when the active
+    /// preview is not an image.
+    pub fn zoom_out(&mut self) -> Option<f32> {
+        self.zoom()?;
+        let idx = self.zoom_idx.saturating_sub(1);
+        self.apply_zoom(idx)
+    }
+
+    /// Reset back to fit. Returns false when the active preview is not an
+    /// image.
+    pub fn zoom_reset(&mut self) -> bool {
+        if self.zoom().is_none() {
+            return false;
+        }
+        self.zoom_idx = 0;
+        if let Some(ImgState::Kitty(k)) = &mut self.image_state {
+            k.set_zoom(ZOOM_LEVELS[0]);
+        }
+        self.changed = true;
+        true
+    }
+
+    fn apply_zoom(&mut self, idx: usize) -> Option<f32> {
+        self.zoom_idx = idx;
+        if let Some(ImgState::Kitty(k)) = &mut self.image_state {
+            k.set_zoom(ZOOM_LEVELS[self.zoom_idx]);
+        }
+        self.changed = true;
+        Some(ZOOM_LEVELS[self.zoom_idx] as f32 / 100.0)
+    }
+
     /// `(kind, line_count)` of whatever is currently displayed.
     pub fn artifact_meta(&self) -> Option<(&'static str, usize)> {
         self.active.as_ref().map(|(_, a)| (a.kind, a.data.len()))
@@ -155,7 +206,14 @@ impl Preview {
 
     pub fn lines_slice(&self, rows: usize) -> Option<Vec<Line<'static>>> {
         let (_, a) = self.active.as_ref()?;
-        Some(a.data.iter().skip(self.preview_seek).take(rows).cloned().collect())
+        Some(
+            a.data
+                .iter()
+                .skip(self.preview_seek)
+                .take(rows)
+                .cloned()
+                .collect(),
+        )
     }
 
     /// Drain finished results from the worker without changing the target.
@@ -187,17 +245,16 @@ impl Preview {
         self.drain();
 
         if let Some(k) = key {
-            let active_is_target = self
-                .active
-                .as_ref()
-                .map(|(ak, _)| ak == k)
-                .unwrap_or(false);
+            let active_is_target = self.active.as_ref().map(|(ak, _)| ak == k).unwrap_or(false);
             if !active_is_target {
                 if self.cache.contains_key(k) {
                     self.activate(k.clone());
                 } else if !self.dead && self.pending.as_ref() != Some(k) {
                     self.pending = Some(k.clone());
-                    let req = Request { key: k.clone(), preload: false };
+                    let req = Request {
+                        key: k.clone(),
+                        preload: false,
+                    };
                     if self.tx.send(req).is_err() {
                         self.dead = true;
                         self.pending = None;
@@ -248,13 +305,15 @@ impl Preview {
                     kitty::stream_delete(old.id(), self.is_tmux);
                 }
                 if let Some(img) = &art.img {
-                    self.image_state = Some(ImgState::Kitty(KittyState::new(
+                    let mut st = KittyState::new(
                         kitty::next_id(),
                         self.font,
                         self.is_tmux,
                         self.shm,
                         img.clone(),
-                    )));
+                    );
+                    st.set_zoom(ZOOM_LEVELS[self.zoom_idx]);
+                    self.image_state = Some(ImgState::Kitty(st));
                     self.last_streamed = 0;
                 }
             } else {
@@ -342,7 +401,11 @@ fn generate(key: &Key) -> Artifact {
 
     match detect::detect(path) {
         detect::Kind::Text => match text::preview(path) {
-            Ok(lines) => Artifact { kind: "text", data: lines, img: None },
+            Ok(lines) => Artifact {
+                kind: "text",
+                data: lines,
+                img: None,
+            },
             Err(e) => err(format!("{}: {e}", path.display())),
         },
         detect::Kind::Json => match media::json_pretty(path) {
@@ -352,7 +415,11 @@ fn generate(key: &Key) -> Artifact {
                 img: None,
             },
             Err(_) => match text::preview(path) {
-                Ok(lines) => Artifact { kind: "json", data: lines, img: None },
+                Ok(lines) => Artifact {
+                    kind: "json",
+                    data: lines,
+                    img: None,
+                },
                 Err(e) => err(format!("{}: {e}", path.display())),
             },
         },
@@ -442,13 +509,11 @@ fn dir_listing(path: &Path) -> Vec<Line<'static>> {
                 sanitize(&n)
             };
             let pad = name_w.saturating_sub(name.chars().count()) + 1;
-            let size = if d {
-                String::new()
-            } else {
-                human(sz)
-            };
+            let size = if d { String::new() } else { human(sz) };
             let style = if d {
-                Style::new().fg(Color::Blue).add_modifier(ratatui::style::Modifier::BOLD)
+                Style::new()
+                    .fg(Color::Blue)
+                    .add_modifier(ratatui::style::Modifier::BOLD)
             } else {
                 Style::new()
             };

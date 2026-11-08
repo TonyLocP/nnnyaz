@@ -22,15 +22,16 @@ use std::{
 };
 
 use image::{
-    DynamicImage, ImageReader,
     imageops::{self, FilterType},
-    RgbaImage,
+    DynamicImage, ImageReader, RgbaImage,
 };
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
 };
+
+use super::yazi;
 
 /// Pixel size of a single terminal cell, used to size the transmit canvas.
 pub type FontSize = (u16, u16);
@@ -54,10 +55,41 @@ pub fn next_id() -> u32 {
 /// Mirrors yazi's `precache` (`yazi-adapter/src/image.rs`): the first view
 /// decodes the (possibly huge) source and writes a small re-encoded copy into a
 /// temp cache dir, so later views — even after restarting rnn — skip the source
-/// decode entirely. `mtime`/`size` are part of the key, so edited files are
-/// re-decoded.
+/// decode entirely. When a yazi cache is available that cache is used
+/// exclusively; otherwise rnn keeps its own. `mtime`/`size` are part of rnn's
+/// fallback key, so edited files are re-decoded.
 pub fn load_image(path: &Path, mtime: Option<SystemTime>, size: u64) -> io::Result<DynamicImage> {
+    if let Some(dir) = yazi::cache_dir() {
+        return load_shared(&dir, path);
+    }
     load_from(&cache_dir(), path, mtime, size)
+}
+
+/// Read or fill a preview in yazi's cache. A miss is decoded from the source
+/// and written back under yazi's key; rnn's own cache is never touched.
+fn load_shared(dir: &Path, path: &Path) -> io::Result<DynamicImage> {
+    let target = yazi::target(dir, path);
+    if let Some(target) = &target {
+        if let Some(img) = decode(target) {
+            if std::env::var_os("RNN_DEBUG").is_some() {
+                eprintln!("cache: yazi hit {}", target.display());
+            }
+            return Ok(img);
+        }
+    }
+
+    let img = decode_source(path)?;
+    let capped = cap_size(&img, IMAGE_MAX);
+    if let Some(target) = &target {
+        let written = encode(&capped).and_then(|(_, buf)| yazi::write_entry(target, &buf));
+        if std::env::var_os("RNN_DEBUG").is_some() {
+            match &written {
+                Ok(()) => eprintln!("cache: yazi store {}", target.display()),
+                Err(err) => eprintln!("cache: yazi store failed for {}: {err}", target.display()),
+            }
+        }
+    }
+    Ok(capped)
 }
 
 /// On-disk preview cache root. `RNN_CACHE_DIR` overrides it (tests, config);
@@ -86,6 +118,13 @@ fn decode(path: &Path) -> Option<DynamicImage> {
         .ok()
 }
 
+fn decode_source(path: &Path) -> io::Result<DynamicImage> {
+    ImageReader::open(path)?
+        .with_guessed_format()?
+        .decode()
+        .map_err(io::Error::other)
+}
+
 fn load_from(
     dir: &Path,
     path: &Path,
@@ -100,23 +139,17 @@ fn load_from(
         return Ok(img);
     }
 
-    let img = ImageReader::open(path)?
-        .with_guessed_format()?
-        .decode()
-        .map_err(io::Error::other)?;
+    let img = decode_source(path)?;
     let capped = cap_size(&img, IMAGE_MAX);
     let _ = write_cache(dir, &stem, &capped);
     Ok(capped)
 }
 
-/// Re-encode `img` into the cache: PNG when it has alpha, otherwise a
-/// quality-90 JPEG (the same choice yazi makes). Written to a unique temp name
-/// and renamed, so a reader never sees a half-written file.
-fn write_cache(dir: &Path, stem: &str, img: &DynamicImage) -> io::Result<()> {
+/// Re-encode `img` as PNG when it has alpha, otherwise a quality-90 JPEG (the
+/// same choice yazi makes).
+fn encode(img: &DynamicImage) -> io::Result<(&'static str, Vec<u8>)> {
     use image::codecs::{jpeg::JpegEncoder, png::PngEncoder};
 
-    static SEQ: AtomicU32 = AtomicU32::new(0);
-    fs::create_dir_all(dir)?;
     let alpha = img.color().has_alpha();
     let ext = if alpha { "png" } else { "jpg" };
 
@@ -128,6 +161,16 @@ fn write_cache(dir: &Path, stem: &str, img: &DynamicImage) -> io::Result<()> {
         img.write_with_encoder(JpegEncoder::new_with_quality(&mut buf, 90))
             .map_err(io::Error::other)?;
     }
+    Ok((ext, buf))
+}
+
+/// Write a preview into rnn's fallback cache. The encoded bytes go to a unique
+/// temp name and are renamed, so a reader never sees a half-written file.
+fn write_cache(dir: &Path, stem: &str, img: &DynamicImage) -> io::Result<()> {
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+
+    fs::create_dir_all(dir)?;
+    let (ext, buf) = encode(img)?;
 
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!("{stem}.{}.{n}.tmp", std::process::id()));
@@ -166,36 +209,95 @@ fn prune(dir: &Path) {
 /// Scale down to fit within `max`, never upscaling.
 pub fn cap_size(img: &DynamicImage, max: (u32, u32)) -> DynamicImage {
     let (iw, ih) = (img.width(), img.height());
-    let scale = (max.0 as f32 / iw as f32).min(max.1 as f32 / ih as f32).min(1.0);
+    let scale = (max.0 as f32 / iw as f32)
+        .min(max.1 as f32 / ih as f32)
+        .min(1.0);
     if scale >= 1.0 {
         return img.clone();
     }
-    let (nw, nh) = ((iw as f32 * scale).max(1.0) as u32, (ih as f32 * scale).max(1.0) as u32);
+    let (nw, nh) = (
+        (iw as f32 * scale).max(1.0) as u32,
+        (ih as f32 * scale).max(1.0) as u32,
+    );
     img.resize(nw, nh, FilterType::Triangle)
 }
 
 /// Pixel dimensions of an area of `cells` cells, capped at [`IMAGE_MAX`].
 pub fn cell_pixels(font: FontSize, cells: (u16, u16)) -> (u32, u32) {
-    let w = u32::from(cells.0).saturating_mul(u32::from(font.0)).min(IMAGE_MAX.0);
-    let h = u32::from(cells.1).saturating_mul(u32::from(font.1)).min(IMAGE_MAX.1);
+    let w = u32::from(cells.0)
+        .saturating_mul(u32::from(font.0))
+        .min(IMAGE_MAX.0);
+    let h = u32::from(cells.1)
+        .saturating_mul(u32::from(font.1))
+        .min(IMAGE_MAX.1);
     (w, h)
 }
 
-/// Fit `img` (aspect preserved) into `cells` worth of pixels and pad the
-/// remainder with transparency so the transmitted canvas is exactly cell-sized.
-pub fn fit_to_cells(img: &DynamicImage, font: FontSize, cells: (u16, u16)) -> DynamicImage {
+/// Fit `img` (aspect preserved) into `cells` worth of pixels, scaled by
+/// `zoom`, and pad/crop to a transparent canvas that is exactly cell-sized.
+/// Zoom values below 1 are treated as fit; values above 1 enlarge the image
+/// around the pane centre, cropping the overflow.
+pub fn fit_to_cells_zoom(
+    img: &DynamicImage,
+    font: FontSize,
+    cells: (u16, u16),
+    zoom: f32,
+) -> DynamicImage {
     let (cw, ch) = cell_pixels(font, cells);
     if cw == 0 || ch == 0 {
         return img.clone();
     }
-    let fitted = cap_size(img, (cw, ch));
-    let (fw, fh) = (fitted.width(), fitted.height());
-    if fw == cw && fh == ch {
-        return fitted;
-    }
+    let (iw, ih) = (img.width().max(1), img.height().max(1));
+    let base = (cw as f32 / iw as f32).min(ch as f32 / ih as f32).min(1.0);
+    let scale = base * zoom.max(1.0);
+    let nw = ((iw as f32 * scale).round() as u32).max(1);
+    let nh = ((ih as f32 * scale).round() as u32).max(1);
     let mut canvas = RgbaImage::new(cw, ch);
-    imageops::overlay(&mut canvas, &fitted, i64::from((cw - fw) / 2), i64::from((ch - fh) / 2));
+
+    if nw <= cw && nh <= ch {
+        let fitted = if nw == iw && nh == ih {
+            img.clone()
+        } else {
+            img.resize_exact(nw, nh, FilterType::Triangle)
+        };
+        if nw == cw && nh == ch {
+            return fitted;
+        }
+        imageops::overlay(
+            &mut canvas,
+            &fitted,
+            i64::from((cw - nw) / 2),
+            i64::from((ch - nh) / 2),
+        );
+        return DynamicImage::ImageRgba8(canvas);
+    }
+
+    // The scaled image overflows the pane: crop the visible source region
+    // first so a high zoom never allocates a huge intermediate image.
+    let vw = nw.min(cw);
+    let vh = nh.min(ch);
+    let dx = nw.saturating_sub(cw) / 2;
+    let dy = nh.saturating_sub(ch) / 2;
+    let sx = ((dx as f32 / scale).round() as u32).min(iw - 1);
+    let sy = ((dy as f32 / scale).round() as u32).min(ih - 1);
+    let sw = ((vw as f32 / scale).round() as u32).max(1).min(iw - sx);
+    let sh = ((vh as f32 / scale).round() as u32).max(1).min(ih - sy);
+    let cropped = img.crop_imm(sx, sy, sw, sh);
+    let fitted = cropped.resize_exact(vw, vh, FilterType::Triangle);
+    imageops::overlay(
+        &mut canvas,
+        &fitted,
+        i64::from((cw - vw) / 2),
+        i64::from((ch - vh) / 2),
+    );
     DynamicImage::ImageRgba8(canvas)
+}
+
+/// Fit `img` (aspect preserved) into `cells` worth of pixels and pad the
+/// remainder with transparency so the transmitted canvas is exactly cell-sized.
+#[cfg(test)]
+pub fn fit_to_cells(img: &DynamicImage, font: FontSize, cells: (u16, u16)) -> DynamicImage {
+    fit_to_cells_zoom(img, font, cells, 1.0)
 }
 
 /// Encode an image as kitty APC chunks. Each returned string is a complete,
@@ -310,7 +412,8 @@ pub struct KittyState {
     is_tmux: bool,
     shm: bool,
     img: Arc<DynamicImage>,
-    cells: Option<(u16, u16)>,
+    cells: Option<((u16, u16), u32)>,
+    zoom: u32,
     transmit_gen: Arc<AtomicU64>,
     transmitted_gen: Arc<AtomicU64>,
 }
@@ -324,6 +427,7 @@ impl KittyState {
             shm,
             img: Arc::new(img),
             cells: None,
+            zoom: 100,
             transmit_gen: Arc::new(AtomicU64::new(0)),
             transmitted_gen: Arc::new(AtomicU64::new(0)),
         }
@@ -331,6 +435,16 @@ impl KittyState {
 
     pub fn id(&self) -> u32 {
         self.id
+    }
+
+    /// Set the zoom percentage (100 = fit). Changing it forces the next
+    /// render to retransmit a rescaled image.
+    pub fn set_zoom(&mut self, percent: u32) {
+        let percent = percent.max(100);
+        if self.zoom != percent {
+            self.zoom = percent;
+            self.cells = None;
+        }
     }
 
     /// Highest transmit generation that has finished streaming. When this
@@ -349,12 +463,12 @@ impl KittyState {
             area.width.min(DIACRITICS.len() as u16),
             area.height.min(DIACRITICS.len() as u16),
         );
-        if self.cells != Some(dims) {
-            self.cells = Some(dims);
+        if self.cells != Some((dims, self.zoom)) {
+            self.cells = Some((dims, self.zoom));
             let gen = self.transmit_gen.load(Ordering::SeqCst) + 1;
             self.transmit_gen.store(gen, Ordering::SeqCst);
             if std::env::var_os("RNN_DEBUG").is_some() {
-                eprintln!("kitty: spawn gen={gen} dims={dims:?}");
+                eprintln!("kitty: spawn gen={gen} dims={dims:?} zoom={}", self.zoom);
             }
             stream_delete(self.id, self.is_tmux);
             let img = Arc::clone(&self.img);
@@ -363,10 +477,11 @@ impl KittyState {
             let is_tmux = self.is_tmux;
             let shm = self.shm;
             let font = self.font;
+            let zoom = self.zoom as f32 / 100.0;
             let _ = thread::Builder::new()
                 .name("kitty-stream".into())
                 .spawn(move || {
-                    let fitted = fit_to_cells(&img, font, dims);
+                    let fitted = fit_to_cells_zoom(&img, font, dims, zoom);
                     if shm {
                         if let Some(seq) = encode_shm(&fitted, id, is_tmux) {
                             stream_seq(&seq);
@@ -721,7 +836,6 @@ fn diacritic(i: usize) -> char {
     *DIACRITICS.get(i).unwrap_or(&DIACRITICS[0])
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,7 +845,11 @@ mod tests {
         let mut img = RgbaImage::from_pixel(w, h, Rgba([10, 20, 30, 255]));
         for y in 0..h {
             for x in 0..w {
-                img.put_pixel(x, y, Rgba([(x % 251) as u8, (y % 251) as u8, (x + y) as u8, 255]));
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgba([(x % 251) as u8, (y % 251) as u8, (x + y) as u8, 255]),
+                );
             }
         }
         DynamicImage::ImageRgba8(img)
@@ -750,7 +868,11 @@ mod tests {
         let img = make_img(300, 200); // 240000 raw bytes => many chunks
         let id = next_id();
         for c in encode_chunks(&img, id, true) {
-            assert!(c.starts_with("\x1bPtmux;\x1b\x1b_G"), "bad prefix: {:?}", &c[..c.len().min(24)]);
+            assert!(
+                c.starts_with("\x1bPtmux;\x1b\x1b_G"),
+                "bad prefix: {:?}",
+                &c[..c.len().min(24)]
+            );
             assert!(c.ends_with("\x1b\\"));
             assert!(c.contains("m=1;") || c.contains("m=0;"));
         }
@@ -763,7 +885,10 @@ mod tests {
         let first = &encode_chunks(&img, id, false)[0];
         assert!(first.starts_with("\x1b_Gq=2,"));
         assert!(first.contains("i=7,"), "{first}");
-        assert!(first.contains("a=T,C=1,U=1,f=32,t=d,s=64,v=64,m="), "{first}");
+        assert!(
+            first.contains("a=T,C=1,U=1,f=32,t=d,s=64,v=64,m="),
+            "{first}"
+        );
         assert!(!first.contains("c=") && !first.contains("r="), "{first}");
     }
 
@@ -772,10 +897,17 @@ mod tests {
     fn shm_transmit_carries_name_only() {
         let img = make_img(40, 24);
         let seq = encode_shm(&img, 7, false).expect("shm object");
-        assert!(seq.starts_with("\x1b_Gq=2,i=7,a=T,C=1,U=1,f=32,t=s,s=40,v=24,S=3840;"), "{seq}");
+        assert!(
+            seq.starts_with("\x1b_Gq=2,i=7,a=T,C=1,U=1,f=32,t=s,s=40,v=24,S=3840;"),
+            "{seq}"
+        );
         assert!(seq.ends_with("\x1b\\"));
         // payload is base64 of a short shm name, not the pixel data
-        let payload = seq.rsplit(';').next().unwrap().trim_end_matches(['\u{1b}', '\\']);
+        let payload = seq
+            .rsplit(';')
+            .next()
+            .unwrap()
+            .trim_end_matches(['\u{1b}', '\\']);
         let name = base64_simd::STANDARD.decode_to_vec(payload).unwrap();
         let name = String::from_utf8(name).unwrap();
         assert!(name.starts_with("/rnn-"), "{name}");
@@ -808,7 +940,7 @@ mod tests {
         let mut st = KittyState::new(id, (8, 16), false, false, make_img(2, 2));
         st.transmit_gen.store(1, Ordering::SeqCst);
         st.transmitted_gen.store(1, Ordering::SeqCst);
-        st.cells = Some((3, 2));
+        st.cells = Some(((3, 2), 100));
         let mut buf = Buffer::empty(Rect::new(0, 0, 5, 4));
         st.render(Rect::new(1, 1, 3, 2), &mut buf);
 
@@ -857,6 +989,25 @@ mod tests {
     }
 
     #[test]
+    fn zoom_scales_and_crops_around_centre() {
+        let img = make_img(64, 32);
+        let fitted = fit_to_cells_zoom(&img, (16, 40), (10, 5), 2.0);
+        assert_eq!((fitted.width(), fitted.height()), (160, 200));
+        let px = fitted.to_rgba8();
+        assert_eq!(px.get_pixel(80, 100)[3], 255);
+        assert_eq!(px.get_pixel(0, 0)[3], 0);
+    }
+
+    #[test]
+    fn zoom_crops_overflow_without_panicking() {
+        let img = make_img(64, 32);
+        let fitted = fit_to_cells_zoom(&img, (16, 40), (10, 5), 4.0);
+        assert_eq!((fitted.width(), fitted.height()), (160, 200));
+        let px = fitted.to_rgba8();
+        assert_eq!(px.get_pixel(80, 100)[3], 255);
+    }
+
+    #[test]
     fn delete_seq_shape() {
         assert_eq!(delete_seq(9, false), "\x1b_Gd=1,q=2,i=9\x1b\\");
         assert!(delete_seq(9, true).starts_with("\x1bPtmux;\x1b\x1b_Gd=1,q=2,i=9"));
@@ -866,11 +1017,23 @@ mod tests {
     #[test]
     fn cache_stem_is_stable_and_keyed() {
         let p = |s: &'static str| Path::new(s);
-        assert_eq!(cache_stem(p("/a/b.png"), None, 10), cache_stem(p("/a/b.png"), None, 10));
-        assert_ne!(cache_stem(p("/a/b.png"), None, 10), cache_stem(p("/a/b.png"), None, 11));
-        assert_ne!(cache_stem(p("/a/b.png"), None, 10), cache_stem(p("/a/c.png"), None, 10));
+        assert_eq!(
+            cache_stem(p("/a/b.png"), None, 10),
+            cache_stem(p("/a/b.png"), None, 10)
+        );
+        assert_ne!(
+            cache_stem(p("/a/b.png"), None, 10),
+            cache_stem(p("/a/b.png"), None, 11)
+        );
+        assert_ne!(
+            cache_stem(p("/a/b.png"), None, 10),
+            cache_stem(p("/a/c.png"), None, 10)
+        );
         let t = Some(SystemTime::UNIX_EPOCH);
-        assert_ne!(cache_stem(p("/a/b.png"), None, 10), cache_stem(p("/a/b.png"), t, 10));
+        assert_ne!(
+            cache_stem(p("/a/b.png"), None, 10),
+            cache_stem(p("/a/b.png"), t, 10)
+        );
     }
 
     #[test]
@@ -889,6 +1052,36 @@ mod tests {
 
         // Second load must hit the cached file (same dimensions, no re-decode).
         let b = load_from(&cache, &src, None, 123).unwrap();
+        assert_eq!((b.width(), b.height()), (80, 40));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn shared_cache_writes_yazi_entry() {
+        let base = std::env::temp_dir().join(format!("rnn-yazi-cache-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let cache = base.join("yazi");
+        let src = base.join("src.png");
+        fs::create_dir_all(&cache).unwrap();
+        make_img(80, 40).save(&src).unwrap();
+
+        let a = load_shared(&cache, &src).unwrap();
+        assert_eq!((a.width(), a.height()), (80, 40));
+
+        let entry = yazi::target(&cache, &src).unwrap();
+        let name = entry.file_name().unwrap().to_str().unwrap();
+        assert_eq!(name.len(), 26, "yazi keys are 26 base32 chars");
+        assert!(name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+        assert!(
+            entry.is_file(),
+            "expected an extensionless yazi cache entry"
+        );
+        assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+
+        let b = decode(&entry).unwrap();
         assert_eq!((b.width(), b.height()), (80, 40));
 
         let _ = fs::remove_dir_all(&base);
