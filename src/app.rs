@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
-    env, fs, io,
+    env, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, SystemTime},
@@ -76,6 +77,12 @@ struct Visual {
     before: BTreeSet<PathBuf>,
 }
 
+#[derive(Clone)]
+struct Completion {
+    display: String,
+    path: PathBuf,
+}
+
 pub struct App {
     cwd: PathBuf,
     entries: Vec<Entry>,
@@ -90,6 +97,8 @@ pub struct App {
     mode: Mode,
     prefix: Option<Prefix>,
     visual: Option<Visual>,
+    completions: Vec<Completion>,
+    completion_index: usize,
     history: Vec<PathBuf>,
     history_pos: usize,
     input: String,
@@ -148,6 +157,47 @@ fn extension(name: &str) -> String {
         .to_lowercase()
 }
 
+/// Encode a path as a `file://` URI suitable for `text/uri-list` clipboards.
+fn file_uri(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = String::from("file://");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Decode a `file://` URI back into a path (percent-decoding included).
+fn uri_path(uri: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let rest = uri.strip_prefix("file://")?;
+    let rest = if rest.starts_with('/') {
+        rest
+    } else {
+        &rest[rest.find('/')?..]
+    };
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(v) = hex.and_then(|s| u8::from_str_radix(s, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_vec(out)))
+}
+
 // ───────────────────────── app ─────────────────────────
 
 impl App {
@@ -171,6 +221,8 @@ impl App {
             mode: Mode::Normal,
             prefix: None,
             visual: None,
+            completions: Vec::new(),
+            completion_index: 0,
             history: vec![cwd],
             history_pos: 0,
             input: String::new(),
@@ -428,6 +480,146 @@ impl App {
         }
     }
 
+    /// Resolve a user-typed path, expanding `~` and relative paths.
+    fn expand_path(&self, raw: &str) -> PathBuf {
+        if raw.is_empty() {
+            return self.cwd.clone();
+        }
+        if raw == "~" {
+            if let Some(h) = env::var_os("HOME") {
+                return PathBuf::from(h);
+            }
+        } else if let Some(rest) = raw.strip_prefix("~/") {
+            if let Some(h) = env::var_os("HOME") {
+                return PathBuf::from(h).join(rest);
+            }
+        }
+        let p = PathBuf::from(raw);
+        if p.is_absolute() {
+            p
+        } else {
+            self.cwd.join(p)
+        }
+    }
+
+    /// Split the current `go to` input into `(directory to list, display
+    /// prefix, name prefix)`.
+    fn completion_context(&self) -> Option<(PathBuf, String, String)> {
+        let raw = self.input.as_str();
+        if raw.is_empty() {
+            return Some((self.cwd.clone(), String::new(), String::new()));
+        }
+        if raw == "~" {
+            let home = env::var_os("HOME").map(PathBuf::from)?;
+            return Some((home, "~/".into(), String::new()));
+        }
+        if raw == "." {
+            return Some((self.cwd.clone(), "./".into(), String::new()));
+        }
+        if raw == ".." {
+            let p = self
+                .cwd
+                .parent()
+                .unwrap_or(self.cwd.as_path())
+                .to_path_buf();
+            return Some((p, "../".into(), String::new()));
+        }
+        let (dir_part, prefix) = match raw.rfind('/') {
+            Some(i) => (&raw[..=i], &raw[i + 1..]),
+            None => ("", raw),
+        };
+        let base = if dir_part.is_empty() {
+            self.cwd.clone()
+        } else {
+            self.expand_path(dir_part)
+        };
+        Some((base, dir_part.to_string(), prefix.to_string()))
+    }
+
+    fn refresh_completions(&mut self) {
+        self.completions.clear();
+        self.completion_index = 0;
+        if !matches!(self.mode, Mode::Prompt(Prompt::Cd)) {
+            return;
+        }
+        let Some((base, display, prefix)) = self.completion_context() else {
+            return;
+        };
+        let Ok(rd) = fs::read_dir(&base) else { return };
+        let needle = prefix.to_lowercase();
+        let show_hidden = self.show_hidden || prefix.starts_with('.');
+        let mut items = Vec::new();
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') && !show_hidden {
+                continue;
+            }
+            if !needle.is_empty() && !name.to_lowercase().starts_with(&needle) {
+                continue;
+            }
+            let path = e.path();
+            if !fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            items.push(Completion {
+                display: format!("{display}{name}/"),
+                path,
+            });
+            if items.len() >= 500 {
+                break;
+            }
+        }
+        items.sort_by_key(|a| a.display.to_lowercase());
+        self.completions = items;
+    }
+
+    fn move_completion(&mut self, delta: isize) {
+        if self.completions.is_empty() {
+            return;
+        }
+        let n = self.completions.len() as isize;
+        let i = self.completion_index as isize;
+        self.completion_index = ((i + delta).rem_euclid(n)) as usize;
+    }
+
+    fn accept_completion(&mut self) {
+        if let Some(c) = self.completions.get(self.completion_index).cloned() {
+            self.input = c.display;
+            self.refresh_completions();
+        }
+    }
+
+    fn submit_cd(&mut self) {
+        let name = self.input.trim().to_string();
+        if !name.is_empty() {
+            let path = self.expand_path(&name);
+            let path = fs::canonicalize(&path).unwrap_or(path);
+            if path.is_dir() {
+                self.cd(path, None);
+                return;
+            }
+        }
+        if let Some(c) = self.completions.get(self.completion_index).cloned() {
+            self.cd(c.path, None);
+            return;
+        }
+        if !name.is_empty() {
+            self.submit(Prompt::Cd);
+        }
+    }
+
+    fn start_create(&mut self) {
+        self.input.clear();
+        self.completions.clear();
+        self.mode = Mode::Prompt(Prompt::Create);
+    }
+
+    fn start_cd(&mut self) {
+        self.input.clear();
+        self.mode = Mode::Prompt(Prompt::Cd);
+        self.refresh_completions();
+    }
+
     fn external(&mut self, term: &mut DefaultTerminal, prog: &str, path: &Path) {
         let mut parts = prog.split_whitespace();
         let Some(p) = parts.next() else { return };
@@ -493,6 +685,194 @@ impl App {
         }
     }
 
+    fn fzf_jump(&mut self, term: &mut DefaultTerminal) {
+        let preview = env::var_os("HOME").map(|h| {
+            PathBuf::from(h)
+                .join(".config/yazi/fzf-preview.sh")
+                .display()
+                .to_string()
+        });
+        let mut cmd = Command::new("fzf");
+        cmd.arg("-m");
+        if let Some(p) = preview.filter(|p| Path::new(p).exists()) {
+            cmd.arg("--preview")
+                .arg(format!("{p} {{}}"))
+                .arg("--preview-window")
+                .arg("right,50%,border-left");
+        }
+        cmd.current_dir(&self.cwd)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        ratatui::restore();
+        let out = cmd.output();
+        *term = ratatui::init();
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                self.status = format!("fzf: {e}");
+                return;
+            }
+        };
+        if !out.status.success() && out.status.code() != Some(130) {
+            self.status = format!("fzf exited with {}", out.status);
+            return;
+        }
+        let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+        match lines.len() {
+            0 => {}
+            1 => {
+                let path = self.cwd.join(&lines[0]);
+                let path = fs::canonicalize(&path).unwrap_or(path);
+                if path.is_dir() {
+                    self.cd(path, None);
+                } else if let Some(name) = path.file_name() {
+                    let name = name.to_string_lossy().into_owned();
+                    match path.parent() {
+                        Some(parent) if parent != self.cwd.as_path() => {
+                            self.cd(parent.to_path_buf(), Some(name));
+                        }
+                        _ => {
+                            self.focus = Some(name);
+                            self.reload();
+                        }
+                    }
+                }
+            }
+            _ => {
+                let paths: Vec<PathBuf> = lines
+                    .iter()
+                    .map(|l| self.cwd.join(l))
+                    .map(|p| fs::canonicalize(&p).unwrap_or(p))
+                    .filter(|p| p.exists())
+                    .collect();
+                let parent = paths
+                    .first()
+                    .and_then(|p| p.parent())
+                    .map(Path::to_path_buf);
+                let same_parent =
+                    parent.is_some() && paths.iter().all(|p| p.parent() == parent.as_deref());
+                if let (true, Some(parent)) = (same_parent, parent) {
+                    if parent != self.cwd {
+                        self.cd(parent.clone(), None);
+                    }
+                    self.selected = paths
+                        .into_iter()
+                        .filter(|p| p.parent() == Some(parent.as_path()))
+                        .collect();
+                } else {
+                    self.selected = paths
+                        .into_iter()
+                        .filter(|p| p.parent() == Some(self.cwd.as_path()))
+                        .collect();
+                }
+                self.list_dirty = true;
+                self.status = format!("selected {} item(s)", self.selected.len());
+            }
+        }
+    }
+
+    fn clipboard_copy(&mut self) {
+        let targets: Vec<PathBuf> = self.targets().into_iter().filter(|p| !p.is_dir()).collect();
+        if targets.is_empty() {
+            self.status = "nothing to copy".into();
+            return;
+        }
+        let text = targets
+            .iter()
+            .map(|p| file_uri(p))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let mut cmd = if env::var_os("WAYLAND_DISPLAY").is_some() {
+            let mut c = Command::new("wl-copy");
+            c.arg("--type").arg("text/uri-list");
+            c
+        } else if env::var_os("DISPLAY").is_some() {
+            let mut c = Command::new("xclip");
+            c.args(["-selection", "clipboard", "-t", "text/uri-list"]);
+            c
+        } else {
+            self.status = "no clipboard backend (wl-copy/xclip)".into();
+            return;
+        };
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match cmd.spawn() {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                match child.wait() {
+                    Ok(_) => self.status = format!("copied {} file(s)", targets.len()),
+                    Err(e) => self.status = format!("clipboard: {e}"),
+                }
+            }
+            Err(e) => self.status = format!("clipboard: {e}"),
+        }
+    }
+
+    fn clipboard_paste(&mut self) {
+        let (prog, args): (&str, &[&str]) = if env::var_os("WAYLAND_DISPLAY").is_some() {
+            ("wl-paste", &["--no-newline"])
+        } else if env::var_os("DISPLAY").is_some() {
+            ("xclip", &["-selection", "clipboard", "-o"])
+        } else {
+            self.status = "no clipboard backend (wl-paste/xclip)".into();
+            return;
+        };
+        let out = match Command::new(prog).args(args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                self.status = format!("{prog}: {e}");
+                return;
+            }
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut paths = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if line.starts_with("file://") {
+                if let Some(p) = uri_path(line) {
+                    paths.push(p);
+                }
+            } else {
+                let p = PathBuf::from(line);
+                if p.is_absolute() {
+                    paths.push(p);
+                }
+            }
+        }
+        if paths.is_empty() {
+            self.status = "clipboard has no file paths".into();
+            return;
+        }
+        let mut n = 0;
+        for src in paths {
+            if !src.exists() {
+                continue;
+            }
+            let Some(name) = src.file_name() else {
+                continue;
+            };
+            let dst = unique(self.cwd.join(name));
+            if copy_rec(&src, &dst).is_ok() {
+                n += 1;
+            }
+        }
+        self.reload();
+        self.status = format!("pasted {n} file(s) from clipboard");
+    }
+
     fn submit(&mut self, p: Prompt) {
         let name = self.input.trim().to_string();
         if name.is_empty() {
@@ -500,22 +880,7 @@ impl App {
         }
 
         if p == Prompt::Cd {
-            let path = if name == "~" {
-                env::var_os("HOME").map(PathBuf::from)
-            } else if let Some(rest) = name.strip_prefix("~/") {
-                env::var_os("HOME").map(|h| PathBuf::from(h).join(rest))
-            } else {
-                Some(PathBuf::from(&name))
-            };
-            let Some(path) = path else {
-                self.status = "HOME is not set".into();
-                return;
-            };
-            let path = if path.is_absolute() {
-                path
-            } else {
-                self.cwd.join(path)
-            };
+            let path = self.expand_path(&name);
             let path = fs::canonicalize(&path).unwrap_or(path);
             self.cd(path, None);
             return;
@@ -633,16 +998,33 @@ impl App {
                     KeyCode::Esc => {
                         self.mode = Mode::Normal;
                         self.input.clear();
+                        self.completions.clear();
                     }
                     KeyCode::Enter => {
-                        self.submit(p);
+                        if p == Prompt::Cd {
+                            self.submit_cd();
+                        } else {
+                            self.submit(p);
+                        }
                         self.mode = Mode::Normal;
                         self.input.clear();
+                        self.completions.clear();
                     }
                     KeyCode::Backspace => {
                         self.input.pop();
+                        if p == Prompt::Cd {
+                            self.refresh_completions();
+                        }
                     }
-                    KeyCode::Char(c) => self.input.push(c),
+                    KeyCode::Char(c) => {
+                        self.input.push(c);
+                        if p == Prompt::Cd {
+                            self.refresh_completions();
+                        }
+                    }
+                    KeyCode::Up if p == Prompt::Cd => self.move_completion(-1),
+                    KeyCode::Down if p == Prompt::Cd => self.move_completion(1),
+                    KeyCode::Tab if p == Prompt::Cd => self.accept_completion(),
                     _ => {}
                 }
                 return Ok(false);
@@ -668,6 +1050,9 @@ impl App {
                 KeyCode::Char('f') => self.move_by(self.page as isize),
                 KeyCode::Char('a') => self.select_all(),
                 KeyCode::Char('r') => self.invert_selection(),
+                KeyCode::Char('n') => self.start_create(),
+                KeyCode::Char('y') => self.clipboard_copy(),
+                KeyCode::Char('p') => self.clipboard_paste(),
                 _ => {}
             }
             return Ok(false);
@@ -790,11 +1175,9 @@ impl App {
                     self.mode = Mode::Prompt(Prompt::Rename);
                 }
             }
-            KeyCode::Char('a') => {
-                self.input.clear();
-                self.mode = Mode::Prompt(Prompt::Create);
-            }
+            KeyCode::Char('a') => self.start_create(),
             KeyCode::Char('/') => self.mode = Mode::Filter,
+            KeyCode::Char('z') => self.fzf_jump(term),
             KeyCode::Char(',') => self.prefix = Some(Prefix::Sort),
             KeyCode::Char('+') => self.zoom_in(),
             KeyCode::Char('-') => self.zoom_out(),
@@ -830,10 +1213,10 @@ impl App {
                 KeyCode::Char('h') => self.goto("~"),
                 KeyCode::Char('c') => self.goto("~/.config"),
                 KeyCode::Char('d') => self.goto("~/Downloads"),
-                KeyCode::Char(' ') => {
-                    self.input.clear();
-                    self.mode = Mode::Prompt(Prompt::Cd);
-                }
+                KeyCode::Char('o') => self.goto("~/.local/share/osu-wine/osu!"),
+                KeyCode::Char('p') => self.goto("~/Pictures"),
+                KeyCode::Char('v') => self.goto("~/Videos"),
+                KeyCode::Char(' ') => self.start_cd(),
                 KeyCode::Char('f') => self.follow_symlink(),
                 KeyCode::Char('t') => self.status = "trash is not supported".into(),
                 _ => {}
@@ -1046,10 +1429,54 @@ impl App {
             }
         }
         f.render_widget(Paragraph::new(text), rows[1]);
+        self.draw_completions(f);
 
         if matches!(self.mode, Mode::Help) {
             self.draw_help(f);
         }
+    }
+
+    fn draw_completions(&self, f: &mut Frame) {
+        if !matches!(self.mode, Mode::Prompt(Prompt::Cd)) || self.completions.is_empty() {
+            return;
+        }
+        let area = f.area();
+        let visible = self.completions.len().min(10);
+        let height = visible as u16 + 2;
+        if area.height <= height + 1 || area.width < 20 {
+            return;
+        }
+        let longest = self
+            .completions
+            .iter()
+            .map(|c| c.display.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
+        let width = (longest + 4).max(30).min(area.width.saturating_sub(4));
+        let rect = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + area.height - height - 1,
+            width,
+            height,
+        );
+        let items: Vec<ListItem> = self
+            .completions
+            .iter()
+            .map(|c| ListItem::new(c.display.clone()))
+            .collect();
+        let mut state = ListState::default();
+        state.select(Some(
+            self.completion_index
+                .min(self.completions.len().saturating_sub(1)),
+        ));
+        f.render_widget(Clear, rect);
+        f.render_stateful_widget(
+            List::new(items)
+                .block(Block::bordered().title(" directories "))
+                .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+            rect,
+            &mut state,
+        );
     }
 
     fn draw_help(&self, f: &mut Frame) {
@@ -1068,6 +1495,7 @@ impl App {
             "p / P       paste / paste-force",
             "Y / X       cancel yank",
             "d / r       delete / rename",
+            "Ctrl+n      create",
         ];
         let right = [
             "a           create file or dir/",
@@ -1078,8 +1506,11 @@ impl App {
             "T           toggle preview pane",
             ".           hidden files",
             "/           filter",
+            "z           fzf jump",
+            "Ctrl+y/p    clipboard copy / paste",
             "gh gc gd    home / config / downloads",
-            "g<Space>    go to path",
+            "go gp gv    osu / pictures / videos",
+            "g<Space>    go to path (live menu)",
             "gf / gt     follow symlink / trash",
             ",a ,s ,m ,e sort (shift = reverse)",
             "~           close help",
