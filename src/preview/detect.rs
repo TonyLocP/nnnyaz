@@ -31,6 +31,11 @@ const ARCHIVE_EXTS: &[&str] = &[
     "zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "zst", "lz4", "cpio", "lzma", "lz",
 ];
 
+const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mkv", "webm", "mov", "avi", "m4v", "flv", "wmv", "mpg", "mpeg", "ts", "m2ts", "3gp",
+    "ogv",
+];
+
 /// Decide how a file should be previewed: magic bytes first, then extension,
 /// then NUL/control-character heuristics to tell text from binary.
 pub fn detect(path: &Path) -> Kind {
@@ -70,6 +75,9 @@ pub fn detect(path: &Path) -> Kind {
     }
 
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if VIDEO_EXTS.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
+            return Kind::Video;
+        }
         if ARCHIVE_EXTS.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
             return Kind::Archive;
         }

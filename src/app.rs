@@ -69,6 +69,7 @@ enum Mode {
     Find,
     Prompt(Prompt),
     Help,
+    Info,
 }
 
 #[derive(Clone, Copy)]
@@ -77,6 +78,7 @@ enum Prefix {
     Sort,
     Copy,
     Linemode,
+    Tab,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -118,6 +120,7 @@ enum VisualKind {
     Unselect,
 }
 
+#[derive(Clone)]
 struct Visual {
     anchor: usize,
     kind: VisualKind,
@@ -128,6 +131,31 @@ struct Visual {
 struct Completion {
     display: String,
     path: PathBuf,
+}
+
+/// A saved tab. The active tab lives in `App`'s fields; inactive tabs are
+/// snapshots in `App::tabs`.
+#[derive(Clone)]
+struct TabSnapshot {
+    cwd: PathBuf,
+    entries: Vec<Entry>,
+    cursor: Option<usize>,
+    filter: String,
+    show_hidden: bool,
+    sort: Sort,
+    sort_reverse: bool,
+    linemode: Linemode,
+    selected: BTreeSet<PathBuf>,
+    visual: Option<Visual>,
+    search: Option<Search>,
+    history: Vec<PathBuf>,
+    history_pos: usize,
+    focus: Option<String>,
+}
+
+/// Metadata shown by the `Tab` (spot/info) overlay.
+struct Info {
+    lines: Vec<(&'static str, String)>,
 }
 
 pub struct App {
@@ -158,6 +186,9 @@ pub struct App {
     status: String,
     focus: Option<String>,
     page: usize,
+    tabs: Vec<TabSnapshot>,
+    tab_index: usize,
+    info: Option<Info>,
     preview: Preview,
     list: List<'static>,
     list_dirty: bool,
@@ -317,6 +348,99 @@ fn format_age(t: Option<SystemTime>) -> String {
     }
 }
 
+/// Absolute local timestamp, via `date` (no timezone crate in the tree).
+fn format_time(t: Option<SystemTime>) -> String {
+    let Some(t) = t else {
+        return "-".into();
+    };
+    let secs = t
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match Command::new("date")
+        .arg("-d")
+        .arg(format!("@{secs}"))
+        .arg("+%Y-%m-%d %H:%M:%S")
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => format!("@{secs}"),
+    }
+}
+
+/// Look up a uid/gid name in `/etc/passwd` or `/etc/group` (field 2).
+fn id_name(file: &str, id: u32) -> Option<String> {
+    let text = fs::read_to_string(file).ok()?;
+    for line in text.lines() {
+        let mut parts = line.split(':');
+        let name = parts.next()?;
+        if parts.nth(1)?.parse::<u32>().ok() == Some(id) {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+fn format_duration(secs: f64) -> String {
+    let total = secs.max(0.0) as u64;
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// Resolution and duration of a video, via `ffprobe` when installed.
+fn video_info(path: &Path) -> Option<String> {
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height:format=duration",
+            "-of",
+            "default=noprint_wrappers=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (mut w, mut h, mut dur) = (None, None, None);
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("width=") {
+            w = v.trim().parse::<u32>().ok();
+        } else if let Some(v) = line.strip_prefix("height=") {
+            h = v.trim().parse::<u32>().ok();
+        } else if let Some(v) = line.strip_prefix("duration=") {
+            dur = v.trim().parse::<f64>().ok();
+        }
+    }
+    let mut parts = Vec::new();
+    if let (Some(w), Some(h)) = (w, h) {
+        parts.push(format!("{w}×{h}"));
+    }
+    if let Some(d) = dur {
+        parts.push(format_duration(d));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+fn truncate_chars(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
 /// Relative path from `base` to `target` (both absolute), e.g. `../Pictures/x`.
 fn relative_path(base: &Path, target: &Path) -> PathBuf {
     let base: Vec<_> = base.components().collect();
@@ -416,13 +540,151 @@ impl App {
             status: String::new(),
             focus: None,
             page: 10,
+            tabs: Vec::new(),
+            tab_index: 0,
+            info: None,
             preview: Preview::new(),
             list: List::new(Vec::<ListItem>::new()),
             list_dirty: true,
             list_width: 0,
         };
         app.reload();
+        app.tabs = vec![app.snapshot()];
         Ok(app)
+    }
+
+    // ─────────────── tabs ───────────────
+
+    /// Capture the active tab's state. The active tab is also stored as a
+    /// (possibly stale) snapshot in `tabs[tab_index]`; it is refreshed before
+    /// every switch or structural change.
+    fn snapshot(&self) -> TabSnapshot {
+        TabSnapshot {
+            cwd: self.cwd.clone(),
+            entries: self.entries.clone(),
+            cursor: self.state.selected(),
+            filter: self.filter.clone(),
+            show_hidden: self.show_hidden,
+            sort: self.sort,
+            sort_reverse: self.sort_reverse,
+            linemode: self.linemode,
+            selected: self.selected.clone(),
+            visual: self.visual.clone(),
+            search: self.search.clone(),
+            history: self.history.clone(),
+            history_pos: self.history_pos,
+            focus: self.focus.clone(),
+        }
+    }
+
+    fn save_active(&mut self) {
+        let snap = self.snapshot();
+        if let Some(slot) = self.tabs.get_mut(self.tab_index) {
+            *slot = snap;
+        }
+    }
+
+    fn restore_tab(&mut self, tab: TabSnapshot) {
+        self.cwd = tab.cwd;
+        self.entries = tab.entries;
+        self.filter = tab.filter;
+        self.show_hidden = tab.show_hidden;
+        self.sort = tab.sort;
+        self.sort_reverse = tab.sort_reverse;
+        self.linemode = tab.linemode;
+        self.selected = tab.selected;
+        self.visual = tab.visual;
+        self.search = tab.search;
+        self.history = tab.history;
+        self.history_pos = tab.history_pos;
+        self.focus = tab.focus;
+        self.state
+            .select(tab.cursor.filter(|i| *i < self.entries.len()));
+        self.prefix = None;
+        self.mode = Mode::Normal;
+        self.info = None;
+        self.input.clear();
+        self.completions.clear();
+        self.list_dirty = true;
+    }
+
+    fn new_tab(&mut self, path: PathBuf) {
+        if let Err(e) = fs::read_dir(&path) {
+            self.status = format!("{}: {e}", path.display());
+            return;
+        }
+        self.save_active();
+        let mut tab = self.snapshot();
+        tab.cwd = path.clone();
+        tab.entries.clear();
+        tab.cursor = None;
+        tab.filter.clear();
+        tab.selected.clear();
+        tab.visual = None;
+        tab.search = None;
+        tab.history = vec![path];
+        tab.history_pos = 0;
+        tab.focus = None;
+        self.tabs.push(tab);
+        self.tab_index = self.tabs.len() - 1;
+        let tab = self.tabs[self.tab_index].clone();
+        self.restore_tab(tab);
+        self.reload();
+        self.status = format!("tab {} created", self.tab_index + 1);
+    }
+
+    fn switch_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() || index == self.tab_index {
+            return;
+        }
+        self.save_active();
+        self.tab_index = index;
+        let tab = self.tabs[index].clone();
+        self.restore_tab(tab);
+    }
+
+    fn next_tab(&mut self, delta: isize) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        let n = self.tabs.len() as isize;
+        let index = (self.tab_index as isize + delta).rem_euclid(n) as usize;
+        self.switch_tab(index);
+    }
+
+    fn close_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            self.status = "last tab".into();
+            return;
+        }
+        let closed = self.tab_index;
+        self.tabs.remove(closed);
+        if self.tab_index >= self.tabs.len() {
+            self.tab_index = self.tabs.len() - 1;
+        }
+        let tab = self.tabs[self.tab_index].clone();
+        self.restore_tab(tab);
+        self.status = format!("closed tab {}", closed + 1);
+    }
+
+    /// Swap the active tab's position with its neighbour (`{` / `}`).
+    fn swap_tab(&mut self, delta: isize) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        self.save_active();
+        let n = self.tabs.len() as isize;
+        let target = (self.tab_index as isize + delta).rem_euclid(n) as usize;
+        self.tabs.swap(self.tab_index, target);
+        self.tab_index = target;
+    }
+
+    fn tab_cwd(&self, index: usize) -> &Path {
+        if index == self.tab_index {
+            &self.cwd
+        } else {
+            &self.tabs[index].cwd
+        }
     }
 
     /// Enable kitty image previews (call before `run`).
@@ -452,7 +714,7 @@ impl App {
             let Some(e) = self.entries.get(j) else {
                 continue;
             };
-            if e.is_dir || detect::detect(&e.path) != Kind::Image {
+            if e.is_dir || !matches!(detect::detect(&e.path), Kind::Image | Kind::Video) {
                 continue;
             }
             self.preview.preload((e.path.clone(), e.modified, e.size));
@@ -1468,6 +1730,92 @@ impl App {
         self.list_dirty = true;
     }
 
+    /// Build the `Tab` overlay for the hovered entry.
+    fn open_info(&mut self) {
+        let Some(e) = self.current().cloned() else {
+            return;
+        };
+        let meta = fs::symlink_metadata(&e.path).ok();
+        let is_link = meta
+            .as_ref()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        let kind = if is_link {
+            "symlink"
+        } else if e.is_dir {
+            "directory"
+        } else {
+            match detect::detect(&e.path) {
+                Kind::Text => "text",
+                Kind::Json => "json",
+                Kind::Image => "image",
+                Kind::Video => "video",
+                Kind::Pdf => "pdf",
+                Kind::Archive => "archive",
+                Kind::Binary => "binary",
+            }
+        };
+
+        let mut lines: Vec<(&'static str, String)> = vec![
+            ("Name", e.name.clone()),
+            ("Path", e.path.display().to_string()),
+            ("Type", kind.to_string()),
+        ];
+        if let Ok(target) = fs::read_link(&e.path) {
+            lines.push(("Link to", target.display().to_string()));
+        }
+        if e.is_dir {
+            if let Ok(rd) = fs::read_dir(&e.path) {
+                lines.push(("Entries", rd.flatten().count().to_string()));
+            }
+        } else {
+            lines.push(("Size", format!("{} ({} bytes)", human(e.size), e.size)));
+        }
+        lines.push((
+            "Modified",
+            format!("{} ({})", format_time(e.modified), format_age(e.modified)),
+        ));
+        lines.push((
+            "Created",
+            format!("{} ({})", format_time(e.created), format_age(e.created)),
+        ));
+        if let Some(m) = &meta {
+            if let Ok(accessed) = m.accessed() {
+                lines.push(("Accessed", format_time(Some(accessed))));
+            }
+            let owner = id_name("/etc/passwd", e.uid)
+                .map(|n| format!("{n} ({})", e.uid))
+                .unwrap_or_else(|| e.uid.to_string());
+            let group = id_name("/etc/group", e.gid)
+                .map(|n| format!("{n} ({})", e.gid))
+                .unwrap_or_else(|| e.gid.to_string());
+            lines.push(("Owner", format!("{owner} : {group}")));
+            lines.push((
+                "Permissions",
+                format!("{} ({:04o})", permissions(e.mode), e.mode & 0o7777),
+            ));
+            lines.push(("Inode", format!("{} · {} link(s)", m.ino(), m.nlink())));
+        }
+        match detect::detect(&e.path) {
+            Kind::Image => {
+                if let Ok((w, h)) = image::image_dimensions(&e.path) {
+                    lines.push(("Image", format!("{w}×{h}")));
+                }
+            }
+            Kind::Video => {
+                if let Some(info) = video_info(&e.path) {
+                    lines.push(("Video", info));
+                }
+            }
+            _ => {}
+        }
+        if let Some((pkind, n)) = self.preview.artifact_meta() {
+            lines.push(("Preview", format!("{pkind} · {n} line(s)")));
+        }
+        self.info = Some(Info { lines });
+        self.mode = Mode::Info;
+    }
+
     // ─────────────── input ───────────────
 
     fn handle_key(&mut self, key: KeyEvent, term: &mut DefaultTerminal) -> io::Result<bool> {
@@ -1585,6 +1933,11 @@ impl App {
                 self.mode = Mode::Normal;
                 return Ok(false);
             }
+            Mode::Info => {
+                self.info = None;
+                self.mode = Mode::Normal;
+                return Ok(false);
+            }
             Mode::Normal => {}
         }
 
@@ -1595,7 +1948,13 @@ impl App {
 
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('c') => return Ok(true),
+                KeyCode::Char('c') => {
+                    if self.tabs.len() > 1 {
+                        self.close_tab();
+                    } else {
+                        return Ok(true);
+                    }
+                }
                 KeyCode::Char('d') => self.move_by((self.page / 2) as isize),
                 KeyCode::Char('u') => self.move_by(-((self.page / 2) as isize)),
                 KeyCode::Char('b') => self.move_by(-(self.page as isize)),
@@ -1742,6 +2101,16 @@ impl App {
             KeyCode::Char('s') => self.start_search(SearchKind::Fd),
             KeyCode::Char('S') => self.start_search(SearchKind::Rg),
             KeyCode::Char('c') => self.prefix = Some(Prefix::Copy),
+            KeyCode::Char('t') => self.prefix = Some(Prefix::Tab),
+            KeyCode::Tab => self.open_info(),
+            KeyCode::Char(c @ '1'..='9') => {
+                let index = c as usize - '1' as usize;
+                self.switch_tab(index);
+            }
+            KeyCode::Char('[') => self.next_tab(-1),
+            KeyCode::Char(']') => self.next_tab(1),
+            KeyCode::Char('{') => self.swap_tab(-1),
+            KeyCode::Char('}') => self.swap_tab(1),
             KeyCode::Char('m') => self.prefix = Some(Prefix::Linemode),
             KeyCode::Char('z') => self.fzf_jump(term),
             KeyCode::Char(';') | KeyCode::Char(':') => self.start_shell(),
@@ -1842,6 +2211,18 @@ impl App {
                 KeyCode::Char('m') => self.set_linemode(Linemode::Mtime),
                 KeyCode::Char('o') => self.set_linemode(Linemode::Owner),
                 KeyCode::Char('n') => self.set_linemode(Linemode::None),
+                _ => {}
+            },
+            Prefix::Tab => match key.code {
+                KeyCode::Char('t') => self.new_tab(self.cwd.clone()),
+                KeyCode::Char('n') => {
+                    if let Some(home) = env::var_os("HOME") {
+                        self.new_tab(PathBuf::from(home));
+                    }
+                }
+                KeyCode::Char('c') => self.close_tab(),
+                KeyCode::Char(']') => self.next_tab(1),
+                KeyCode::Char('[') => self.next_tab(-1),
                 _ => {}
             },
         }
@@ -1982,7 +2363,23 @@ impl App {
             cols[0].height.saturating_sub(1),
         );
         f.render_widget(
-            Paragraph::new(format!(" {} ", self.cwd.display())),
+            Paragraph::new(Line::from(
+                (0..self.tabs.len())
+                    .map(|i| {
+                        let cwd = self.tab_cwd(i);
+                        let name = cwd
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| cwd.display().to_string());
+                        let style = if i == self.tab_index {
+                            Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                        } else {
+                            Style::new().fg(Color::DarkGray)
+                        };
+                        Span::styled(format!(" {}:{} ", i + 1, name), style)
+                    })
+                    .collect::<Vec<_>>(),
+            )),
             title_area,
         );
         f.render_stateful_widget(&self.list, list_area, &mut self.state);
@@ -2013,6 +2410,7 @@ impl App {
                 self.find_query
             ),
             Mode::Help => "rnn keys — press any key to close".into(),
+            Mode::Info => "info — press any key to close".into(),
             Mode::Prompt(Prompt::Delete) => {
                 format!("delete {} item(s)? (y/N)", self.targets().len())
             }
@@ -2068,6 +2466,7 @@ impl App {
                 Prefix::Sort => " | ,…",
                 Prefix::Copy => " | c…",
                 Prefix::Linemode => " | m…",
+                Prefix::Tab => " | t…",
             });
         }
         if let Some(visual) = &self.visual {
@@ -2090,6 +2489,54 @@ impl App {
         if matches!(self.mode, Mode::Help) {
             self.draw_help(f);
         }
+        if matches!(self.mode, Mode::Info) {
+            self.draw_info(f);
+        }
+    }
+
+    fn draw_info(&self, f: &mut Frame) {
+        let Some(info) = &self.info else {
+            return;
+        };
+        let area = f.area();
+        if area.width < 24 || area.height < 5 {
+            return;
+        }
+        let longest = info
+            .lines
+            .iter()
+            .map(|(l, v)| l.chars().count() + 2 + v.chars().count())
+            .max()
+            .unwrap_or(20)
+            .min(110) as u16;
+        let width = (longest + 4).max(48).min(area.width.saturating_sub(4));
+        let height = (info.lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+        let rect = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        let avail = width.saturating_sub(4) as usize;
+        let lines: Vec<Line<'static>> = info
+            .lines
+            .iter()
+            .take(height.saturating_sub(2) as usize)
+            .map(|(label, value)| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{label:<12}"),
+                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(truncate_chars(value, avail.saturating_sub(14))),
+                ])
+            })
+            .collect();
+        f.render_widget(Clear, rect);
+        f.render_widget(
+            Paragraph::new(lines).block(Block::bordered().title(" info ")),
+            rect,
+        );
     }
 
     fn draw_completions(&self, f: &mut Frame) {
@@ -2155,6 +2602,12 @@ impl App {
             "Ctrl+y/p    clipboard copy / paste",
             "; / :       run shell command",
             "Ctrl+z      suspend",
+            "t t / t n   new tab / at home",
+            "t c         close tab",
+            "1-9 [ ]     switch tab",
+            "{ / }       swap tab",
+            "Tab         info overlay",
+            "Ctrl+c      close tab / quit",
         ];
         let right = [
             "o / Enter   open",
@@ -2260,7 +2713,9 @@ impl App {
                 }
             }
         }
-        let is_image = meta.map(|(k, _)| k == "image").unwrap_or(false);
+        let is_image = meta
+            .map(|(k, _)| k == "image" || k == "video")
+            .unwrap_or(false);
         if is_image {
             if let Some(s) = self.preview.image_state_mut() {
                 s.render(inner, f.buffer_mut());

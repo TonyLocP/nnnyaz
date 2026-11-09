@@ -31,7 +31,7 @@ use ratatui::{
     style::{Color, Style},
 };
 
-use super::yazi;
+use super::{media, yazi};
 
 /// Pixel size of a single terminal cell, used to size the transmit canvas.
 pub type FontSize = (u16, u16);
@@ -89,6 +89,79 @@ fn load_shared(dir: &Path, path: &Path) -> io::Result<DynamicImage> {
             }
         }
     }
+    Ok(capped)
+}
+
+/// Extract a frame from a video and decode it, using yazi's preview cache
+/// when available (keyed by the source video, so yazi and rnn share thumbs).
+pub fn load_video_thumbnail(
+    path: &Path,
+    mtime: Option<SystemTime>,
+    size: u64,
+) -> io::Result<DynamicImage> {
+    if let Some(dir) = yazi::cache_dir() {
+        return load_video_shared(&dir, path);
+    }
+    load_video_from(&cache_dir(), path, mtime, size)
+}
+
+fn load_video_shared(dir: &Path, path: &Path) -> io::Result<DynamicImage> {
+    let target = yazi::target(dir, path);
+    if let Some(target) = &target {
+        if let Some(img) = decode(target) {
+            if std::env::var_os("RNN_DEBUG").is_some() {
+                eprintln!("cache: yazi video hit {}", target.display());
+            }
+            return Ok(img);
+        }
+    }
+
+    fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(
+        ".rnn-video-{}-{}.jpg",
+        std::process::id(),
+        next_id()
+    ));
+    let img = media::extract_video_frame(path, &tmp).and_then(|_| decode_source(&tmp));
+    let _ = fs::remove_file(&tmp);
+    let capped = cap_size(&img?, IMAGE_MAX);
+    if let Some(target) = &target {
+        let written = encode(&capped).and_then(|(_, buf)| yazi::write_entry(target, &buf));
+        if std::env::var_os("RNN_DEBUG").is_some() {
+            match &written {
+                Ok(()) => eprintln!("cache: yazi video store {}", target.display()),
+                Err(err) => {
+                    eprintln!(
+                        "cache: yazi video store failed for {}: {err}",
+                        target.display()
+                    )
+                }
+            }
+        }
+    }
+    Ok(capped)
+}
+
+fn load_video_from(
+    dir: &Path,
+    path: &Path,
+    mtime: Option<SystemTime>,
+    size: u64,
+) -> io::Result<DynamicImage> {
+    let stem = cache_stem(path, mtime, size);
+    if let Some(img) = ["png", "jpg"]
+        .iter()
+        .find_map(|ext| decode(&dir.join(format!("{stem}.{ext}"))))
+    {
+        return Ok(img);
+    }
+
+    fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(".{stem}.{}.frame.jpg", std::process::id()));
+    let img = media::extract_video_frame(path, &tmp).and_then(|_| decode_source(&tmp));
+    let _ = fs::remove_file(&tmp);
+    let capped = cap_size(&img?, IMAGE_MAX);
+    let _ = write_cache(dir, &stem, &capped);
     Ok(capped)
 }
 

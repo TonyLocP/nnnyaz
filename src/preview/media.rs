@@ -41,3 +41,37 @@ pub fn json_pretty(path: &Path) -> io::Result<String> {
     let (data, _) = capture(&mut c, TEXT_CAP)?;
     Ok(String::from_utf8_lossy(&data).into_owned())
 }
+
+/// Extract a representative video frame to `dst` (format inferred from the
+/// extension). Tries the first frame, then the one-second mark for videos
+/// whose opening frame is blank or undecodable.
+pub fn extract_video_frame(path: &Path, dst: &Path) -> io::Result<()> {
+    let attempt = |seek: &str| -> io::Result<()> {
+        let mut c = Command::new("ffmpeg");
+        c.args(["-v", "error", "-y", "-ss", seek, "-i"])
+            .arg(path)
+            .args([
+                "-frames:v",
+                "1",
+                "-an",
+                "-vf",
+                "scale=min(1920\\,iw):min(1080\\,ih):force_original_aspect_ratio=decrease",
+            ])
+            .arg(dst)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let out = c.output()?;
+        let nonempty = dst.metadata().map(|m| m.len() > 0).unwrap_or(false);
+        if out.status.success() && nonempty {
+            Ok(())
+        } else {
+            let err = String::from_utf8_lossy(&out.stderr);
+            Err(io::Error::other(format!(
+                "ffmpeg: {}",
+                err.lines().next().unwrap_or("failed")
+            )))
+        }
+    };
+    attempt("0").or_else(|_| attempt("1"))
+}

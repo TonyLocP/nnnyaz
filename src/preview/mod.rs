@@ -426,7 +426,8 @@ fn generate(key: &Key) -> Artifact {
         // Images are decoded off-thread and cached both in memory (this
         // `cache`) and on disk (a downscaled copy in the temp cache dir), so
         // revisiting — or restarting rnn — never re-decodes a large source.
-        // Video and PDFs show as binary.
+        // Videos are turned into a still frame with ffmpeg and then rendered
+        // through the same image path. PDFs still show as binary.
         detect::Kind::Image => match kitty::load_image(path, key.1, key.2) {
             Ok(img) => Artifact {
                 kind: "image",
@@ -435,7 +436,15 @@ fn generate(key: &Key) -> Artifact {
             },
             Err(_) => binary_preview(path),
         },
-        detect::Kind::Video | detect::Kind::Pdf => binary_preview(path),
+        detect::Kind::Video => match kitty::load_video_thumbnail(path, key.1, key.2) {
+            Ok(img) => Artifact {
+                kind: "video",
+                data: Vec::new(),
+                img: Some(img),
+            },
+            Err(_) => binary_preview(path),
+        },
+        detect::Kind::Pdf => binary_preview(path),
         detect::Kind::Archive => match media::archive_listing(path) {
             Ok(s) => Artifact {
                 kind: "archive",
