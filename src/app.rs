@@ -2,6 +2,7 @@ use std::{
     collections::BTreeSet,
     env, fs,
     io::{self, Write},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, SystemTime},
@@ -33,14 +34,21 @@ struct Entry {
     is_dir: bool,
     size: u64,
     modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+    mode: u32,
+    uid: u32,
+    gid: u32,
 }
 
 #[derive(Clone, Copy)]
 enum Sort {
     Name,
+    Natural,
     Size,
     Time,
+    Btime,
     Extension,
+    Random,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -49,12 +57,16 @@ enum Prompt {
     Rename,
     Delete,
     Cd,
+    SearchFd,
+    SearchRg,
+    Shell,
 }
 
 #[derive(Clone, Copy)]
 enum Mode {
     Normal,
     Filter,
+    Find,
     Prompt(Prompt),
     Help,
 }
@@ -63,6 +75,41 @@ enum Mode {
 enum Prefix {
     Goto,
     Sort,
+    Copy,
+    Linemode,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Linemode {
+    Size,
+    Permissions,
+    Btime,
+    Mtime,
+    Owner,
+    None,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SearchKind {
+    Fd,
+    Rg,
+}
+
+#[derive(Clone)]
+struct Search {
+    kind: SearchKind,
+    query: String,
+    root: PathBuf,
+}
+
+#[derive(Clone, Copy)]
+enum CopyKind {
+    Path,
+    Url,
+    DirPath,
+    DirUrl,
+    FileName,
+    NameNoExt,
 }
 
 #[derive(Clone, Copy)]
@@ -99,6 +146,12 @@ pub struct App {
     visual: Option<Visual>,
     completions: Vec<Completion>,
     completion_index: usize,
+    search: Option<Search>,
+    find_query: String,
+    find_forward: bool,
+    find_origin: Option<usize>,
+    last_find: Option<String>,
+    linemode: Linemode,
     history: Vec<PathBuf>,
     history_pos: usize,
     input: String,
@@ -155,6 +208,134 @@ fn extension(name: &str) -> String {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase()
+}
+
+/// Smart-case substring match: lowercase needles ignore case, mixed/upper
+/// needles are case-sensitive (mirrors Yazi's `--smart` matching).
+fn smart_contains(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.chars().any(|c| c.is_ascii_uppercase()) {
+        haystack.contains(needle)
+    } else {
+        haystack.to_lowercase().contains(&needle.to_lowercase())
+    }
+}
+
+fn entry_for(path: PathBuf, name: String) -> Option<Entry> {
+    let md = fs::metadata(&path)
+        .or_else(|_| fs::symlink_metadata(&path))
+        .ok()?;
+    Some(Entry {
+        name,
+        path,
+        is_dir: md.is_dir(),
+        size: md.len(),
+        modified: md.modified().ok(),
+        created: md.created().ok(),
+        mode: md.mode(),
+        uid: md.uid(),
+        gid: md.gid(),
+    })
+}
+
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+    loop {
+        match (ai.peek().copied(), bi.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                if x.is_ascii_digit() && y.is_ascii_digit() {
+                    let mut an = String::new();
+                    while let Some(c) = ai.peek().copied().filter(|c| c.is_ascii_digit()) {
+                        an.push(c);
+                        ai.next();
+                    }
+                    let mut bn = String::new();
+                    while let Some(c) = bi.peek().copied().filter(|c| c.is_ascii_digit()) {
+                        bn.push(c);
+                        bi.next();
+                    }
+                    let an = an.trim_start_matches('0');
+                    let bn = bn.trim_start_matches('0');
+                    let ord = an.len().cmp(&bn.len()).then_with(|| an.cmp(bn));
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                } else {
+                    let ord = x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase());
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                    ai.next();
+                    bi.next();
+                }
+            }
+        }
+    }
+}
+
+fn permissions(mode: u32) -> String {
+    let bits = mode & 0o777;
+    let mut out = String::with_capacity(9);
+    for shift in [6, 3, 0] {
+        let b = (bits >> shift) & 0o7;
+        out.push(if b & 0o4 != 0 { 'r' } else { '-' });
+        out.push(if b & 0o2 != 0 { 'w' } else { '-' });
+        out.push(if b & 0o1 != 0 { 'x' } else { '-' });
+    }
+    out
+}
+
+fn format_age(t: Option<SystemTime>) -> String {
+    let Some(t) = t else {
+        return "-".into();
+    };
+    let secs = match SystemTime::now().duration_since(t) {
+        Ok(d) => d.as_secs(),
+        Err(_) => return "future".into(),
+    };
+    const MIN: u64 = 60;
+    const HOUR: u64 = 60 * MIN;
+    const DAY: u64 = 24 * HOUR;
+    const WEEK: u64 = 7 * DAY;
+    const MONTH: u64 = 30 * DAY;
+    const YEAR: u64 = 365 * DAY;
+    match secs {
+        0..=59 => "now".into(),
+        60..=3599 => format!("{}m", secs / MIN),
+        3600..=86399 => format!("{}h", secs / HOUR),
+        86400..=604799 => format!("{}d", secs / DAY),
+        604800..=2591999 => format!("{}w", secs / WEEK),
+        2592000..=31535999 => format!("{}mo", secs / MONTH),
+        _ => format!("{}y", secs / YEAR),
+    }
+}
+
+/// Relative path from `base` to `target` (both absolute), e.g. `../Pictures/x`.
+fn relative_path(base: &Path, target: &Path) -> PathBuf {
+    let base: Vec<_> = base.components().collect();
+    let target: Vec<_> = target.components().collect();
+    let mut i = 0;
+    while i < base.len() && i < target.len() && base[i] == target[i] {
+        i += 1;
+    }
+    let mut out = PathBuf::new();
+    for _ in i..base.len() {
+        out.push("..");
+    }
+    for c in &target[i..] {
+        out.push(c.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
 }
 
 /// Encode a path as a `file://` URI suitable for `text/uri-list` clipboards.
@@ -223,6 +404,12 @@ impl App {
             visual: None,
             completions: Vec::new(),
             completion_index: 0,
+            search: None,
+            find_query: String::new(),
+            find_forward: true,
+            find_origin: None,
+            last_find: None,
+            linemode: Linemode::Size,
             history: vec![cwd],
             history_pos: 0,
             input: String::new(),
@@ -280,50 +467,68 @@ impl App {
             .or_else(|| self.current().map(|e| e.name.clone()));
 
         let mut v: Vec<Entry> = Vec::new();
-        match fs::read_dir(&self.cwd) {
-            Ok(rd) => {
-                let needle = self.filter.to_lowercase();
-                for e in rd.flatten() {
-                    let name = e.file_name().to_string_lossy().into_owned();
-                    if !self.show_hidden && name.starts_with('.') {
-                        continue;
+        if let Some(search) = self.search.clone() {
+            v = self.search_entries(&search);
+        } else {
+            match fs::read_dir(&self.cwd) {
+                Ok(rd) => {
+                    for e in rd.flatten() {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        if !self.show_hidden && name.starts_with('.') {
+                            continue;
+                        }
+                        if let Some(entry) = entry_for(e.path(), name) {
+                            v.push(entry);
+                        }
                     }
-                    if !needle.is_empty() && !name.to_lowercase().contains(&needle) {
-                        continue;
-                    }
-                    let path = e.path();
-                    let md = fs::metadata(&path).or_else(|_| e.metadata()).ok();
-                    v.push(Entry {
-                        name,
-                        path,
-                        is_dir: md.as_ref().map(|m| m.is_dir()).unwrap_or(false),
-                        size: md.as_ref().map(|m| m.len()).unwrap_or(0),
-                        modified: md.and_then(|m| m.modified().ok()),
-                    });
                 }
+                Err(e) => self.status = format!("{}: {e}", self.cwd.display()),
             }
-            Err(e) => self.status = format!("{}: {e}", self.cwd.display()),
+        }
+
+        if !self.filter.is_empty() {
+            let needle = self.filter.clone();
+            v.retain(|e| smart_contains(&e.name, &needle));
         }
 
         let sort = self.sort;
         let reverse = self.sort_reverse;
-        v.sort_by(|a, b| {
-            b.is_dir.cmp(&a.is_dir).then_with(|| {
-                let order = match sort {
-                    Sort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                    Sort::Size => a.size.cmp(&b.size),
-                    Sort::Time => a.modified.cmp(&b.modified),
-                    Sort::Extension => extension(&a.name)
-                        .cmp(&extension(&b.name))
-                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
-                };
-                if reverse {
-                    order.reverse()
-                } else {
-                    order
-                }
-            })
-        });
+        if matches!(sort, Sort::Random) {
+            // Fisher–Yates with a time-seeded xorshift; no extra dependency.
+            let mut seed = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9e37_79b9_7f4a_7c15)
+                | 1;
+            for i in (1..v.len()).rev() {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let j = (seed % (i as u64 + 1)) as usize;
+                v.swap(i, j);
+            }
+        } else {
+            v.sort_by(|a, b| {
+                b.is_dir.cmp(&a.is_dir).then_with(|| {
+                    let order = match sort {
+                        Sort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                        Sort::Natural => natural_cmp(&a.name, &b.name),
+                        Sort::Size => a.size.cmp(&b.size),
+                        Sort::Time => a.modified.cmp(&b.modified),
+                        Sort::Btime => a.created.cmp(&b.created),
+                        Sort::Extension => extension(&a.name)
+                            .cmp(&extension(&b.name))
+                            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                        Sort::Random => std::cmp::Ordering::Equal,
+                    };
+                    if reverse {
+                        order.reverse()
+                    } else {
+                        order
+                    }
+                })
+            });
+        }
         self.entries = v;
 
         if self.entries.is_empty() {
@@ -335,6 +540,69 @@ impl App {
             self.state.select(Some(idx));
         }
         self.list_dirty = true;
+    }
+
+    /// Run `fd` or `rg` in the search root and turn the output into entries.
+    fn search_entries(&mut self, search: &Search) -> Vec<Entry> {
+        let prog = match search.kind {
+            SearchKind::Fd => "fd",
+            SearchKind::Rg => "rg",
+        };
+        let mut cmd = Command::new(prog);
+        cmd.current_dir(&search.root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match search.kind {
+            SearchKind::Fd => {
+                cmd.args(["--color", "never"]);
+                cmd.arg(if self.show_hidden {
+                    "--hidden"
+                } else {
+                    "--no-hidden"
+                });
+                cmd.arg("--").arg(&search.query);
+            }
+            SearchKind::Rg => {
+                cmd.args(["--color=never", "--files-with-matches", "--smart-case"]);
+                cmd.arg(if self.show_hidden {
+                    "--hidden"
+                } else {
+                    "--no-hidden"
+                });
+                cmd.arg("--").arg(&search.query);
+            }
+        }
+        let out = match cmd.output() {
+            Ok(o) => o,
+            Err(e) => {
+                self.status = format!("{prog}: {e}");
+                return Vec::new();
+            }
+        };
+        if !out.status.success() && out.status.code() != Some(1) {
+            let err = String::from_utf8_lossy(&out.stderr);
+            self.status = format!("{prog}: {}", err.lines().next().unwrap_or("failed"));
+            return Vec::new();
+        }
+        let mut v = Vec::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines().take(5000) {
+            let line = line.trim().trim_start_matches("./");
+            if line.is_empty() {
+                continue;
+            }
+            let path = search.root.join(line);
+            if let Some(entry) = entry_for(path, line.to_string()) {
+                v.push(entry);
+            }
+        }
+        v
+    }
+
+    fn cancel_search(&mut self) {
+        if self.search.take().is_some() {
+            self.reload();
+        }
     }
 
     fn cd(&mut self, path: PathBuf, focus: Option<String>) {
@@ -356,6 +624,7 @@ impl App {
         }
         self.cwd = path;
         self.filter.clear();
+        self.search = None;
         self.entries.clear();
         self.state.select(None);
         self.prefix = None;
@@ -390,6 +659,10 @@ impl App {
     }
 
     fn go_parent(&mut self) {
+        if self.search.is_some() {
+            self.cancel_search();
+            return;
+        }
         if let Some(p) = self.cwd.parent().map(Path::to_path_buf) {
             let name = self
                 .cwd
@@ -545,32 +818,41 @@ impl App {
         let Some((base, display, prefix)) = self.completion_context() else {
             return;
         };
-        let Ok(rd) = fs::read_dir(&base) else { return };
-        let needle = prefix.to_lowercase();
-        let show_hidden = self.show_hidden || prefix.starts_with('.');
-        let mut items = Vec::new();
+        let Ok(rd) = fs::read_dir(&base) else {
+            return;
+        };
+        // Yazi matches hidden entries too: exact prefix matches come first,
+        // then fuzzy substring matches (so typing `cache` finds `.cache`).
+        let smart = !prefix.chars().any(|c| c.is_ascii_uppercase());
+        const LIMIT: usize = 30;
+        let mut exact = Vec::new();
+        let mut fuzzy = Vec::new();
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') && !show_hidden {
-                continue;
-            }
-            if !needle.is_empty() && !name.to_lowercase().starts_with(&needle) {
-                continue;
-            }
             let path = e.path();
             if !fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
                 continue;
             }
-            items.push(Completion {
+            let item = Completion {
                 display: format!("{display}{name}/"),
                 path,
-            });
-            if items.len() >= 500 {
-                break;
+            };
+            let starts = if smart {
+                name.to_lowercase().starts_with(&prefix.to_lowercase())
+            } else {
+                name.starts_with(&prefix)
+            };
+            if starts {
+                exact.push(item);
+            } else if !prefix.is_empty() && name.contains(&prefix) {
+                fuzzy.push(item);
             }
         }
-        items.sort_by_key(|a| a.display.to_lowercase());
-        self.completions = items;
+        exact.sort_by_key(|a| a.display.to_lowercase());
+        fuzzy.sort_by_key(|a| a.display.to_lowercase());
+        exact.extend(fuzzy);
+        exact.truncate(LIMIT);
+        self.completions = exact;
     }
 
     fn move_completion(&mut self, delta: isize) {
@@ -777,25 +1059,15 @@ impl App {
         }
     }
 
-    fn clipboard_copy(&mut self) {
-        let targets: Vec<PathBuf> = self.targets().into_iter().filter(|p| !p.is_dir()).collect();
-        if targets.is_empty() {
-            self.status = "nothing to copy".into();
-            return;
-        }
-        let text = targets
-            .iter()
-            .map(|p| file_uri(p))
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
+    /// Put `text` on the system clipboard using the given MIME type.
+    fn clipboard_set(&mut self, text: String, mime: &str, ok: String) {
         let mut cmd = if env::var_os("WAYLAND_DISPLAY").is_some() {
             let mut c = Command::new("wl-copy");
-            c.arg("--type").arg("text/uri-list");
+            c.arg("--type").arg(mime);
             c
         } else if env::var_os("DISPLAY").is_some() {
             let mut c = Command::new("xclip");
-            c.args(["-selection", "clipboard", "-t", "text/uri-list"]);
+            c.args(["-selection", "clipboard", "-t", mime]);
             c
         } else {
             self.status = "no clipboard backend (wl-copy/xclip)".into();
@@ -810,12 +1082,68 @@ impl App {
                     let _ = stdin.write_all(text.as_bytes());
                 }
                 match child.wait() {
-                    Ok(_) => self.status = format!("copied {} file(s)", targets.len()),
+                    Ok(_) => self.status = ok,
                     Err(e) => self.status = format!("clipboard: {e}"),
                 }
             }
             Err(e) => self.status = format!("clipboard: {e}"),
         }
+    }
+
+    fn clipboard_copy(&mut self) {
+        let targets: Vec<PathBuf> = self.targets().into_iter().filter(|p| !p.is_dir()).collect();
+        if targets.is_empty() {
+            self.status = "nothing to copy".into();
+            return;
+        }
+        let text = targets
+            .iter()
+            .map(|p| file_uri(p))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let msg = format!("copied {} file(s)", targets.len());
+        self.clipboard_set(text, "text/uri-list", msg);
+    }
+
+    /// Yazi's `c` prefix: copy paths, URLs, dir paths, names, etc.
+    fn copy_paths(&mut self, kind: CopyKind) {
+        let targets = self.targets();
+        if targets.is_empty() {
+            self.status = "nothing to copy".into();
+            return;
+        }
+        let mut lines = Vec::new();
+        for p in &targets {
+            let value = match kind {
+                CopyKind::Path => p.display().to_string(),
+                CopyKind::Url => file_uri(p),
+                CopyKind::DirPath => p
+                    .parent()
+                    .unwrap_or(self.cwd.as_path())
+                    .display()
+                    .to_string(),
+                CopyKind::DirUrl => file_uri(p.parent().unwrap_or(self.cwd.as_path())),
+                CopyKind::FileName => p
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                CopyKind::NameNoExt => p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            };
+            if !value.is_empty() {
+                lines.push(value);
+            }
+        }
+        if lines.is_empty() {
+            self.status = "nothing to copy".into();
+            return;
+        }
+        let text = lines.join("\n") + "\n";
+        let msg = format!("copied {} item(s)", lines.len());
+        self.clipboard_set(text, "text/plain", msg);
     }
 
     fn clipboard_paste(&mut self) {
@@ -886,6 +1214,21 @@ impl App {
             return;
         }
 
+        if matches!(p, Prompt::SearchFd | Prompt::SearchRg) {
+            let kind = if p == Prompt::SearchFd {
+                SearchKind::Fd
+            } else {
+                SearchKind::Rg
+            };
+            self.search = Some(Search {
+                kind,
+                query: name,
+                root: self.cwd.clone(),
+            });
+            self.reload();
+            return;
+        }
+
         let r = match p {
             Prompt::Create => {
                 if name.ends_with('/') {
@@ -902,7 +1245,9 @@ impl App {
                 Some(e) => fs::rename(&e.path, self.cwd.join(&name)),
                 None => return,
             },
-            Prompt::Delete | Prompt::Cd => return,
+            Prompt::Delete | Prompt::Cd | Prompt::SearchFd | Prompt::SearchRg | Prompt::Shell => {
+                return
+            }
         };
         match r {
             Ok(()) => {
@@ -960,6 +1305,169 @@ impl App {
         }
     }
 
+    fn delete_now(&mut self) {
+        let t = self.targets();
+        if t.is_empty() {
+            return;
+        }
+        self.visual = None;
+        let mut n = 0;
+        for p in &t {
+            match remove(p) {
+                Ok(()) => n += 1,
+                Err(e) => self.status = format!("{}: {e}", p.display()),
+            }
+        }
+        self.selected.clear();
+        self.reload();
+        if self.status.is_empty() {
+            self.status = format!("deleted {n} item(s)");
+        }
+    }
+
+    /// Symlink yanked files into the cwd (Yazi's `-` and `_`).
+    fn link(&mut self, relative: bool) {
+        let Some((paths, _)) = self.yank.clone() else {
+            self.status = "nothing to link".into();
+            return;
+        };
+        let mut n = 0;
+        for src in paths {
+            let Some(name) = src.file_name() else {
+                continue;
+            };
+            let dst = unique(self.cwd.join(name));
+            let target = if relative {
+                relative_path(&self.cwd, &src)
+            } else {
+                src.clone()
+            };
+            match std::os::unix::fs::symlink(&target, &dst) {
+                Ok(()) => n += 1,
+                Err(e) => self.status = format!("{}: {e}", dst.display()),
+            }
+        }
+        self.reload();
+        if self.status.is_empty() {
+            self.status = format!("linked {n} item(s)");
+        }
+    }
+
+    /// Hardlink yanked files into the cwd (Yazi's `Ctrl+-`).
+    fn hardlink(&mut self) {
+        let Some((paths, _)) = self.yank.clone() else {
+            self.status = "nothing to link".into();
+            return;
+        };
+        let mut n = 0;
+        for src in paths {
+            let Some(name) = src.file_name() else {
+                continue;
+            };
+            let dst = unique(self.cwd.join(name));
+            match fs::hard_link(&src, &dst) {
+                Ok(()) => n += 1,
+                Err(e) => self.status = format!("{}: {e}", dst.display()),
+            }
+        }
+        self.reload();
+        if self.status.is_empty() {
+            self.status = format!("hardlinked {n} item(s)");
+        }
+    }
+
+    fn start_search(&mut self, kind: SearchKind) {
+        self.input.clear();
+        self.completions.clear();
+        self.mode = Mode::Prompt(match kind {
+            SearchKind::Fd => Prompt::SearchFd,
+            SearchKind::Rg => Prompt::SearchRg,
+        });
+    }
+
+    fn start_shell(&mut self) {
+        self.input.clear();
+        self.completions.clear();
+        self.mode = Mode::Prompt(Prompt::Shell);
+    }
+
+    /// Run a shell command in the current directory, temporarily handing the
+    /// terminal over to it (Yazi's `;` / `:`).
+    fn run_shell(&mut self, term: &mut DefaultTerminal) {
+        let cmd = self.input.trim().to_string();
+        if cmd.is_empty() {
+            return;
+        }
+        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        ratatui::restore();
+        let r = Command::new(&shell)
+            .arg("-c")
+            .arg(&cmd)
+            .current_dir(&self.cwd)
+            .status();
+        *term = ratatui::init();
+        match r {
+            Ok(s) if !s.success() => self.status = format!("shell: {s}"),
+            Err(e) => self.status = format!("shell: {e}"),
+            _ => {}
+        }
+        self.reload();
+    }
+
+    fn suspend(&mut self, term: &mut DefaultTerminal) {
+        ratatui::restore();
+        let _ =
+            rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::Tstp);
+        *term = ratatui::init();
+        self.reload();
+    }
+
+    fn start_find(&mut self, forward: bool) {
+        self.find_origin = self.state.selected();
+        self.find_query.clear();
+        self.find_forward = forward;
+        self.mode = Mode::Find;
+    }
+
+    fn find_match(&mut self, from: usize, forward: bool, query: &str, include_from: bool) {
+        let n = self.entries.len();
+        if n == 0 || query.is_empty() {
+            return;
+        }
+        let start = if include_from {
+            from
+        } else if forward {
+            (from + 1) % n
+        } else {
+            (from + n - 1) % n
+        };
+        let mut i = start;
+        for _ in 0..n {
+            if smart_contains(&self.entries[i].name, query) {
+                self.state.select(Some(i));
+                return;
+            }
+            i = if forward {
+                (i + 1) % n
+            } else {
+                (i + n - 1) % n
+            };
+        }
+    }
+
+    fn find_next(&mut self, forward: bool) {
+        let Some(query) = self.last_find.clone() else {
+            return;
+        };
+        let from = self.state.selected().unwrap_or(0);
+        self.find_match(from, forward, &query, false);
+    }
+
+    fn set_linemode(&mut self, mode: Linemode) {
+        self.linemode = mode;
+        self.list_dirty = true;
+    }
+
     // ─────────────── input ───────────────
 
     fn handle_key(&mut self, key: KeyEvent, term: &mut DefaultTerminal) -> io::Result<bool> {
@@ -986,6 +1494,48 @@ impl App {
                 }
                 return Ok(false);
             }
+            Mode::Find => {
+                match key.code {
+                    KeyCode::Esc => {
+                        if let Some(o) = self.find_origin.take() {
+                            if !self.entries.is_empty() {
+                                self.state.select(Some(o.min(self.entries.len() - 1)));
+                            }
+                        }
+                        self.find_query.clear();
+                        self.mode = Mode::Normal;
+                    }
+                    KeyCode::Enter => {
+                        self.last_find = Some(self.find_query.clone());
+                        self.find_origin = None;
+                        self.mode = Mode::Normal;
+                    }
+                    KeyCode::Backspace => {
+                        self.find_query.pop();
+                        if let Some(o) = self.find_origin {
+                            if self.find_query.is_empty() {
+                                if !self.entries.is_empty() {
+                                    self.state.select(Some(o.min(self.entries.len() - 1)));
+                                }
+                            } else {
+                                let fwd = self.find_forward;
+                                let q = self.find_query.clone();
+                                self.find_match(o, fwd, &q, true);
+                            }
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        self.find_query.push(c);
+                        if let Some(o) = self.find_origin {
+                            let fwd = self.find_forward;
+                            let q = self.find_query.clone();
+                            self.find_match(o, fwd, &q, true);
+                        }
+                    }
+                    _ => {}
+                }
+                return Ok(false);
+            }
             Mode::Prompt(p) => {
                 if p == Prompt::Delete {
                     if key.code == KeyCode::Char('y') {
@@ -1001,7 +1551,9 @@ impl App {
                         self.completions.clear();
                     }
                     KeyCode::Enter => {
-                        if p == Prompt::Cd {
+                        if p == Prompt::Shell {
+                            self.run_shell(term);
+                        } else if p == Prompt::Cd {
                             self.submit_cd();
                         } else {
                             self.submit(p);
@@ -1053,6 +1605,11 @@ impl App {
                 KeyCode::Char('n') => self.start_create(),
                 KeyCode::Char('y') => self.clipboard_copy(),
                 KeyCode::Char('p') => self.clipboard_paste(),
+                KeyCode::Char('s') => self.cancel_search(),
+                // Ctrl+- / Ctrl+_ arrive as `Ctrl+7` from terminals that send
+                // the legacy 0x1f byte (crossterm maps 0x1c..=0x1f to 4..=7).
+                KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Char('7') => self.hardlink(),
+                KeyCode::Char('z') => self.suspend(term),
                 _ => {}
             }
             return Ok(false);
@@ -1095,7 +1652,7 @@ impl App {
             }
             KeyCode::Char('H') => self.history_back(),
             KeyCode::Char('L') => self.history_forward(),
-            KeyCode::Char('~') => self.mode = Mode::Help,
+            KeyCode::Char('~') | KeyCode::F(1) => self.mode = Mode::Help,
             KeyCode::Char('e') => {
                 if let Some(e) = self.current().cloned().filter(|e| !e.is_dir) {
                     let ed = env::var("VISUAL")
@@ -1168,6 +1725,7 @@ impl App {
                     self.mode = Mode::Prompt(Prompt::Delete);
                 }
             }
+            KeyCode::Char('D') => self.delete_now(),
             KeyCode::Char('r') => {
                 self.visual = None;
                 if let Some(e) = self.current() {
@@ -1176,11 +1734,22 @@ impl App {
                 }
             }
             KeyCode::Char('a') => self.start_create(),
-            KeyCode::Char('/') => self.mode = Mode::Filter,
+            KeyCode::Char('f') => self.mode = Mode::Filter,
+            KeyCode::Char('/') => self.start_find(true),
+            KeyCode::Char('?') => self.start_find(false),
+            KeyCode::Char('n') => self.find_next(true),
+            KeyCode::Char('N') => self.find_next(false),
+            KeyCode::Char('s') => self.start_search(SearchKind::Fd),
+            KeyCode::Char('S') => self.start_search(SearchKind::Rg),
+            KeyCode::Char('c') => self.prefix = Some(Prefix::Copy),
+            KeyCode::Char('m') => self.prefix = Some(Prefix::Linemode),
             KeyCode::Char('z') => self.fzf_jump(term),
+            KeyCode::Char(';') | KeyCode::Char(':') => self.start_shell(),
             KeyCode::Char(',') => self.prefix = Some(Prefix::Sort),
             KeyCode::Char('+') => self.zoom_in(),
+            KeyCode::Char('-') if key.modifiers.contains(KeyModifiers::ALT) => self.link(false),
             KeyCode::Char('-') => self.zoom_out(),
+            KeyCode::Char('_') => self.link(true),
             KeyCode::Char('0') => self.zoom_reset(),
             KeyCode::Esc => {
                 if self.visual.is_some() {
@@ -1188,6 +1757,8 @@ impl App {
                 } else if !self.filter.is_empty() {
                     self.filter.clear();
                     self.reload();
+                } else if self.search.is_some() {
+                    self.cancel_search();
                 } else {
                     self.selected.clear();
                     self.list_dirty = true;
@@ -1224,12 +1795,53 @@ impl App {
             Prefix::Sort => match key.code {
                 KeyCode::Char('a') => self.set_sort(Sort::Name, false),
                 KeyCode::Char('A') => self.set_sort(Sort::Name, true),
-                KeyCode::Char('s') => self.set_sort(Sort::Size, false),
-                KeyCode::Char('S') => self.set_sort(Sort::Size, true),
-                KeyCode::Char('m') => self.set_sort(Sort::Time, false),
-                KeyCode::Char('M') => self.set_sort(Sort::Time, true),
+                KeyCode::Char('n') => self.set_sort(Sort::Natural, false),
+                KeyCode::Char('N') => self.set_sort(Sort::Natural, true),
+                KeyCode::Char('s') => {
+                    self.set_sort(Sort::Size, false);
+                    self.set_linemode(Linemode::Size);
+                }
+                KeyCode::Char('S') => {
+                    self.set_sort(Sort::Size, true);
+                    self.set_linemode(Linemode::Size);
+                }
+                KeyCode::Char('m') => {
+                    self.set_sort(Sort::Time, false);
+                    self.set_linemode(Linemode::Mtime);
+                }
+                KeyCode::Char('M') => {
+                    self.set_sort(Sort::Time, true);
+                    self.set_linemode(Linemode::Mtime);
+                }
+                KeyCode::Char('b') => {
+                    self.set_sort(Sort::Btime, false);
+                    self.set_linemode(Linemode::Btime);
+                }
+                KeyCode::Char('B') => {
+                    self.set_sort(Sort::Btime, true);
+                    self.set_linemode(Linemode::Btime);
+                }
                 KeyCode::Char('e') => self.set_sort(Sort::Extension, false),
                 KeyCode::Char('E') => self.set_sort(Sort::Extension, true),
+                KeyCode::Char('r') => self.set_sort(Sort::Random, false),
+                _ => {}
+            },
+            Prefix::Copy => match key.code {
+                KeyCode::Char('c') => self.copy_paths(CopyKind::Path),
+                KeyCode::Char('C') => self.copy_paths(CopyKind::Url),
+                KeyCode::Char('d') => self.copy_paths(CopyKind::DirPath),
+                KeyCode::Char('D') => self.copy_paths(CopyKind::DirUrl),
+                KeyCode::Char('f') => self.copy_paths(CopyKind::FileName),
+                KeyCode::Char('n') => self.copy_paths(CopyKind::NameNoExt),
+                _ => {}
+            },
+            Prefix::Linemode => match key.code {
+                KeyCode::Char('s') => self.set_linemode(Linemode::Size),
+                KeyCode::Char('p') => self.set_linemode(Linemode::Permissions),
+                KeyCode::Char('b') => self.set_linemode(Linemode::Btime),
+                KeyCode::Char('m') => self.set_linemode(Linemode::Mtime),
+                KeyCode::Char('o') => self.set_linemode(Linemode::Owner),
+                KeyCode::Char('n') => self.set_linemode(Linemode::None),
                 _ => {}
             },
         }
@@ -1299,6 +1911,7 @@ impl App {
 
     fn rebuild_list(&mut self, width: u16) {
         let inner = width.saturating_sub(1) as usize;
+        let linemode = self.linemode;
         let items: Vec<ListItem> = self
             .entries
             .iter()
@@ -1309,10 +1922,19 @@ impl App {
                     " "
                 };
                 let left = format!("{mark}{}{}", e.name, if e.is_dir { "/" } else { "" });
-                let right = if e.is_dir {
-                    String::new()
-                } else {
-                    human(e.size)
+                let right = match linemode {
+                    Linemode::None => String::new(),
+                    Linemode::Size => {
+                        if e.is_dir {
+                            String::new()
+                        } else {
+                            human(e.size)
+                        }
+                    }
+                    Linemode::Permissions => permissions(e.mode),
+                    Linemode::Btime => format_age(e.created),
+                    Linemode::Mtime => format_age(e.modified),
+                    Linemode::Owner => format!("{}:{}", e.uid, e.gid),
                 };
                 let used = left.chars().count() + right.chars().count();
                 let pad = inner.saturating_sub(used).max(1);
@@ -1375,13 +1997,21 @@ impl App {
         // status line
         let sort = match self.sort {
             Sort::Name => "name",
+            Sort::Natural => "natural",
             Sort::Size => "size",
             Sort::Time => "time",
+            Sort::Btime => "btime",
             Sort::Extension => "ext",
+            Sort::Random => "random",
         };
         let direction = if self.sort_reverse { "↓" } else { "↑" };
         let mut text = match self.mode {
-            Mode::Filter => format!("/{}", self.filter),
+            Mode::Filter => format!("filter: {}", self.filter),
+            Mode::Find => format!(
+                "find{}: {}",
+                if self.find_forward { "→" } else { "←" },
+                self.find_query
+            ),
             Mode::Help => "rnn keys — press any key to close".into(),
             Mode::Prompt(Prompt::Delete) => {
                 format!("delete {} item(s)? (y/N)", self.targets().len())
@@ -1391,27 +2021,53 @@ impl App {
                     Prompt::Create => "create",
                     Prompt::Rename => "rename",
                     Prompt::Cd => "go to",
+                    Prompt::SearchFd => "fd",
+                    Prompt::SearchRg => "rg",
+                    Prompt::Shell => "shell",
                     Prompt::Delete => "",
                 };
                 format!("{label}: {}", self.input)
             }
             Mode::Normal if !self.status.is_empty() => self.status.clone(),
-            Mode::Normal => format!(
-                "{} items | {} selected | sort:{sort}{direction}{}{}",
-                self.entries.len(),
-                self.selected.len(),
-                if self.show_hidden { " | hidden" } else { "" },
-                if self.filter.is_empty() {
-                    String::new()
-                } else {
-                    format!(" | filter:{}", self.filter)
-                },
-            ),
+            Mode::Normal => {
+                let mut s = format!(
+                    "{} items | {} selected | sort:{sort}{direction}",
+                    self.entries.len(),
+                    self.selected.len()
+                );
+                if let Some(search) = &self.search {
+                    let kind = match search.kind {
+                        SearchKind::Fd => "fd",
+                        SearchKind::Rg => "rg",
+                    };
+                    s.push_str(&format!(" | {kind}: {}", search.query));
+                }
+                if self.show_hidden {
+                    s.push_str(" | hidden");
+                }
+                if !self.filter.is_empty() {
+                    s.push_str(&format!(" | filter:{}", self.filter));
+                }
+                if self.linemode != Linemode::Size {
+                    let lm = match self.linemode {
+                        Linemode::Size => "size",
+                        Linemode::Permissions => "perms",
+                        Linemode::Btime => "btime",
+                        Linemode::Mtime => "mtime",
+                        Linemode::Owner => "owner",
+                        Linemode::None => "none",
+                    };
+                    s.push_str(&format!(" | lm:{lm}"));
+                }
+                s
+            }
         };
         if let Some(prefix) = self.prefix {
             text.push_str(match prefix {
                 Prefix::Goto => " | g…",
                 Prefix::Sort => " | ,…",
+                Prefix::Copy => " | c…",
+                Prefix::Linemode => " | m…",
             });
         }
         if let Some(visual) = &self.visual {
@@ -1488,32 +2144,42 @@ impl App {
             "Ctrl+u/d    half page",
             "Ctrl+b/f    full page",
             "Space       toggle selection",
-            "Ctrl+a      select all",
-            "Ctrl+r      invert selection",
+            "Ctrl+a/r    select all / invert",
             "v / V       visual select / unset",
             "y / x       yank / cut",
             "p / P       paste / paste-force",
             "Y / X       cancel yank",
-            "d / r       delete / rename",
+            "d / D       delete confirm / now",
+            "r / a       rename / create",
             "Ctrl+n      create",
+            "Ctrl+y/p    clipboard copy / paste",
+            "; / :       run shell command",
+            "Ctrl+z      suspend",
         ];
         let right = [
-            "a           create file or dir/",
             "o / Enter   open",
             "e / i       editor / pager",
             "J / K       seek preview",
             "+ / - / 0   zoom in / out / fit",
             "T           toggle preview pane",
             ".           hidden files",
-            "/           filter",
+            "f           filter",
+            "/ ?         find next / previous",
+            "n / N       next / previous found",
+            "s / S       search fd / rg",
             "z           fzf jump",
-            "Ctrl+y/p    clipboard copy / paste",
+            "c …         copy path/url/dir/name",
+            "m …         linemode size/perms/time",
+            "_ / Alt+-   symlink relative / absolute",
+            "Ctrl+-      hardlink",
             "gh gc gd    home / config / downloads",
             "go gp gv    osu / pictures / videos",
             "g<Space>    go to path (live menu)",
             "gf / gt     follow symlink / trash",
-            ",a ,s ,m ,e sort (shift = reverse)",
-            "~           close help",
+            ",a ,n ,s    sort name/natural/size",
+            ",m ,b ,e    sort time / btime / ext",
+            ",r          sort randomly",
+            "~ / F1      help",
         ];
         let area = f.area();
         let width = area.width.saturating_sub(4).min(88);
