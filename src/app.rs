@@ -83,6 +83,74 @@ enum Prefix {
     Tab,
 }
 
+impl Prefix {
+    fn label(self) -> &'static str {
+        match self {
+            Prefix::Goto => "g",
+            Prefix::Sort => ",",
+            Prefix::Copy => "c",
+            Prefix::Linemode => "m",
+            Prefix::Tab => "t",
+        }
+    }
+
+    /// Continuations shown in the which-key style popup.
+    fn items(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Prefix::Goto => &[
+                ("g", "top of list"),
+                ("h", "home"),
+                ("c", "~/.config"),
+                ("d", "~/Downloads"),
+                ("o", "osu! (osu-wine)"),
+                ("p", "~/Pictures"),
+                ("v", "~/Videos"),
+                ("Space", "go to path…"),
+                ("f", "follow symlink"),
+                ("t", "trash (unsupported)"),
+            ],
+            Prefix::Sort => &[
+                ("a", "name ↑"),
+                ("A", "name ↓"),
+                ("n", "natural ↑"),
+                ("N", "natural ↓"),
+                ("s", "size ↑"),
+                ("S", "size ↓"),
+                ("m", "modified ↑"),
+                ("M", "modified ↓"),
+                ("b", "created ↑"),
+                ("B", "created ↓"),
+                ("e", "extension ↑"),
+                ("E", "extension ↓"),
+                ("r", "random"),
+            ],
+            Prefix::Copy => &[
+                ("c", "path"),
+                ("C", "url"),
+                ("d", "directory path"),
+                ("D", "directory url"),
+                ("f", "filename"),
+                ("n", "name without extension"),
+            ],
+            Prefix::Linemode => &[
+                ("s", "size"),
+                ("p", "permissions"),
+                ("b", "created"),
+                ("m", "modified"),
+                ("o", "owner"),
+                ("n", "none"),
+            ],
+            Prefix::Tab => &[
+                ("t", "new tab here"),
+                ("n", "new tab at home"),
+                ("c", "close tab"),
+                ("[", "previous tab"),
+                ("]", "next tab"),
+            ],
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Linemode {
     Size,
@@ -2685,6 +2753,9 @@ impl App {
         }
         f.render_widget(Paragraph::new(text), rows[1]);
         self.draw_completions(f);
+        if self.prefix.is_some() {
+            self.draw_prefix_menu(f);
+        }
 
         if matches!(self.mode, Mode::Help) {
             self.draw_help(f);
@@ -2695,6 +2766,85 @@ impl App {
         if matches!(self.mode, Mode::OpenWith) {
             self.draw_open_with(f);
         }
+    }
+
+    fn draw_prefix_menu(&self, f: &mut Frame) {
+        let Some(prefix) = self.prefix else {
+            return;
+        };
+        let items = prefix.items();
+        if items.is_empty() {
+            return;
+        }
+        let area = f.area();
+        if area.width < 16 || area.height < 5 {
+            return;
+        }
+
+        let max_rows = area.height.saturating_sub(3).max(1) as usize;
+        let cols = items.len().div_ceil(max_rows).max(1);
+        let rows = items.len().div_ceil(cols);
+
+        let key_w = items
+            .iter()
+            .map(|(k, _)| k.chars().count())
+            .max()
+            .unwrap_or(1);
+        let desc_w = items
+            .iter()
+            .map(|(_, d)| d.chars().count())
+            .max()
+            .unwrap_or(0);
+        let gap = 2usize;
+        let max_width = area.width.saturating_sub(2) as usize;
+        let overhead = 2 + cols * (key_w + 2) + cols.saturating_sub(1) * gap;
+        let desc_w = desc_w.min(max_width.saturating_sub(overhead) / cols).max(4);
+        let col_w = key_w + 2 + desc_w;
+        let width = (cols * col_w + cols.saturating_sub(1) * gap + 2).min(max_width.max(8)) as u16;
+        let height = (rows + 2).min(area.height.saturating_sub(1) as usize) as u16;
+        let rect = Rect::new(
+            area.x + area.width - width,
+            area.y + area.height - 1 - height,
+            width,
+            height,
+        );
+
+        let mut lines = Vec::new();
+        for r in 0..rows {
+            let mut spans = Vec::new();
+            for c in 0..cols {
+                let Some((key, desc)) = items.get(c * rows + r) else {
+                    continue;
+                };
+                if c > 0 {
+                    spans.push(Span::raw(" ".repeat(gap)));
+                }
+                let key_pad = key_w - key.chars().count();
+                spans.push(Span::styled(
+                    format!("{key}{}", " ".repeat(key_pad + 2)),
+                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ));
+                let desc_pad = desc_w.saturating_sub(desc.chars().count());
+                spans.push(Span::styled(
+                    format!("{desc}{}", " ".repeat(desc_pad)),
+                    Style::new().fg(Color::Gray),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+
+        let title = Line::from(vec![
+            Span::styled(
+                format!(" {} ", prefix.label()),
+                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("· Esc ", Style::new().fg(Color::DarkGray)),
+        ]);
+        f.render_widget(Clear, rect);
+        f.render_widget(
+            Paragraph::new(lines).block(Block::bordered().title(title)),
+            rect,
+        );
     }
 
     fn draw_info(&self, f: &mut Frame) {
