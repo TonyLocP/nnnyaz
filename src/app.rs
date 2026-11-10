@@ -18,6 +18,7 @@ use ratatui::{
 };
 
 use crate::{
+    openwith,
     preview::{
         detect::{self, Kind},
         Key as PreviewKey, Preview,
@@ -70,6 +71,7 @@ enum Mode {
     Prompt(Prompt),
     Help,
     Info,
+    OpenWith,
 }
 
 #[derive(Clone, Copy)]
@@ -153,9 +155,22 @@ struct TabSnapshot {
     focus: Option<String>,
 }
 
+/// One row in the `Tab` (spot/info) overlay.
+enum InfoLine {
+    Section(&'static str),
+    Field(&'static str, String),
+}
+
 /// Metadata shown by the `Tab` (spot/info) overlay.
 struct Info {
-    lines: Vec<(&'static str, String)>,
+    lines: Vec<InfoLine>,
+}
+
+/// The modal open-with menu (`O`).
+struct OpenWith {
+    path: PathBuf,
+    options: Vec<openwith::Opener>,
+    index: usize,
 }
 
 pub struct App {
@@ -189,6 +204,7 @@ pub struct App {
     tabs: Vec<TabSnapshot>,
     tab_index: usize,
     info: Option<Info>,
+    open_with: Option<OpenWith>,
     preview: Preview,
     list: List<'static>,
     list_dirty: bool,
@@ -391,44 +407,79 @@ fn format_duration(secs: f64) -> String {
     }
 }
 
-/// Resolution and duration of a video, via `ffprobe` when installed.
-fn video_info(path: &Path) -> Option<String> {
-    let out = Command::new("ffprobe")
+#[derive(Default)]
+struct VideoInfo {
+    width: Option<u32>,
+    height: Option<u32>,
+    duration: Option<f64>,
+    codec: Option<String>,
+}
+
+/// Resolution, duration and codec of a video, via `ffprobe` when installed.
+fn video_info(path: &Path) -> VideoInfo {
+    let mut info = VideoInfo::default();
+    let Ok(out) = Command::new("ffprobe")
         .args([
             "-v",
             "error",
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height:format=duration",
+            "stream=width,height,codec_name:format=duration",
             "-of",
             "default=noprint_wrappers=1",
         ])
         .arg(path)
         .output()
-        .ok()?;
+    else {
+        return info;
+    };
     if !out.status.success() {
-        return None;
+        return info;
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let (mut w, mut h, mut dur) = (None, None, None);
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("width=") {
-            w = v.trim().parse::<u32>().ok();
+            info.width = v.trim().parse::<u32>().ok();
         } else if let Some(v) = line.strip_prefix("height=") {
-            h = v.trim().parse::<u32>().ok();
+            info.height = v.trim().parse::<u32>().ok();
         } else if let Some(v) = line.strip_prefix("duration=") {
-            dur = v.trim().parse::<f64>().ok();
+            info.duration = v.trim().parse::<f64>().ok();
+        } else if let Some(v) = line.strip_prefix("codec_name=") {
+            info.codec = Some(v.trim().to_string());
         }
     }
-    let mut parts = Vec::new();
-    if let (Some(w), Some(h)) = (w, h) {
-        parts.push(format!("{w}×{h}"));
+    info
+}
+
+/// Recursively total the regular files under `path`, stopping after `limit`
+/// so a huge tree can't freeze the UI. The bool is false when the walk was
+/// cut short (shown as `(?)`, like yazi's live folder size).
+fn dir_size(path: &Path, limit: Duration) -> (u64, bool) {
+    let start = std::time::Instant::now();
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if start.elapsed() > limit {
+            return (total, false);
+        }
+        let Ok(rd) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for ent in rd.flatten() {
+            let Ok(ft) = ent.file_type() else {
+                continue;
+            };
+            if ft.is_dir() {
+                stack.push(ent.path());
+            } else if ft.is_file() {
+                if let Ok(meta) = ent.metadata() {
+                    total = total.saturating_add(meta.len());
+                }
+            }
+        }
     }
-    if let Some(d) = dur {
-        parts.push(format_duration(d));
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
+    (total, true)
 }
 
 fn truncate_chars(s: &str, n: usize) -> String {
@@ -543,6 +594,7 @@ impl App {
             tabs: Vec::new(),
             tab_index: 0,
             info: None,
+            open_with: None,
             preview: Preview::new(),
             list: List::new(Vec::<ListItem>::new()),
             list_dirty: true,
@@ -1207,6 +1259,110 @@ impl App {
         }
     }
 
+    /// `O`: build the open-with menu from the user's Yazi config.
+    fn start_open_with(&mut self) {
+        let Some(e) = self.current().cloned() else {
+            return;
+        };
+        let options = openwith::options(&e.path);
+        if options.is_empty() {
+            self.status = "open with: no openers configured".into();
+            return;
+        }
+        self.open_with = Some(OpenWith {
+            path: e.path,
+            options,
+            index: 0,
+        });
+        self.mode = Mode::OpenWith;
+    }
+
+    fn handle_open_with_key(&mut self, key: KeyEvent, term: &mut DefaultTerminal) {
+        let Some(state) = self.open_with.as_ref() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        let len = state.options.len();
+        if len == 0 {
+            self.open_with = None;
+            self.mode = Mode::Normal;
+            return;
+        }
+        let mut index = state.index.min(len - 1);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.open_with = None;
+                self.mode = Mode::Normal;
+                return;
+            }
+            KeyCode::Char('j') | KeyCode::Down => index = (index + 1) % len,
+            KeyCode::Char('k') | KeyCode::Up => index = (index + len - 1) % len,
+            KeyCode::Char('g') | KeyCode::Home => index = 0,
+            KeyCode::Char('G') | KeyCode::End => index = len - 1,
+            KeyCode::Char(c @ '1'..='9') => {
+                let i = c as usize - '1' as usize;
+                if i >= len {
+                    return;
+                }
+                index = i;
+                if let Some(s) = self.open_with.as_mut() {
+                    s.index = index;
+                }
+                self.run_opener(term, index);
+                return;
+            }
+            KeyCode::Enter => {
+                self.run_opener(term, index);
+                return;
+            }
+            _ => return,
+        }
+        if let Some(s) = self.open_with.as_mut() {
+            s.index = index;
+        }
+    }
+
+    fn run_opener(&mut self, term: &mut DefaultTerminal, index: usize) {
+        let Some(state) = self.open_with.take() else {
+            return;
+        };
+        let Some(op) = state.options.get(index).cloned() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        self.mode = Mode::Normal;
+        let cmd = op.command_for(&state.path);
+        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        if op.block {
+            ratatui::restore();
+            let r = Command::new(&shell)
+                .arg("-c")
+                .arg(&cmd)
+                .current_dir(&self.cwd)
+                .status();
+            *term = ratatui::init();
+            match r {
+                Ok(s) if !s.success() => self.status = format!("{}: {s}", op.name),
+                Err(e) => self.status = format!("{}: {e}", op.name),
+                _ => self.status = format!("opened with {}", op.name),
+            }
+            self.reload();
+        } else {
+            let r = Command::new(&shell)
+                .arg("-c")
+                .arg(&cmd)
+                .current_dir(&self.cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            match r {
+                Ok(_) => self.status = format!("opened with {}", op.name),
+                Err(e) => self.status = format!("{}: {e}", op.name),
+            }
+        }
+    }
+
     fn follow_symlink(&mut self) {
         let Some(e) = self.current().cloned() else {
             return;
@@ -1756,61 +1912,99 @@ impl App {
             }
         };
 
-        let mut lines: Vec<(&'static str, String)> = vec![
-            ("Name", e.name.clone()),
-            ("Path", e.path.display().to_string()),
-            ("Type", kind.to_string()),
-        ];
+        let mut lines: Vec<InfoLine> = vec![InfoLine::Section("Base")];
+        lines.push(InfoLine::Field("Name", e.name.clone()));
+        lines.push(InfoLine::Field("Path", e.path.display().to_string()));
+        lines.push(InfoLine::Field("Type", kind.to_string()));
+        if let Some(mime) = openwith::file_mime(&e.path) {
+            lines.push(InfoLine::Field("Mimetype", mime));
+        }
         if let Ok(target) = fs::read_link(&e.path) {
-            lines.push(("Link to", target.display().to_string()));
+            lines.push(InfoLine::Field("Link to", target.display().to_string()));
         }
-        if e.is_dir {
-            if let Ok(rd) = fs::read_dir(&e.path) {
-                lines.push(("Entries", rd.flatten().count().to_string()));
-            }
-        } else {
-            lines.push(("Size", format!("{} ({} bytes)", human(e.size), e.size)));
-        }
-        lines.push((
-            "Modified",
-            format!("{} ({})", format_time(e.modified), format_age(e.modified)),
-        ));
-        lines.push((
+        lines.push(InfoLine::Field(
             "Created",
             format!("{} ({})", format_time(e.created), format_age(e.created)),
         ));
+        lines.push(InfoLine::Field(
+            "Modified",
+            format!("{} ({})", format_time(e.modified), format_age(e.modified)),
+        ));
         if let Some(m) = &meta {
             if let Ok(accessed) = m.accessed() {
-                lines.push(("Accessed", format_time(Some(accessed))));
+                lines.push(InfoLine::Field("Accessed", format_time(Some(accessed))));
             }
+        }
+
+        if e.is_dir {
+            lines.push(InfoLine::Section("Folder"));
+            let (bytes, complete) = dir_size(&e.path, Duration::from_millis(400));
+            let size = if complete {
+                human(bytes)
+            } else {
+                format!("{} (?)", human(bytes))
+            };
+            lines.push(InfoLine::Field("Size", size));
+            if let Ok(rd) = fs::read_dir(&e.path) {
+                lines.push(InfoLine::Field("Entries", rd.flatten().count().to_string()));
+            }
+        } else {
+            lines.push(InfoLine::Section("File"));
+            lines.push(InfoLine::Field(
+                "Size",
+                format!("{} ({} bytes)", human(e.size), e.size),
+            ));
+        }
+
+        match detect::detect(&e.path) {
+            Kind::Image => {
+                lines.push(InfoLine::Section("Image"));
+                if let Ok(Some(fmt)) = infer::get_from_path(&e.path) {
+                    lines.push(InfoLine::Field("Format", fmt.extension().to_uppercase()));
+                }
+                if let Ok((w, h)) = image::image_dimensions(&e.path) {
+                    lines.push(InfoLine::Field("Size", format!("{w}×{h}")));
+                }
+            }
+            Kind::Video => {
+                lines.push(InfoLine::Section("Video"));
+                let v = video_info(&e.path);
+                if let Some(d) = v.duration {
+                    lines.push(InfoLine::Field("Duration", format_duration(d)));
+                }
+                if let (Some(w), Some(h)) = (v.width, v.height) {
+                    lines.push(InfoLine::Field("Size", format!("{w}×{h}")));
+                }
+                if let Some(codec) = v.codec {
+                    lines.push(InfoLine::Field("Codec", codec));
+                }
+            }
+            _ => {}
+        }
+
+        if let Some(m) = &meta {
+            lines.push(InfoLine::Section("Metadata"));
             let owner = id_name("/etc/passwd", e.uid)
                 .map(|n| format!("{n} ({})", e.uid))
                 .unwrap_or_else(|| e.uid.to_string());
             let group = id_name("/etc/group", e.gid)
                 .map(|n| format!("{n} ({})", e.gid))
                 .unwrap_or_else(|| e.gid.to_string());
-            lines.push(("Owner", format!("{owner} : {group}")));
-            lines.push((
+            lines.push(InfoLine::Field("Owner", format!("{owner} : {group}")));
+            lines.push(InfoLine::Field(
                 "Permissions",
                 format!("{} ({:04o})", permissions(e.mode), e.mode & 0o7777),
             ));
-            lines.push(("Inode", format!("{} · {} link(s)", m.ino(), m.nlink())));
+            lines.push(InfoLine::Field(
+                "Inode",
+                format!("{} · {} link(s)", m.ino(), m.nlink()),
+            ));
         }
-        match detect::detect(&e.path) {
-            Kind::Image => {
-                if let Ok((w, h)) = image::image_dimensions(&e.path) {
-                    lines.push(("Image", format!("{w}×{h}")));
-                }
-            }
-            Kind::Video => {
-                if let Some(info) = video_info(&e.path) {
-                    lines.push(("Video", info));
-                }
-            }
-            _ => {}
-        }
+
         if let Some((pkind, n)) = self.preview.artifact_meta() {
-            lines.push(("Preview", format!("{pkind} · {n} line(s)")));
+            lines.push(InfoLine::Section("Preview"));
+            lines.push(InfoLine::Field("Kind", pkind.to_string()));
+            lines.push(InfoLine::Field("Lines", n.to_string()));
         }
         self.info = Some(Info { lines });
         self.mode = Mode::Info;
@@ -1938,6 +2132,10 @@ impl App {
                 self.mode = Mode::Normal;
                 return Ok(false);
             }
+            Mode::OpenWith => {
+                self.handle_open_with_key(key, term);
+                return Ok(false);
+            }
             Mode::Normal => {}
         }
 
@@ -2009,6 +2207,7 @@ impl App {
             KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter | KeyCode::Char('o') => {
                 self.open(term)
             }
+            KeyCode::Char('O') => self.start_open_with(),
             KeyCode::Char('H') => self.history_back(),
             KeyCode::Char('L') => self.history_forward(),
             KeyCode::Char('~') | KeyCode::F(1) => self.mode = Mode::Help,
@@ -2411,6 +2610,7 @@ impl App {
             ),
             Mode::Help => "rnn keys — press any key to close".into(),
             Mode::Info => "info — press any key to close".into(),
+            Mode::OpenWith => "open with — j/k move · Enter open · Esc cancel".into(),
             Mode::Prompt(Prompt::Delete) => {
                 format!("delete {} item(s)? (y/N)", self.targets().len())
             }
@@ -2492,6 +2692,9 @@ impl App {
         if matches!(self.mode, Mode::Info) {
             self.draw_info(f);
         }
+        if matches!(self.mode, Mode::OpenWith) {
+            self.draw_open_with(f);
+        }
     }
 
     fn draw_info(&self, f: &mut Frame) {
@@ -2505,11 +2708,16 @@ impl App {
         let longest = info
             .lines
             .iter()
-            .map(|(l, v)| l.chars().count() + 2 + v.chars().count())
+            .filter_map(|line| match line {
+                InfoLine::Field(label, value) => {
+                    Some(2 + label.chars().count() + 2 + value.chars().count())
+                }
+                InfoLine::Section(_) => None,
+            })
             .max()
             .unwrap_or(20)
             .min(110) as u16;
-        let width = (longest + 4).max(48).min(area.width.saturating_sub(4));
+        let width = (longest + 4).max(60).min(area.width.saturating_sub(4));
         let height = (info.lines.len() as u16 + 2).min(area.height.saturating_sub(2));
         let rect = Rect::new(
             area.x + (area.width - width) / 2,
@@ -2518,23 +2726,89 @@ impl App {
             height,
         );
         let avail = width.saturating_sub(4) as usize;
-        let lines: Vec<Line<'static>> = info
-            .lines
-            .iter()
-            .take(height.saturating_sub(2) as usize)
-            .map(|(label, value)| {
-                Line::from(vec![
+        let max = height.saturating_sub(2) as usize;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for line in &info.lines {
+            if lines.len() >= max {
+                break;
+            }
+            match line {
+                InfoLine::Section(title) => {
+                    if !lines.is_empty() && lines.len() < max {
+                        lines.push(Line::from(""));
+                    }
+                    if lines.len() >= max {
+                        break;
+                    }
+                    lines.push(Line::from(Span::styled(
+                        *title,
+                        Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    )));
+                }
+                InfoLine::Field(label, value) => lines.push(Line::from(vec![
                     Span::styled(
-                        format!("{label:<12}"),
+                        format!("  {label:<12}"),
                         Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(truncate_chars(value, avail.saturating_sub(14))),
-                ])
+                    Span::raw(truncate_chars(value, avail.saturating_sub(16))),
+                ])),
+            }
+        }
+        f.render_widget(Clear, rect);
+        f.render_widget(
+            Paragraph::new(lines).block(Block::bordered().title(" info ")),
+            rect,
+        );
+    }
+
+    fn draw_open_with(&self, f: &mut Frame) {
+        let Some(state) = &self.open_with else {
+            return;
+        };
+        let area = f.area();
+        if area.width < 30 || area.height < 5 {
+            return;
+        }
+        let height = (state.options.len() as u16 + 2).min(area.height.saturating_sub(2));
+        let width = 68.min(area.width.saturating_sub(4));
+        let rect = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        let inner = width.saturating_sub(4) as usize;
+        let visible = height.saturating_sub(2) as usize;
+        let start = if state.index >= visible {
+            state.index + 1 - visible
+        } else {
+            0
+        };
+        let lines: Vec<Line<'static>> = state
+            .options
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(i, op)| {
+                let marker = if i == state.index { "▸ " } else { "  " };
+                let desc = op.desc.as_deref().unwrap_or("");
+                let text = if desc.is_empty() {
+                    format!("{marker}{}. {}", i + 1, op.name)
+                } else {
+                    format!("{marker}{}. {} — {}", i + 1, op.name, desc)
+                };
+                let style = if i == state.index {
+                    Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                } else {
+                    Style::new()
+                };
+                Line::from(Span::styled(truncate_chars(&text, inner), style))
             })
             .collect();
         f.render_widget(Clear, rect);
         f.render_widget(
-            Paragraph::new(lines).block(Block::bordered().title(" info ")),
+            Paragraph::new(lines).block(Block::bordered().title(" open with ")),
             rect,
         );
     }
@@ -2611,6 +2885,7 @@ impl App {
         ];
         let right = [
             "o / Enter   open",
+            "O           open with…",
             "e / i       editor / pager",
             "J / K       seek preview",
             "+ / - / 0   zoom in / out / fit",

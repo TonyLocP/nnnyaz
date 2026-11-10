@@ -4,6 +4,7 @@ use std::{
 };
 
 mod app;
+mod openwith;
 mod preview;
 mod util;
 
