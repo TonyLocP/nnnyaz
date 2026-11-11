@@ -1,10 +1,14 @@
 use std::{
     collections::BTreeSet,
     env, fs,
-    io::{self, Write},
+    io::{self, BufRead, Read, Write},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{
+        mpsc::{self, Receiver, TryRecvError},
+        Arc, Mutex,
+    },
     time::{Duration, SystemTime},
 };
 
@@ -61,6 +65,7 @@ enum Prompt {
     SearchFd,
     SearchRg,
     Shell,
+    TabRename,
 }
 
 #[derive(Clone, Copy)]
@@ -143,6 +148,7 @@ impl Prefix {
             Prefix::Tab => &[
                 ("t", "new tab here"),
                 ("n", "new tab at home"),
+                ("r", "rename tab"),
                 ("c", "close tab"),
                 ("[", "previous tab"),
                 ("]", "next tab"),
@@ -172,6 +178,125 @@ struct Search {
     kind: SearchKind,
     query: String,
     root: PathBuf,
+    results: Vec<Entry>,
+    done: bool,
+}
+
+/// Messages streamed from the background `fd`/`rg` search process.
+enum SearchMsg {
+    Entry(Entry),
+    Done,
+    Error(String),
+}
+
+/// Spawn `fd`/`rg` in the background and stream matching entries back. The
+/// returned cancellation sender kills the child when dropped.
+fn spawn_search(search: Search, show_hidden: bool) -> (Receiver<SearchMsg>, mpsc::Sender<()>) {
+    let (tx, rx) = mpsc::channel();
+    let (cancel_tx, cancel_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let prog = match search.kind {
+            SearchKind::Fd => "fd",
+            SearchKind::Rg => "rg",
+        };
+        let mut cmd = Command::new(prog);
+        cmd.current_dir(&search.root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match search.kind {
+            SearchKind::Fd => {
+                cmd.args(["--color", "never"]);
+                cmd.arg(if show_hidden {
+                    "--hidden"
+                } else {
+                    "--no-hidden"
+                });
+                cmd.arg("--").arg(&search.query);
+            }
+            SearchKind::Rg => {
+                cmd.args(["--color=never", "--files-with-matches", "--smart-case"]);
+                cmd.arg(if show_hidden {
+                    "--hidden"
+                } else {
+                    "--no-hidden"
+                });
+                cmd.arg("--").arg(&search.query);
+            }
+        }
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(SearchMsg::Error(format!("{prog}: {e}")));
+                return;
+            }
+        };
+        let Some(stdout) = child.stdout.take() else {
+            return;
+        };
+        let stderr = child.stderr.take().map(|mut s| {
+            std::thread::spawn(move || {
+                let mut buf = String::new();
+                let _ = s.read_to_string(&mut buf);
+                buf
+            })
+        });
+
+        // Kill the child as soon as the app drops the cancellation sender, so
+        // cancelling a slow scan does not leave `rg` running in the background.
+        let child = Arc::new(Mutex::new(child));
+        let killer = Arc::clone(&child);
+        std::thread::spawn(move || {
+            let _ = cancel_rx.recv();
+            if let Ok(mut c) = killer.lock() {
+                let _ = c.kill();
+            }
+        });
+
+        let mut count = 0usize;
+        let mut cancelled = false;
+        for line in io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            let line = line.trim().trim_start_matches("./");
+            if line.is_empty() {
+                continue;
+            }
+            let path = search.root.join(line);
+            let Some(entry) = entry_for(path, line.to_string()) else {
+                continue;
+            };
+            if tx.send(SearchMsg::Entry(entry)).is_err() {
+                cancelled = true;
+                break;
+            }
+            count += 1;
+            if count >= 5000 {
+                cancelled = true;
+                break;
+            }
+        }
+        if cancelled {
+            if let Ok(mut c) = child.lock() {
+                let _ = c.kill();
+            }
+        }
+        let status = child.lock().ok().and_then(|mut c| c.wait().ok());
+        let err = stderr.and_then(|h| h.join().ok()).unwrap_or_default();
+        if cancelled {
+            return;
+        }
+        // `rg` exits 1 when nothing matched; that is not an error.
+        let failed = status
+            .map(|s| !s.success() && s.code() != Some(1))
+            .unwrap_or(true);
+        if failed && count == 0 {
+            let msg = err.lines().next().unwrap_or("search failed");
+            let _ = tx.send(SearchMsg::Error(format!("{prog}: {msg}")));
+        } else {
+            let _ = tx.send(SearchMsg::Done);
+        }
+    });
+    (rx, cancel_tx)
 }
 
 #[derive(Clone, Copy)]
@@ -221,6 +346,7 @@ struct TabSnapshot {
     history: Vec<PathBuf>,
     history_pos: usize,
     focus: Option<String>,
+    tab_name: Option<String>,
 }
 
 /// One row in the `Tab` (spot/info) overlay.
@@ -258,6 +384,8 @@ pub struct App {
     completions: Vec<Completion>,
     completion_index: usize,
     search: Option<Search>,
+    search_rx: Option<Receiver<SearchMsg>>,
+    search_cancel: Option<mpsc::Sender<()>>,
     find_query: String,
     find_forward: bool,
     find_origin: Option<usize>,
@@ -271,7 +399,11 @@ pub struct App {
     page: usize,
     tabs: Vec<TabSnapshot>,
     tab_index: usize,
+    tab_name: Option<String>,
     info: Option<Info>,
+    info_cursor: usize,
+    info_scroll: usize,
+    info_copy_pending: bool,
     open_with: Option<OpenWith>,
     preview: Preview,
     list: List<'static>,
@@ -648,6 +780,8 @@ impl App {
             completions: Vec::new(),
             completion_index: 0,
             search: None,
+            search_rx: None,
+            search_cancel: None,
             find_query: String::new(),
             find_forward: true,
             find_origin: None,
@@ -661,7 +795,11 @@ impl App {
             page: 10,
             tabs: Vec::new(),
             tab_index: 0,
+            tab_name: None,
             info: None,
+            info_cursor: 0,
+            info_scroll: 0,
+            info_copy_pending: false,
             open_with: None,
             preview: Preview::new(),
             list: List::new(Vec::<ListItem>::new()),
@@ -694,6 +832,7 @@ impl App {
             history: self.history.clone(),
             history_pos: self.history_pos,
             focus: self.focus.clone(),
+            tab_name: self.tab_name.clone(),
         }
     }
 
@@ -718,11 +857,14 @@ impl App {
         self.history = tab.history;
         self.history_pos = tab.history_pos;
         self.focus = tab.focus;
+        self.tab_name = tab.tab_name;
+        self.stop_search_job();
         self.state
             .select(tab.cursor.filter(|i| *i < self.entries.len()));
         self.prefix = None;
         self.mode = Mode::Normal;
         self.info = None;
+        self.info_copy_pending = false;
         self.input.clear();
         self.completions.clear();
         self.list_dirty = true;
@@ -745,6 +887,7 @@ impl App {
         tab.history = vec![path];
         tab.history_pos = 0;
         tab.focus = None;
+        tab.tab_name = None;
         self.tabs.push(tab);
         self.tab_index = self.tabs.len() - 1;
         let tab = self.tabs[self.tab_index].clone();
@@ -807,6 +950,22 @@ impl App {
         }
     }
 
+    /// Label shown for a tab in the tab bar (custom name, else cwd name).
+    fn tab_label(&self, index: usize) -> String {
+        let name = if index == self.tab_index {
+            self.tab_name.as_ref()
+        } else {
+            self.tabs.get(index).and_then(|t| t.tab_name.as_ref())
+        };
+        if let Some(name) = name {
+            return name.clone();
+        }
+        let cwd = self.tab_cwd(index);
+        cwd.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| cwd.display().to_string())
+    }
+
     /// Enable kitty image previews (call before `run`).
     pub fn preview_configure(&mut self, kitty_supported: bool, font: (u16, u16), shm: bool) {
         self.preview.configure(kitty_supported, font, shm);
@@ -849,8 +1008,8 @@ impl App {
             .or_else(|| self.current().map(|e| e.name.clone()));
 
         let mut v: Vec<Entry> = Vec::new();
-        if let Some(search) = self.search.clone() {
-            v = self.search_entries(&search);
+        if let Some(search) = &self.search {
+            v = search.results.clone();
         } else {
             match fs::read_dir(&self.cwd) {
                 Ok(rd) => {
@@ -924,64 +1083,75 @@ impl App {
         self.list_dirty = true;
     }
 
-    /// Run `fd` or `rg` in the search root and turn the output into entries.
-    fn search_entries(&mut self, search: &Search) -> Vec<Entry> {
-        let prog = match search.kind {
-            SearchKind::Fd => "fd",
-            SearchKind::Rg => "rg",
+    /// Stop any running search job without clearing the search view.
+    fn stop_search_job(&mut self) {
+        self.search_rx = None;
+        self.search_cancel = None;
+        if let Some(search) = self.search.as_mut() {
+            search.done = true;
+        }
+    }
+
+    /// Start a streaming `fd`/`rg` search in the background.
+    fn start_search_job(&mut self, search: Search) {
+        self.stop_search_job();
+        self.search = Some(search.clone());
+        self.reload();
+        let (rx, cancel) = spawn_search(search, self.show_hidden);
+        self.search_rx = Some(rx);
+        self.search_cancel = Some(cancel);
+    }
+
+    /// Drain any results the background search has produced so far.
+    fn poll_search(&mut self) -> bool {
+        let Some(rx) = self.search_rx.as_ref() else {
+            return false;
         };
-        let mut cmd = Command::new(prog);
-        cmd.current_dir(&search.root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        match search.kind {
-            SearchKind::Fd => {
-                cmd.args(["--color", "never"]);
-                cmd.arg(if self.show_hidden {
-                    "--hidden"
-                } else {
-                    "--no-hidden"
-                });
-                cmd.arg("--").arg(&search.query);
-            }
-            SearchKind::Rg => {
-                cmd.args(["--color=never", "--files-with-matches", "--smart-case"]);
-                cmd.arg(if self.show_hidden {
-                    "--hidden"
-                } else {
-                    "--no-hidden"
-                });
-                cmd.arg("--").arg(&search.query);
+        let mut incoming = Vec::new();
+        let mut done = false;
+        let mut error = None;
+        loop {
+            match rx.try_recv() {
+                Ok(SearchMsg::Entry(e)) => incoming.push(e),
+                Ok(SearchMsg::Done) => {
+                    done = true;
+                    break;
+                }
+                Ok(SearchMsg::Error(e)) => {
+                    error = Some(e);
+                    done = true;
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    done = true;
+                    break;
+                }
             }
         }
-        let out = match cmd.output() {
-            Ok(o) => o,
-            Err(e) => {
-                self.status = format!("{prog}: {e}");
-                return Vec::new();
-            }
-        };
-        if !out.status.success() && out.status.code() != Some(1) {
-            let err = String::from_utf8_lossy(&out.stderr);
-            self.status = format!("{prog}: {}", err.lines().next().unwrap_or("failed"));
-            return Vec::new();
-        }
-        let mut v = Vec::new();
-        for line in String::from_utf8_lossy(&out.stdout).lines().take(5000) {
-            let line = line.trim().trim_start_matches("./");
-            if line.is_empty() {
-                continue;
-            }
-            let path = search.root.join(line);
-            if let Some(entry) = entry_for(path, line.to_string()) {
-                v.push(entry);
+        let got = !incoming.is_empty() || done;
+        if let Some(search) = self.search.as_mut() {
+            search.results.extend(incoming);
+            if done {
+                search.done = true;
             }
         }
-        v
+        if done {
+            self.search_rx = None;
+            self.search_cancel = None;
+        }
+        if let Some(e) = error {
+            self.status = e;
+        }
+        if got {
+            self.reload();
+        }
+        got
     }
 
     fn cancel_search(&mut self) {
+        self.search_rx = None;
+        self.search_cancel = None;
         if self.search.take().is_some() {
             self.reload();
         }
@@ -1007,6 +1177,8 @@ impl App {
         self.cwd = path;
         self.filter.clear();
         self.search = None;
+        self.search_rx = None;
+        self.search_cancel = None;
         self.entries.clear();
         self.state.select(None);
         self.prefix = None;
@@ -1292,6 +1464,52 @@ impl App {
         *term = ratatui::init();
         if let Err(e) = r {
             self.status = format!("{p}: {e}");
+        }
+    }
+
+    /// `A`: edit a temporary file and create every non-empty line in it.
+    fn bulk_create(&mut self, term: &mut DefaultTerminal) {
+        let editor = env::var("VISUAL")
+            .or_else(|_| env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".into());
+        let tmp = env::temp_dir().join(format!("rnn-bulk-create-{}.txt", std::process::id()));
+        if let Err(e) = fs::write(&tmp, "") {
+            self.status = format!("bulk create: {e}");
+            return;
+        }
+        self.external(term, &editor, &tmp);
+        let content = fs::read_to_string(&tmp).unwrap_or_default();
+        let _ = fs::remove_file(&tmp);
+
+        let mut n = 0;
+        let mut last = None;
+        for line in content.lines() {
+            let name = line.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let target = self.cwd.join(name);
+            let r = if name.ends_with('/') {
+                fs::create_dir_all(&target)
+            } else {
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&target)
+                    .map(|_| ())
+            };
+            match r {
+                Ok(()) => {
+                    n += 1;
+                    last = Some(name.trim_end_matches('/').to_string());
+                }
+                Err(e) => self.status = format!("{}: {e}", target.display()),
+            }
+        }
+        self.focus = last;
+        self.reload();
+        if n > 0 {
+            self.status = format!("created {n} item(s)");
         }
     }
 
@@ -1689,6 +1907,13 @@ impl App {
 
     fn submit(&mut self, p: Prompt) {
         let name = self.input.trim().to_string();
+
+        if p == Prompt::TabRename {
+            self.tab_name = if name.is_empty() { None } else { Some(name) };
+            self.save_active();
+            return;
+        }
+
         if name.is_empty() {
             return;
         }
@@ -1706,12 +1931,13 @@ impl App {
             } else {
                 SearchKind::Rg
             };
-            self.search = Some(Search {
+            self.start_search_job(Search {
                 kind,
                 query: name,
                 root: self.cwd.clone(),
+                results: Vec::new(),
+                done: false,
             });
-            self.reload();
             return;
         }
 
@@ -1734,6 +1960,7 @@ impl App {
             Prompt::Delete | Prompt::Cd | Prompt::SearchFd | Prompt::SearchRg | Prompt::Shell => {
                 return
             }
+            Prompt::TabRename => return,
         };
         match r {
             Ok(()) => {
@@ -1863,6 +2090,7 @@ impl App {
     }
 
     fn start_search(&mut self, kind: SearchKind) {
+        self.stop_search_job();
         self.input.clear();
         self.completions.clear();
         self.mode = Mode::Prompt(match kind {
@@ -2075,7 +2303,47 @@ impl App {
             lines.push(InfoLine::Field("Lines", n.to_string()));
         }
         self.info = Some(Info { lines });
+        self.info_cursor = 0;
+        self.info_scroll = 0;
+        self.info_copy_pending = false;
         self.mode = Mode::Info;
+    }
+
+    fn info_move(&mut self, delta: isize) {
+        let Some(info) = &self.info else {
+            return;
+        };
+        let len = info.lines.len();
+        if len == 0 {
+            return;
+        }
+        let cur = self.info_cursor.min(len - 1) as isize;
+        self.info_cursor = (cur + delta).clamp(0, len as isize - 1) as usize;
+        let page = self.page.max(1);
+        if self.info_cursor < self.info_scroll {
+            self.info_scroll = self.info_cursor;
+        } else if self.info_cursor >= self.info_scroll + page {
+            self.info_scroll = self.info_cursor + 1 - page;
+        }
+    }
+
+    fn info_swipe(&mut self, delta: isize) {
+        self.move_by(delta);
+        self.open_info();
+    }
+
+    fn info_copy_cell(&mut self) {
+        let Some(info) = &self.info else {
+            return;
+        };
+        let Some(line) = info.lines.get(self.info_cursor) else {
+            return;
+        };
+        let text = match line {
+            InfoLine::Field(_, value) => value.clone(),
+            InfoLine::Section(title) => title.to_string(),
+        };
+        self.clipboard_set(text + "\n", "text/plain", "copied cell".into());
     }
 
     // ─────────────── input ───────────────
@@ -2196,8 +2464,35 @@ impl App {
                 return Ok(false);
             }
             Mode::Info => {
-                self.info = None;
-                self.mode = Mode::Normal;
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    self.info = None;
+                    self.info_copy_pending = false;
+                    self.mode = Mode::Normal;
+                    return Ok(false);
+                }
+                if self.info_copy_pending {
+                    self.info_copy_pending = false;
+                    if key.code == KeyCode::Char('c') {
+                        self.info_copy_cell();
+                        return Ok(false);
+                    }
+                }
+                match key.code {
+                    KeyCode::Esc | KeyCode::Tab => {
+                        self.info = None;
+                        self.mode = Mode::Normal;
+                    }
+                    KeyCode::Char('~') | KeyCode::F(1) => {
+                        self.info = None;
+                        self.mode = Mode::Help;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => self.info_move(1),
+                    KeyCode::Char('k') | KeyCode::Up => self.info_move(-1),
+                    KeyCode::Char('h') | KeyCode::Left => self.info_swipe(-1),
+                    KeyCode::Char('l') | KeyCode::Right => self.info_swipe(1),
+                    KeyCode::Char('c') => self.info_copy_pending = true,
+                    _ => {}
+                }
                 return Ok(false);
             }
             Mode::OpenWith => {
@@ -2272,6 +2567,7 @@ impl App {
             KeyCode::Home => self.select_top(),
             KeyCode::Char('G') | KeyCode::End => self.select_bottom(),
             KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => self.go_parent(),
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => self.start_open_with(),
             KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter | KeyCode::Char('o') => {
                 self.open(term)
             }
@@ -2360,6 +2656,7 @@ impl App {
                 }
             }
             KeyCode::Char('a') => self.start_create(),
+            KeyCode::Char('A') => self.bulk_create(term),
             KeyCode::Char('f') => self.mode = Mode::Filter,
             KeyCode::Char('/') => self.start_find(true),
             KeyCode::Char('?') => self.start_find(false),
@@ -2486,6 +2783,13 @@ impl App {
                     if let Some(home) = env::var_os("HOME") {
                         self.new_tab(PathBuf::from(home));
                     }
+                }
+                KeyCode::Char('r') => {
+                    self.input = self
+                        .tab_name
+                        .clone()
+                        .unwrap_or_else(|| self.tab_label(self.tab_index));
+                    self.mode = Mode::Prompt(Prompt::TabRename);
                 }
                 KeyCode::Char('c') => self.close_tab(),
                 KeyCode::Char(']') => self.next_tab(1),
@@ -2633,11 +2937,7 @@ impl App {
             Paragraph::new(Line::from(
                 (0..self.tabs.len())
                     .map(|i| {
-                        let cwd = self.tab_cwd(i);
-                        let name = cwd
-                            .file_name()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| cwd.display().to_string());
+                        let name = self.tab_label(i);
                         let style = if i == self.tab_index {
                             Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
                         } else {
@@ -2677,7 +2977,7 @@ impl App {
                 self.find_query
             ),
             Mode::Help => "rnn keys — press any key to close".into(),
-            Mode::Info => "info — press any key to close".into(),
+            Mode::Info => "info — j/k scroll · h/l swipe · c c copy · Esc close".into(),
             Mode::OpenWith => "open with — j/k move · Enter open · Esc cancel".into(),
             Mode::Prompt(Prompt::Delete) => {
                 format!("delete {} item(s)? (y/N)", self.targets().len())
@@ -2690,6 +2990,7 @@ impl App {
                     Prompt::SearchFd => "fd",
                     Prompt::SearchRg => "rg",
                     Prompt::Shell => "shell",
+                    Prompt::TabRename => "rename tab",
                     Prompt::Delete => "",
                 };
                 format!("{label}: {}", self.input)
@@ -2706,7 +3007,11 @@ impl App {
                         SearchKind::Fd => "fd",
                         SearchKind::Rg => "rg",
                     };
-                    s.push_str(&format!(" | {kind}: {}", search.query));
+                    s.push_str(&format!(
+                        " | {kind}: {}{}",
+                        search.query,
+                        if search.done { "" } else { " …" }
+                    ));
                 }
                 if self.show_hidden {
                     s.push_str(" | hidden");
@@ -2847,7 +3152,7 @@ impl App {
         );
     }
 
-    fn draw_info(&self, f: &mut Frame) {
+    fn draw_info(&mut self, f: &mut Frame) {
         let Some(info) = &self.info else {
             return;
         };
@@ -2868,45 +3173,78 @@ impl App {
             .unwrap_or(20)
             .min(110) as u16;
         let width = (longest + 4).max(60).min(area.width.saturating_sub(4));
-        let height = (info.lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+        let avail = width.saturating_sub(4) as usize;
+        let total = info.lines.len();
+        let cursor = self.info_cursor.min(total.saturating_sub(1));
+
+        // Expand sections into display rows (sections get a blank separator).
+        let mut rows: Vec<(Option<usize>, Line<'static>)> = Vec::new();
+        for (i, line) in info.lines.iter().enumerate() {
+            let selected = i == cursor;
+            let base = if selected {
+                Style::new().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::new()
+            };
+            match line {
+                InfoLine::Section(title) => {
+                    if !rows.is_empty() {
+                        rows.push((None, Line::from("")));
+                    }
+                    rows.push((
+                        Some(i),
+                        Line::from(Span::styled(
+                            *title,
+                            Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                        ))
+                        .style(base),
+                    ));
+                }
+                InfoLine::Field(label, value) => rows.push((
+                    Some(i),
+                    Line::from(vec![
+                        Span::styled(
+                            format!("  {label:<12}"),
+                            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(truncate_chars(value, avail.saturating_sub(16))),
+                    ])
+                    .style(base),
+                )),
+            }
+        }
+
+        let height = (rows.len() as u16 + 2).min(area.height.saturating_sub(2));
         let rect = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
             width,
             height,
         );
-        let avail = width.saturating_sub(4) as usize;
         let max = height.saturating_sub(2) as usize;
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        for line in &info.lines {
-            if lines.len() >= max {
-                break;
-            }
-            match line {
-                InfoLine::Section(title) => {
-                    if !lines.is_empty() && lines.len() < max {
-                        lines.push(Line::from(""));
-                    }
-                    if lines.len() >= max {
-                        break;
-                    }
-                    lines.push(Line::from(Span::styled(
-                        *title,
-                        Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
-                    )));
-                }
-                InfoLine::Field(label, value) => lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("  {label:<12}"),
-                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(truncate_chars(value, avail.saturating_sub(16))),
-                ])),
-            }
+        let cursor_row = rows
+            .iter()
+            .position(|(i, _)| *i == Some(cursor))
+            .unwrap_or(0);
+        let mut scroll = self.info_scroll;
+        if cursor_row < scroll {
+            scroll = cursor_row;
+        } else if max > 0 && cursor_row >= scroll + max {
+            scroll = cursor_row + 1 - max;
         }
+        scroll = scroll.min(rows.len().saturating_sub(max));
+        self.info_scroll = scroll;
+
+        let lines: Vec<Line<'static>> = rows
+            .into_iter()
+            .skip(scroll)
+            .take(max)
+            .map(|(_, line)| line)
+            .collect();
+        let title = format!(" info {}/{} ", cursor + 1, total);
         f.render_widget(Clear, rect);
         f.render_widget(
-            Paragraph::new(lines).block(Block::bordered().title(" info ")),
+            Paragraph::new(lines).block(Block::bordered().title(title)),
             rect,
         );
     }
@@ -3022,20 +3360,21 @@ impl App {
             "Y / X       cancel yank",
             "d / D       delete confirm / now",
             "r / a       rename / create",
+            "A           bulk create",
             "Ctrl+n      create",
             "Ctrl+y/p    clipboard copy / paste",
             "; / :       run shell command",
             "Ctrl+z      suspend",
             "t t / t n   new tab / at home",
-            "t c         close tab",
+            "t r / t c   rename / close tab",
             "1-9 [ ]     switch tab",
             "{ / }       swap tab",
-            "Tab         info overlay",
+            "Tab         info (j/k h/l c c)",
             "Ctrl+c      close tab / quit",
         ];
         let right = [
             "o / Enter   open",
-            "O           open with…",
+            "O / S-Enter open with…",
             "e / i       editor / pager",
             "J / K       seek preview",
             "+ / - / 0   zoom in / out / fit",
@@ -3164,6 +3503,7 @@ impl App {
 
     pub fn run(&mut self, term: &mut DefaultTerminal) -> io::Result<()> {
         let time = std::env::var_os("RNN_TIME").is_some();
+        let mut last_search_poll = std::time::Instant::now();
         term.draw(|f| self.draw(f))?;
         loop {
             let mut dirty = false;
@@ -3187,6 +3527,12 @@ impl App {
             self.preview.poll();
             if self.preview.take_changed() {
                 dirty = true;
+            }
+            if self.search_rx.is_some() && last_search_poll.elapsed() >= Duration::from_millis(50) {
+                last_search_poll = std::time::Instant::now();
+                if self.poll_search() {
+                    dirty = true;
+                }
             }
             if dirty {
                 let t = std::time::Instant::now();
