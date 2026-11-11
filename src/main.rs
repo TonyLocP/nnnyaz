@@ -35,7 +35,7 @@ fn main() -> io::Result<()> {
 fn probe_graphics() -> io::Result<()> {
     use image::{Rgba, RgbaImage};
     use rustix::{
-        event::{PollFd, PollFlags, poll},
+        event::{poll, PollFd, PollFlags},
         io::read,
     };
     use std::os::fd::AsFd;
@@ -51,7 +51,8 @@ fn probe_graphics() -> io::Result<()> {
         graphics_supported(),
         is_tmux
     );
-    for c in preview::kitty::encode_chunks(&image::DynamicImage::ImageRgba8(img.clone()), id, is_tmux)
+    for c in
+        preview::kitty::encode_chunks(&image::DynamicImage::ImageRgba8(img.clone()), id, is_tmux)
     {
         io::stdout().write_all(c.as_bytes())?;
         io::stdout().flush()?;
@@ -90,7 +91,10 @@ fn probe_graphics() -> io::Result<()> {
         if remain.is_zero() {
             break;
         }
-        match poll(&mut [PollFd::new(&fd, PollFlags::IN)], remain.as_millis().min(200) as i32) {
+        match poll(
+            &mut [PollFd::new(&fd, PollFlags::IN)],
+            remain.as_millis().min(200) as i32,
+        ) {
             Ok(0) => continue,
             Ok(_) => match read(fd, &mut chunk) {
                 Ok(0) => break,
@@ -144,7 +148,7 @@ fn probe_graphics() -> io::Result<()> {
 fn probe_shm() -> bool {
     use ratatui::crossterm::terminal::{disable_raw_mode, enable_raw_mode};
     use rustix::{
-        event::{PollFd, PollFlags, poll},
+        event::{poll, PollFd, PollFlags},
         io::read,
     };
     use std::os::fd::AsFd;
@@ -178,7 +182,10 @@ fn probe_shm() -> bool {
         if remain.is_zero() {
             break;
         }
-        match poll(&mut [PollFd::new(&fd, PollFlags::IN)], remain.as_millis().min(200) as i32) {
+        match poll(
+            &mut [PollFd::new(&fd, PollFlags::IN)],
+            remain.as_millis().min(200) as i32,
+        ) {
             Ok(0) => continue,
             Ok(_) => match read(fd, &mut chunk) {
                 Ok(0) => break,
@@ -213,7 +220,9 @@ fn graphics_supported() -> bool {
     }
     let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
     let term = std::env::var("TERM").unwrap_or_default();
-    let k = |s: &str| s.to_ascii_lowercase().contains("ghostty") || s.to_ascii_lowercase().contains("kitty");
+    let k = |s: &str| {
+        s.to_ascii_lowercase().contains("ghostty") || s.to_ascii_lowercase().contains("kitty")
+    };
     k(&term_program) || k(&term)
 }
 
@@ -221,8 +230,8 @@ fn graphics_supported() -> bool {
 /// `ESC[6;<height_px>;<width_px>t`.
 fn probe_cell_size() -> Option<(u16, u16)> {
     use rustix::{
-        event::{PollFd, PollFlags, poll},
-        termios::{OptionalActions, tcgetattr, tcsetattr},
+        event::{poll, PollFd, PollFlags},
+        termios::{tcgetattr, tcsetattr, OptionalActions},
     };
     use std::os::fd::AsFd;
 

@@ -1,15 +1,18 @@
 use std::{
     collections::BTreeSet,
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     io::{self, BufRead, Read, Write},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, TryRecvError},
         Arc, Mutex,
     },
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use ratatui::{
@@ -68,6 +71,15 @@ enum Prompt {
     TabRename,
 }
 
+/// What a `d` / `D` confirmation should do when accepted.
+#[derive(Clone, Copy, PartialEq)]
+enum DeleteMode {
+    Trash,
+    Permanent,
+    FromTrash,
+    EmptyTrash,
+}
+
 #[derive(Clone, Copy)]
 enum Mode {
     Normal,
@@ -77,6 +89,7 @@ enum Mode {
     Help,
     Info,
     OpenWith,
+    Tasks,
 }
 
 #[derive(Clone, Copy)]
@@ -112,7 +125,7 @@ impl Prefix {
                 ("v", "~/Videos"),
                 ("Space", "go to path…"),
                 ("f", "follow symlink"),
-                ("t", "trash (unsupported)"),
+                ("t", "trash bin"),
             ],
             Prefix::Sort => &[
                 ("a", "name ↑"),
@@ -353,6 +366,7 @@ struct TabSnapshot {
 enum InfoLine {
     Section(&'static str),
     Field(&'static str, String),
+    Text(String),
 }
 
 /// Metadata shown by the `Tab` (spot/info) overlay.
@@ -404,7 +418,13 @@ pub struct App {
     info_cursor: usize,
     info_scroll: usize,
     info_copy_pending: bool,
+    info_from_tasks: bool,
     open_with: Option<OpenWith>,
+    tasks: Vec<Task>,
+    task_next_id: usize,
+    task_cursor: usize,
+    pending_delete: Option<DeleteMode>,
+    quit_warned: bool,
     preview: Preview,
     list: List<'static>,
     list_dirty: bool,
@@ -754,6 +774,739 @@ fn uri_path(uri: &str) -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsString::from_vec(out)))
 }
 
+// ───────────────────────── trash ─────────────────────────
+
+/// Freedesktop trash root (`$XDG_DATA_HOME/Trash` or `~/.local/share/Trash`).
+fn trash_root() -> Option<PathBuf> {
+    if let Some(dir) = env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir).join("Trash"));
+    }
+    env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/Trash"))
+}
+
+fn trash_files_dir() -> Option<PathBuf> {
+    trash_root().map(|root| root.join("files"))
+}
+
+fn trash_info_dir() -> Option<PathBuf> {
+    trash_root().map(|root| root.join("info"))
+}
+
+/// The trash directory as the app sees it (canonicalized when possible).
+fn trash_view_path() -> Option<PathBuf> {
+    let files = trash_files_dir()?;
+    Some(fs::canonicalize(&files).unwrap_or(files))
+}
+
+fn ensure_trash_dirs() -> io::Result<(PathBuf, PathBuf)> {
+    let root = trash_root().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "HOME and XDG_DATA_HOME are unset")
+    })?;
+    let files = root.join("files");
+    let info = root.join("info");
+    fs::create_dir_all(&files)?;
+    fs::create_dir_all(&info)?;
+    Ok((files, info))
+}
+
+/// Percent-encode a path for the `Path=` key of a `.trashinfo` file.
+fn percent_encode_path(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = String::new();
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode_path(value: &str) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(v) = u8::from_str_radix(hex, 16) {
+                    out.push(v);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    PathBuf::from(std::ffi::OsString::from_vec(out))
+}
+
+fn deletion_date() -> String {
+    Command::new("date")
+        .arg("+%Y-%m-%dT%H:%M:%S")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "1970-01-01T00:00:00".into())
+}
+
+#[derive(Clone)]
+struct TrashInfo {
+    name: String,
+    original: PathBuf,
+    date: String,
+}
+
+fn parse_trashinfo(path: &Path) -> Option<TrashInfo> {
+    let text = fs::read_to_string(path).ok()?;
+    let mut original = None;
+    let mut date = String::new();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("Path=") {
+            original = Some(percent_decode_path(v.trim_end()));
+        } else if let Some(v) = line.strip_prefix("DeletionDate=") {
+            date = v.trim().to_string();
+        }
+    }
+    let name = path
+        .file_name()?
+        .to_string_lossy()
+        .strip_suffix(".trashinfo")?
+        .to_string();
+    Some(TrashInfo {
+        name,
+        original: original?,
+        date,
+    })
+}
+
+fn trash_info_for_name(name: &OsStr) -> Option<PathBuf> {
+    let info = trash_info_dir()?;
+    let mut file = name.to_os_string();
+    file.push(".trashinfo");
+    let path = info.join(file);
+    path.is_file().then_some(path)
+}
+
+/// Reserve a unique slot in the trash and write its `.trashinfo` file.
+/// Returns `(path inside files/, path of the .trashinfo)`.
+fn prepare_trash(path: &Path) -> io::Result<(PathBuf, PathBuf)> {
+    let (files, info) = ensure_trash_dirs()?;
+    if let Some(root) = trash_root() {
+        if path.starts_with(&root) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "already in the trash",
+            ));
+        }
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "cannot trash a root path"))?;
+
+    let mut candidate = name.to_os_string();
+    let mut n = 1usize;
+    let (mut dst, mut info_path) = {
+        let mut info_name = candidate.clone();
+        info_name.push(".trashinfo");
+        (files.join(&candidate), info.join(info_name))
+    };
+    while dst.exists() || info_path.exists() {
+        candidate = name.to_os_string();
+        candidate.push(format!(".{n}"));
+        let mut info_name = candidate.clone();
+        info_name.push(".trashinfo");
+        dst = files.join(&candidate);
+        info_path = info.join(info_name);
+        n += 1;
+    }
+
+    let original = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    let body = format!(
+        "[Trash Info]\nPath={}\nDeletionDate={}\n",
+        percent_encode_path(&original),
+        deletion_date()
+    );
+    fs::write(&info_path, body)?;
+    Ok((dst, info_path))
+}
+
+fn unique_restore(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let base = path;
+    let mut n = 1usize;
+    loop {
+        let mut candidate = base.clone().into_os_string();
+        if n == 1 {
+            candidate.push(".restored");
+        } else {
+            candidate.push(format!(".restored.{n}"));
+        }
+        let candidate = PathBuf::from(candidate);
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+fn restore_trash(info_path: &Path) -> io::Result<PathBuf> {
+    let info = parse_trashinfo(info_path)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid .trashinfo file"))?;
+    let files = trash_files_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "trash is unavailable"))?;
+    let src = files.join(&info.name);
+    let target = unique_restore(info.original);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::rename(&src, &target) {
+        Ok(()) => {}
+        Err(_) => {
+            copy_rec(&src, &target)?;
+            remove(&src)?;
+        }
+    }
+    let _ = fs::remove_file(info_path);
+    Ok(target)
+}
+
+// ───────────────────────── tasks ─────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskKind {
+    Copy,
+    Move,
+    Delete,
+    Trash,
+    Restore,
+    EmptyTrash,
+    Link,
+    Hardlink,
+}
+
+impl TaskKind {
+    fn label(self) -> &'static str {
+        match self {
+            TaskKind::Copy => "copy",
+            TaskKind::Move => "move",
+            TaskKind::Delete => "delete",
+            TaskKind::Trash => "trash",
+            TaskKind::Restore => "restore",
+            TaskKind::EmptyTrash => "empty trash",
+            TaskKind::Link => "symlink",
+            TaskKind::Hardlink => "hardlink",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskStatus {
+    Running,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+impl TaskStatus {
+    fn label(self) -> &'static str {
+        match self {
+            TaskStatus::Running => "running",
+            TaskStatus::Done => "done",
+            TaskStatus::Failed => "failed",
+            TaskStatus::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct TaskProgress {
+    total: usize,
+    done: usize,
+    current: String,
+    errors: Vec<String>,
+}
+
+struct TaskState {
+    status: TaskStatus,
+    progress: TaskProgress,
+}
+
+struct Task {
+    id: usize,
+    kind: TaskKind,
+    title: String,
+    state: Arc<Mutex<TaskState>>,
+    cancel: Arc<AtomicBool>,
+    started: Instant,
+    finished: Option<Instant>,
+}
+
+enum TaskOp {
+    Paste {
+        pairs: Vec<(PathBuf, PathBuf)>,
+        cut: bool,
+    },
+    Delete {
+        paths: Vec<PathBuf>,
+    },
+    DeleteTrash {
+        paths: Vec<PathBuf>,
+        infos: Vec<PathBuf>,
+    },
+    Trash {
+        paths: Vec<PathBuf>,
+    },
+    Restore {
+        infos: Vec<PathBuf>,
+    },
+    EmptyTrash,
+    Link {
+        pairs: Vec<(PathBuf, PathBuf)>,
+        relative: bool,
+    },
+    Hardlink {
+        pairs: Vec<(PathBuf, PathBuf)>,
+    },
+}
+
+fn task_lock(state: &Arc<Mutex<TaskState>>) -> Option<std::sync::MutexGuard<'_, TaskState>> {
+    state.lock().ok()
+}
+
+fn task_set_total(state: &Arc<Mutex<TaskState>>, total: usize) {
+    if let Some(mut s) = task_lock(state) {
+        s.progress.total = total;
+    }
+}
+
+fn task_add(state: &Arc<Mutex<TaskState>>, n: usize) {
+    if let Some(mut s) = task_lock(state) {
+        s.progress.done = s.progress.done.saturating_add(n);
+    }
+}
+
+fn task_current(state: &Arc<Mutex<TaskState>>, path: &Path) {
+    if let Some(mut s) = task_lock(state) {
+        s.progress.current = path.display().to_string();
+    }
+}
+
+fn task_error(state: &Arc<Mutex<TaskState>>, message: String) {
+    if let Some(mut s) = task_lock(state) {
+        if s.progress.errors.len() < 50 {
+            s.progress.errors.push(message);
+        }
+    }
+}
+
+fn task_cancelled(cancel: &AtomicBool) -> bool {
+    cancel.load(Ordering::Relaxed)
+}
+
+fn cancelled_error() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "cancelled")
+}
+
+fn task_percent(progress: &TaskProgress) -> u16 {
+    if progress.total == 0 {
+        return if progress.done > 0 { 100 } else { 0 };
+    }
+    ((progress.done.min(progress.total) * 100) / progress.total) as u16
+}
+
+fn progress_bar(percent: u16, width: usize) -> String {
+    let filled = (percent as usize * width / 100).min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+const TASK_COUNT_LIMIT: usize = 200_000;
+
+/// Count entries in a tree (without following symlinks), capped so a huge
+/// directory cannot spend forever just preparing a progress total.
+fn count_tree(paths: &[PathBuf]) -> usize {
+    let mut total = 0usize;
+    let mut stack: Vec<PathBuf> = paths.to_vec();
+    while let Some(path) = stack.pop() {
+        total += 1;
+        if total >= TASK_COUNT_LIMIT {
+            break;
+        }
+        if let Ok(md) = fs::symlink_metadata(&path) {
+            if md.is_dir() {
+                if let Ok(rd) = fs::read_dir(&path) {
+                    for entry in rd.flatten() {
+                        stack.push(entry.path());
+                    }
+                }
+            }
+        }
+    }
+    total
+}
+
+fn copy_task(
+    src: &Path,
+    dst: &Path,
+    state: &Arc<Mutex<TaskState>>,
+    cancel: &AtomicBool,
+) -> io::Result<()> {
+    if task_cancelled(cancel) {
+        return Err(cancelled_error());
+    }
+    let md = fs::symlink_metadata(src)?;
+    if md.is_dir() {
+        if dst.starts_with(src) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot copy a directory into itself",
+            ));
+        }
+        fs::create_dir_all(dst)?;
+        task_add(state, 1);
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            copy_task(&entry.path(), &dst.join(entry.file_name()), state, cancel)?;
+        }
+        Ok(())
+    } else {
+        task_current(state, src);
+        fs::copy(src, dst)?;
+        task_add(state, 1);
+        Ok(())
+    }
+}
+
+/// Remove a path without touching progress (used after a cross-device copy).
+fn remove_raw(path: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path)?.is_dir() {
+        for entry in fs::read_dir(path)? {
+            remove_raw(&entry?.path())?;
+        }
+        fs::remove_dir(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+fn remove_task(path: &Path, state: &Arc<Mutex<TaskState>>, cancel: &AtomicBool) -> io::Result<()> {
+    if task_cancelled(cancel) {
+        return Err(cancelled_error());
+    }
+    let md = fs::symlink_metadata(path)?;
+    if md.is_dir() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            remove_task(&entry.path(), state, cancel)?;
+        }
+        fs::remove_dir(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    task_add(state, 1);
+    Ok(())
+}
+
+fn run_task(op: TaskOp, state: &Arc<Mutex<TaskState>>, cancel: &Arc<AtomicBool>) {
+    let result = match op {
+        TaskOp::Paste { pairs, cut } => run_paste(pairs, cut, state, cancel),
+        TaskOp::Delete { paths } => run_delete(paths, state, cancel),
+        TaskOp::DeleteTrash { paths, infos } => run_delete_trash(paths, infos, state, cancel),
+        TaskOp::Trash { paths } => run_trash(paths, state, cancel),
+        TaskOp::Restore { infos } => run_restore(infos, state, cancel),
+        TaskOp::EmptyTrash => run_empty_trash(state, cancel),
+        TaskOp::Link { pairs, relative } => run_link(pairs, relative, state, cancel),
+        TaskOp::Hardlink { pairs } => run_hardlink(pairs, state, cancel),
+    };
+    if let Some(mut s) = task_lock(state) {
+        s.status = if task_cancelled(cancel) {
+            TaskStatus::Cancelled
+        } else if result.is_ok() {
+            TaskStatus::Done
+        } else {
+            TaskStatus::Failed
+        };
+        if let Err(e) = result {
+            if s.progress.errors.len() < 50 {
+                s.progress.errors.push(e.to_string());
+            }
+        }
+    }
+}
+
+fn run_paste(
+    pairs: Vec<(PathBuf, PathBuf)>,
+    cut: bool,
+    state: &Arc<Mutex<TaskState>>,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<()> {
+    let counts: Vec<usize> = pairs
+        .iter()
+        .map(|(src, _)| count_tree(std::slice::from_ref(src)))
+        .collect();
+    task_set_total(state, counts.iter().sum());
+    let mut first_err = None;
+    for (i, (src, dst)) in pairs.iter().enumerate() {
+        if task_cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        task_current(state, src);
+        let r = if cut {
+            match fs::rename(src, dst) {
+                Ok(()) => {
+                    task_add(state, counts[i]);
+                    Ok(())
+                }
+                Err(_) => copy_task(src, dst, state, cancel).and_then(|_| remove_raw(src)),
+            }
+        } else {
+            copy_task(src, dst, state, cancel)
+        };
+        if let Err(e) = r {
+            if task_cancelled(cancel) {
+                return Err(cancelled_error());
+            }
+            task_error(state, format!("{}: {e}", src.display()));
+            first_err.get_or_insert(e);
+        }
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
+fn run_delete(
+    paths: Vec<PathBuf>,
+    state: &Arc<Mutex<TaskState>>,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<()> {
+    task_set_total(state, count_tree(&paths));
+    let mut first_err = None;
+    for path in &paths {
+        if task_cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        task_current(state, path);
+        if let Err(e) = remove_task(path, state, cancel) {
+            if task_cancelled(cancel) {
+                return Err(cancelled_error());
+            }
+            task_error(state, format!("{}: {e}", path.display()));
+            first_err.get_or_insert(e);
+        }
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
+fn run_delete_trash(
+    paths: Vec<PathBuf>,
+    infos: Vec<PathBuf>,
+    state: &Arc<Mutex<TaskState>>,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<()> {
+    task_set_total(state, count_tree(&paths) + infos.len());
+    let mut first_err = None;
+    for path in &paths {
+        if task_cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        task_current(state, path);
+        if let Err(e) = remove_task(path, state, cancel) {
+            if task_cancelled(cancel) {
+                return Err(cancelled_error());
+            }
+            task_error(state, format!("{}: {e}", path.display()));
+            first_err.get_or_insert(e);
+        }
+    }
+    for info in &infos {
+        if task_cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        if let Err(e) = fs::remove_file(info) {
+            if e.kind() != io::ErrorKind::NotFound {
+                task_error(state, format!("{}: {e}", info.display()));
+                first_err.get_or_insert(e);
+            }
+        }
+        task_add(state, 1);
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
+fn run_trash(
+    paths: Vec<PathBuf>,
+    state: &Arc<Mutex<TaskState>>,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<()> {
+    let counts: Vec<usize> = paths
+        .iter()
+        .map(|path| count_tree(std::slice::from_ref(path)))
+        .collect();
+    task_set_total(state, counts.iter().sum());
+    let mut first_err = None;
+    for (i, path) in paths.iter().enumerate() {
+        if task_cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        task_current(state, path);
+        let (dst, info) = match prepare_trash(path) {
+            Ok(v) => v,
+            Err(e) => {
+                task_error(state, format!("{}: {e}", path.display()));
+                first_err.get_or_insert(e);
+                continue;
+            }
+        };
+        let r = match fs::rename(path, &dst) {
+            Ok(()) => {
+                task_add(state, counts[i]);
+                Ok(())
+            }
+            Err(_) => match copy_task(path, &dst, state, cancel) {
+                Ok(()) => remove_raw(path),
+                Err(e) => {
+                    let _ = remove_raw(&dst);
+                    Err(e)
+                }
+            },
+        };
+        if let Err(e) = r {
+            let _ = fs::remove_file(&info);
+            if task_cancelled(cancel) {
+                return Err(cancelled_error());
+            }
+            task_error(state, format!("{}: {e}", path.display()));
+            first_err.get_or_insert(e);
+        }
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
+fn run_restore(
+    infos: Vec<PathBuf>,
+    state: &Arc<Mutex<TaskState>>,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<()> {
+    task_set_total(state, infos.len());
+    let mut first_err = None;
+    for info in &infos {
+        if task_cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        task_current(state, info);
+        if let Err(e) = restore_trash(info) {
+            if task_cancelled(cancel) {
+                return Err(cancelled_error());
+            }
+            task_error(state, format!("{}: {e}", info.display()));
+            first_err.get_or_insert(e);
+        }
+        task_add(state, 1);
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
+fn run_empty_trash(state: &Arc<Mutex<TaskState>>, cancel: &Arc<AtomicBool>) -> io::Result<()> {
+    let (files, info) = ensure_trash_dirs()?;
+    let mut paths = Vec::new();
+    if let Ok(rd) = fs::read_dir(&files) {
+        for entry in rd.flatten() {
+            paths.push(entry.path());
+        }
+    }
+    let mut infos = Vec::new();
+    if let Ok(rd) = fs::read_dir(&info) {
+        for entry in rd.flatten() {
+            infos.push(entry.path());
+        }
+    }
+    task_set_total(state, count_tree(&paths) + infos.len());
+    let mut first_err = None;
+    for path in &paths {
+        if task_cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        task_current(state, path);
+        if let Err(e) = remove_task(path, state, cancel) {
+            if task_cancelled(cancel) {
+                return Err(cancelled_error());
+            }
+            task_error(state, format!("{}: {e}", path.display()));
+            first_err.get_or_insert(e);
+        }
+    }
+    for info_path in &infos {
+        if task_cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        if let Err(e) = fs::remove_file(info_path) {
+            if e.kind() != io::ErrorKind::NotFound {
+                task_error(state, format!("{}: {e}", info_path.display()));
+                first_err.get_or_insert(e);
+            }
+        }
+        task_add(state, 1);
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
+fn run_link(
+    pairs: Vec<(PathBuf, PathBuf)>,
+    relative: bool,
+    state: &Arc<Mutex<TaskState>>,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<()> {
+    task_set_total(state, pairs.len());
+    let mut first_err = None;
+    for (src, dst) in &pairs {
+        if task_cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        task_current(state, src);
+        let target = if relative {
+            relative_path(dst.parent().unwrap_or(Path::new(".")), src)
+        } else {
+            src.clone()
+        };
+        if let Err(e) = std::os::unix::fs::symlink(&target, dst) {
+            task_error(state, format!("{}: {e}", dst.display()));
+            first_err.get_or_insert(e);
+        }
+        task_add(state, 1);
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
+fn run_hardlink(
+    pairs: Vec<(PathBuf, PathBuf)>,
+    state: &Arc<Mutex<TaskState>>,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<()> {
+    task_set_total(state, pairs.len());
+    let mut first_err = None;
+    for (src, dst) in &pairs {
+        if task_cancelled(cancel) {
+            return Err(cancelled_error());
+        }
+        task_current(state, src);
+        if let Err(e) = fs::hard_link(src, dst) {
+            task_error(state, format!("{}: {e}", dst.display()));
+            first_err.get_or_insert(e);
+        }
+        task_add(state, 1);
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
 // ───────────────────────── app ─────────────────────────
 
 impl App {
@@ -800,7 +1553,13 @@ impl App {
             info_cursor: 0,
             info_scroll: 0,
             info_copy_pending: false,
+            info_from_tasks: false,
             open_with: None,
+            tasks: Vec::new(),
+            task_next_id: 1,
+            task_cursor: 0,
+            pending_delete: None,
+            quit_warned: false,
             preview: Preview::new(),
             list: List::new(Vec::<ListItem>::new()),
             list_dirty: true,
@@ -961,6 +1720,9 @@ impl App {
             return name.clone();
         }
         let cwd = self.tab_cwd(index);
+        if trash_view_path().as_deref() == Some(cwd) {
+            return "trash".into();
+        }
         cwd.file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| cwd.display().to_string())
@@ -1550,7 +2312,22 @@ impl App {
         let Some(e) = self.current().cloned() else {
             return;
         };
-        let options = openwith::options(&e.path);
+        let mut options = Vec::new();
+        if self.is_trash_view() {
+            options.push(openwith::Opener {
+                name: "trash-restore".into(),
+                desc: Some("Restore selected files".into()),
+                command: "rnn:trash-restore".into(),
+                block: false,
+            });
+            options.push(openwith::Opener {
+                name: "trash-empty".into(),
+                desc: Some("Empty trash bin".into()),
+                command: "rnn:trash-empty".into(),
+                block: false,
+            });
+        }
+        options.extend(openwith::options(&e.path));
         if options.is_empty() {
             self.status = "open with: no openers configured".into();
             return;
@@ -1617,6 +2394,14 @@ impl App {
             return;
         };
         self.mode = Mode::Normal;
+        if op.command.starts_with("rnn:trash-restore") {
+            self.restore_selected();
+            return;
+        }
+        if op.command.starts_with("rnn:trash-empty") {
+            self.start_delete(DeleteMode::EmptyTrash);
+            return;
+        }
         let cmd = op.command_for(&state.path);
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
         if op.block {
@@ -1888,21 +2673,26 @@ impl App {
             self.status = "clipboard has no file paths".into();
             return;
         }
-        let mut n = 0;
-        for src in paths {
-            if !src.exists() {
-                continue;
-            }
-            let Some(name) = src.file_name() else {
-                continue;
-            };
-            let dst = unique(self.cwd.join(name));
-            if copy_rec(&src, &dst).is_ok() {
-                n += 1;
-            }
+        let pairs: Vec<(PathBuf, PathBuf)> = paths
+            .into_iter()
+            .filter(|src| src.exists())
+            .filter_map(|src| {
+                let name = src.file_name()?;
+                let dst = unique(self.cwd.join(name));
+                Some((src, dst))
+            })
+            .collect();
+        if pairs.is_empty() {
+            self.status = "clipboard has no file paths".into();
+            return;
         }
-        self.reload();
-        self.status = format!("pasted {n} file(s) from clipboard");
+        let n = pairs.len();
+        self.spawn_task(
+            TaskKind::Copy,
+            format!("Paste {n} item(s) from clipboard"),
+            TaskOp::Paste { pairs, cut: false },
+        );
+        self.status = format!("pasting {n} file(s) from clipboard…");
     }
 
     fn submit(&mut self, p: Prompt) {
@@ -1971,20 +2761,118 @@ impl App {
         }
     }
 
-    fn delete(&mut self) {
-        let t = self.targets();
-        let mut n = 0;
-        for p in &t {
-            match remove(p) {
-                Ok(()) => n += 1,
-                Err(e) => self.status = format!("{}: {e}", p.display()),
-            }
+    /// Begin a `d` / `D` confirmation.
+    fn start_delete(&mut self, mode: DeleteMode) {
+        if mode != DeleteMode::EmptyTrash && self.targets().is_empty() {
+            return;
+        }
+        self.visual = None;
+        self.pending_delete = Some(mode);
+        self.mode = Mode::Prompt(Prompt::Delete);
+    }
+
+    /// The user answered `y` to a delete confirmation.
+    fn confirm_delete(&mut self) {
+        match self.pending_delete.take() {
+            Some(DeleteMode::Trash) => self.trash_selected(),
+            Some(DeleteMode::Permanent) => self.delete_selected(),
+            Some(DeleteMode::FromTrash) => self.delete_from_trash(),
+            Some(DeleteMode::EmptyTrash) => self.empty_trash(),
+            None => {}
+        }
+    }
+
+    fn is_trash_view(&self) -> bool {
+        trash_view_path().as_deref() == Some(self.cwd.as_path())
+    }
+
+    /// `d` in the trash view permanently removes the selected entries.
+    fn delete_from_trash(&mut self) {
+        let targets = self.targets();
+        if targets.is_empty() {
+            return;
+        }
+        let infos: Vec<PathBuf> = targets
+            .iter()
+            .filter_map(|p| p.file_name().and_then(trash_info_for_name))
+            .collect();
+        self.selected.clear();
+        self.visual = None;
+        let n = targets.len();
+        self.spawn_task(
+            TaskKind::Delete,
+            format!("Purge {n} item(s) from trash"),
+            TaskOp::DeleteTrash {
+                paths: targets,
+                infos,
+            },
+        );
+        self.status = format!("purging {n} item(s) from trash…");
+    }
+
+    fn empty_trash(&mut self) {
+        self.selected.clear();
+        self.visual = None;
+        self.spawn_task(
+            TaskKind::EmptyTrash,
+            "Empty trash".into(),
+            TaskOp::EmptyTrash,
+        );
+        self.status = "emptying trash…".into();
+    }
+
+    /// Restore the selected trash entries to their original locations.
+    fn restore_selected(&mut self) {
+        let targets = self.targets();
+        let infos: Vec<PathBuf> = targets
+            .iter()
+            .filter_map(|p| p.file_name().and_then(trash_info_for_name))
+            .collect();
+        if infos.is_empty() {
+            self.status = "no trash info for the selection".into();
+            return;
         }
         self.selected.clear();
-        self.reload();
-        if self.status.is_empty() {
-            self.status = format!("deleted {n} item(s)");
+        self.visual = None;
+        let n = infos.len();
+        self.spawn_task(
+            TaskKind::Restore,
+            format!("Restore {n} item(s)"),
+            TaskOp::Restore { infos },
+        );
+        self.status = format!("restoring {n} item(s)…");
+    }
+
+    fn trash_selected(&mut self) {
+        let targets = self.targets();
+        if targets.is_empty() {
+            return;
         }
+        self.selected.clear();
+        self.visual = None;
+        let n = targets.len();
+        self.spawn_task(
+            TaskKind::Trash,
+            format!("Trash {n} item(s)"),
+            TaskOp::Trash { paths: targets },
+        );
+        self.status = format!("trashing {n} item(s)…");
+    }
+
+    fn delete_selected(&mut self) {
+        let targets = self.targets();
+        if targets.is_empty() {
+            return;
+        }
+        self.selected.clear();
+        self.visual = None;
+        let n = targets.len();
+        self.spawn_task(
+            TaskKind::Delete,
+            format!("Delete {n} item(s)"),
+            TaskOp::Delete { paths: targets },
+        );
+        self.status = format!("deleting {n} item(s)…");
     }
 
     fn paste(&mut self, force: bool) {
@@ -1992,50 +2880,32 @@ impl App {
             self.status = "nothing to paste".into();
             return;
         };
-        let mut n = 0;
-        for src in paths {
-            let Some(name) = src.file_name() else {
-                continue;
-            };
-            let target = self.cwd.join(name);
-            let dst = if force { target } else { unique(target) };
-            let r = if cut {
-                fs::rename(&src, &dst).or_else(|_| copy_rec(&src, &dst).and_then(|_| remove(&src)))
-            } else {
-                copy_rec(&src, &dst)
-            };
-            match r {
-                Ok(()) => n += 1,
-                Err(e) => self.status = format!("{}: {e}", src.display()),
-            }
+        let pairs: Vec<(PathBuf, PathBuf)> = paths
+            .into_iter()
+            .filter_map(|src| {
+                let name = src.file_name()?;
+                let target = self.cwd.join(name);
+                let dst = if force { target } else { unique(target) };
+                Some((src, dst))
+            })
+            .collect();
+        if pairs.is_empty() {
+            self.status = "nothing to paste".into();
+            return;
         }
+        let n = pairs.len();
+        self.selected.clear();
+        self.visual = None;
+        self.list_dirty = true;
+        self.spawn_task(
+            if cut { TaskKind::Move } else { TaskKind::Copy },
+            format!("{} {n} item(s)", if cut { "Move" } else { "Copy" }),
+            TaskOp::Paste { pairs, cut },
+        );
         if cut {
             self.yank = None;
         }
-        self.reload();
-        if self.status.is_empty() {
-            self.status = format!("pasted {n} item(s)");
-        }
-    }
-
-    fn delete_now(&mut self) {
-        let t = self.targets();
-        if t.is_empty() {
-            return;
-        }
-        self.visual = None;
-        let mut n = 0;
-        for p in &t {
-            match remove(p) {
-                Ok(()) => n += 1,
-                Err(e) => self.status = format!("{}: {e}", p.display()),
-            }
-        }
-        self.selected.clear();
-        self.reload();
-        if self.status.is_empty() {
-            self.status = format!("deleted {n} item(s)");
-        }
+        self.status = format!("{} {n} item(s)…", if cut { "moving" } else { "copying" });
     }
 
     /// Symlink yanked files into the cwd (Yazi's `-` and `_`).
@@ -2044,26 +2914,25 @@ impl App {
             self.status = "nothing to link".into();
             return;
         };
-        let mut n = 0;
-        for src in paths {
-            let Some(name) = src.file_name() else {
-                continue;
-            };
-            let dst = unique(self.cwd.join(name));
-            let target = if relative {
-                relative_path(&self.cwd, &src)
-            } else {
-                src.clone()
-            };
-            match std::os::unix::fs::symlink(&target, &dst) {
-                Ok(()) => n += 1,
-                Err(e) => self.status = format!("{}: {e}", dst.display()),
-            }
+        let pairs: Vec<(PathBuf, PathBuf)> = paths
+            .into_iter()
+            .filter_map(|src| {
+                let name = src.file_name()?;
+                let dst = unique(self.cwd.join(name));
+                Some((src, dst))
+            })
+            .collect();
+        if pairs.is_empty() {
+            self.status = "nothing to link".into();
+            return;
         }
-        self.reload();
-        if self.status.is_empty() {
-            self.status = format!("linked {n} item(s)");
-        }
+        let n = pairs.len();
+        self.spawn_task(
+            TaskKind::Link,
+            format!("Symlink {n} item(s)"),
+            TaskOp::Link { pairs, relative },
+        );
+        self.status = format!("linking {n} item(s)…");
     }
 
     /// Hardlink yanked files into the cwd (Yazi's `Ctrl+-`).
@@ -2072,20 +2941,206 @@ impl App {
             self.status = "nothing to link".into();
             return;
         };
-        let mut n = 0;
-        for src in paths {
-            let Some(name) = src.file_name() else {
-                continue;
+        let pairs: Vec<(PathBuf, PathBuf)> = paths
+            .into_iter()
+            .filter_map(|src| {
+                let name = src.file_name()?;
+                let dst = unique(self.cwd.join(name));
+                Some((src, dst))
+            })
+            .collect();
+        if pairs.is_empty() {
+            self.status = "nothing to link".into();
+            return;
+        }
+        let n = pairs.len();
+        self.spawn_task(
+            TaskKind::Hardlink,
+            format!("Hardlink {n} item(s)"),
+            TaskOp::Hardlink { pairs },
+        );
+        self.status = format!("hardlinking {n} item(s)…");
+    }
+
+    fn spawn_task(&mut self, kind: TaskKind, title: String, op: TaskOp) {
+        let state = Arc::new(Mutex::new(TaskState {
+            status: TaskStatus::Running,
+            progress: TaskProgress::default(),
+        }));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let thread_state = Arc::clone(&state);
+        let thread_cancel = Arc::clone(&cancel);
+        std::thread::spawn(move || run_task(op, &thread_state, &thread_cancel));
+        self.tasks.push(Task {
+            id: self.task_next_id,
+            kind,
+            title,
+            state,
+            cancel,
+            started: Instant::now(),
+            finished: None,
+        });
+        self.task_next_id = self.task_next_id.wrapping_add(1);
+    }
+
+    /// Refresh task progress. Returns true while the overlay needs redrawing.
+    fn poll_tasks(&mut self) -> bool {
+        let mut changed = false;
+        let mut finished = None;
+        for task in &mut self.tasks {
+            let status = match task.state.lock() {
+                Ok(s) => s.status,
+                Err(_) => continue,
             };
-            let dst = unique(self.cwd.join(name));
-            match fs::hard_link(&src, &dst) {
-                Ok(()) => n += 1,
-                Err(e) => self.status = format!("{}: {e}", dst.display()),
+            if status == TaskStatus::Running {
+                changed = true;
+            } else if task.finished.is_none() {
+                task.finished = Some(Instant::now());
+                changed = true;
+                finished = Some((task.title.clone(), status));
             }
         }
-        self.reload();
-        if self.status.is_empty() {
-            self.status = format!("hardlinked {n} item(s)");
+        if finished.is_some() {
+            self.reload();
+        }
+        if let Some((title, status)) = finished {
+            self.status = format!("{title}: {}", status.label());
+        }
+        if !self.tasks_running() {
+            self.quit_warned = false;
+        }
+        changed
+    }
+
+    fn tasks_running(&self) -> bool {
+        self.tasks.iter().any(|task| {
+            task.state
+                .lock()
+                .map(|s| s.status == TaskStatus::Running)
+                .unwrap_or(false)
+        })
+    }
+
+    fn task_move(&mut self, delta: isize) {
+        if self.tasks.is_empty() {
+            self.task_cursor = 0;
+            return;
+        }
+        let current = self.task_cursor.min(self.tasks.len() - 1) as isize;
+        self.task_cursor = (current + delta).clamp(0, self.tasks.len() as isize - 1) as usize;
+    }
+
+    fn cancel_task(&mut self) {
+        let Some(task) = self.tasks.get(self.task_cursor) else {
+            return;
+        };
+        let running = task
+            .state
+            .lock()
+            .map(|s| s.status == TaskStatus::Running)
+            .unwrap_or(false);
+        if running {
+            task.cancel.store(true, Ordering::Relaxed);
+            self.status = format!("cancelling: {}", task.title);
+        } else {
+            self.status = "task already finished".into();
+        }
+    }
+
+    fn inspect_task(&mut self) {
+        let Some(task) = self.tasks.get(self.task_cursor) else {
+            return;
+        };
+        let (status, progress, elapsed) = {
+            let state = match task.state.lock() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            (
+                state.status,
+                state.progress.clone(),
+                task.started.elapsed().as_secs_f64(),
+            )
+        };
+        let mut lines = vec![
+            InfoLine::Section("Task"),
+            InfoLine::Field("ID", task.id.to_string()),
+            InfoLine::Field("Title", task.title.clone()),
+            InfoLine::Field("Kind", task.kind.label().to_string()),
+            InfoLine::Field("Status", status.label().to_string()),
+            InfoLine::Field(
+                "Progress",
+                format!(
+                    "{} / {} ({}%)",
+                    progress.done.min(progress.total),
+                    progress.total,
+                    task_percent(&progress)
+                ),
+            ),
+            InfoLine::Field("Elapsed", format_duration(elapsed)),
+        ];
+        if !progress.current.is_empty() {
+            lines.push(InfoLine::Field("Current", progress.current.clone()));
+        }
+        lines.push(InfoLine::Section("Errors"));
+        if progress.errors.is_empty() {
+            lines.push(InfoLine::Text("  (none)".into()));
+        } else {
+            for error in &progress.errors {
+                lines.push(InfoLine::Text(format!("  {error}")));
+            }
+        }
+        self.info = Some(Info { lines });
+        self.info_cursor = 0;
+        self.info_scroll = 0;
+        self.info_copy_pending = false;
+        self.info_from_tasks = true;
+        self.mode = Mode::Info;
+    }
+
+    fn handle_tasks_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            self.mode = Mode::Normal;
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('w') | KeyCode::Char('q') => self.mode = Mode::Normal,
+            KeyCode::Char('j') | KeyCode::Down => self.task_move(1),
+            KeyCode::Char('k') | KeyCode::Up => self.task_move(-1),
+            KeyCode::Char('g') | KeyCode::Home => self.task_cursor = 0,
+            KeyCode::Char('G') | KeyCode::End => {
+                self.task_cursor = self.tasks.len().saturating_sub(1);
+            }
+            KeyCode::Enter => self.inspect_task(),
+            KeyCode::Char('x') => self.cancel_task(),
+            KeyCode::Char('~') | KeyCode::F(1) => self.mode = Mode::Help,
+            _ => {}
+        }
+    }
+
+    fn close_info(&mut self) {
+        self.info = None;
+        self.info_copy_pending = false;
+        self.mode = if self.info_from_tasks {
+            Mode::Tasks
+        } else {
+            Mode::Normal
+        };
+        self.info_from_tasks = false;
+    }
+
+    fn goto_trash(&mut self) {
+        if let Err(e) = ensure_trash_dirs() {
+            self.status = format!("trash: {e}");
+            return;
+        }
+        let Some(files) = trash_view_path() else {
+            self.status = "trash: HOME is not set".into();
+            return;
+        };
+        self.cd(files, None);
+        if self.entries.is_empty() {
+            self.status = "trash is empty".into();
         }
     }
 
@@ -2218,6 +3273,20 @@ impl App {
         if let Ok(target) = fs::read_link(&e.path) {
             lines.push(InfoLine::Field("Link to", target.display().to_string()));
         }
+        if self.is_trash_view() {
+            if let Some(name) = e.path.file_name() {
+                if let Some(info_path) = trash_info_for_name(name) {
+                    if let Some(info) = parse_trashinfo(&info_path) {
+                        lines.push(InfoLine::Section("Trash"));
+                        lines.push(InfoLine::Field(
+                            "Original",
+                            info.original.display().to_string(),
+                        ));
+                        lines.push(InfoLine::Field("Deleted", info.date));
+                    }
+                }
+            }
+        }
         lines.push(InfoLine::Field(
             "Created",
             format!("{} ({})", format_time(e.created), format_age(e.created)),
@@ -2306,6 +3375,7 @@ impl App {
         self.info_cursor = 0;
         self.info_scroll = 0;
         self.info_copy_pending = false;
+        self.info_from_tasks = false;
         self.mode = Mode::Info;
     }
 
@@ -2342,6 +3412,7 @@ impl App {
         let text = match line {
             InfoLine::Field(_, value) => value.clone(),
             InfoLine::Section(title) => title.to_string(),
+            InfoLine::Text(value) => value.clone(),
         };
         self.clipboard_set(text + "\n", "text/plain", "copied cell".into());
     }
@@ -2417,7 +3488,9 @@ impl App {
             Mode::Prompt(p) => {
                 if p == Prompt::Delete {
                     if key.code == KeyCode::Char('y') {
-                        self.delete();
+                        self.confirm_delete();
+                    } else {
+                        self.pending_delete = None;
                     }
                     self.mode = Mode::Normal;
                     return Ok(false);
@@ -2465,9 +3538,7 @@ impl App {
             }
             Mode::Info => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    self.info = None;
-                    self.info_copy_pending = false;
-                    self.mode = Mode::Normal;
+                    self.close_info();
                     return Ok(false);
                 }
                 if self.info_copy_pending {
@@ -2478,21 +3549,27 @@ impl App {
                     }
                 }
                 match key.code {
-                    KeyCode::Esc | KeyCode::Tab => {
-                        self.info = None;
-                        self.mode = Mode::Normal;
-                    }
+                    KeyCode::Esc | KeyCode::Tab => self.close_info(),
                     KeyCode::Char('~') | KeyCode::F(1) => {
                         self.info = None;
+                        self.info_from_tasks = false;
                         self.mode = Mode::Help;
                     }
                     KeyCode::Char('j') | KeyCode::Down => self.info_move(1),
                     KeyCode::Char('k') | KeyCode::Up => self.info_move(-1),
-                    KeyCode::Char('h') | KeyCode::Left => self.info_swipe(-1),
-                    KeyCode::Char('l') | KeyCode::Right => self.info_swipe(1),
+                    KeyCode::Char('h') | KeyCode::Left if !self.info_from_tasks => {
+                        self.info_swipe(-1)
+                    }
+                    KeyCode::Char('l') | KeyCode::Right if !self.info_from_tasks => {
+                        self.info_swipe(1)
+                    }
                     KeyCode::Char('c') => self.info_copy_pending = true,
                     _ => {}
                 }
+                return Ok(false);
+            }
+            Mode::Tasks => {
+                self.handle_tasks_key(key);
                 return Ok(false);
             }
             Mode::OpenWith => {
@@ -2512,6 +3589,9 @@ impl App {
                 KeyCode::Char('c') => {
                     if self.tabs.len() > 1 {
                         self.close_tab();
+                    } else if self.tasks_running() && !self.quit_warned {
+                        self.quit_warned = true;
+                        self.status = "unfinished tasks — press Ctrl+c again to quit".into();
                     } else {
                         return Ok(true);
                     }
@@ -2536,7 +3616,14 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(true),
+            KeyCode::Char('q') | KeyCode::Char('Q') => {
+                if self.tasks_running() && !self.quit_warned {
+                    self.quit_warned = true;
+                    self.status = "unfinished tasks — press q again to quit".into();
+                } else {
+                    return Ok(true);
+                }
+            }
             KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
             KeyCode::Char('J') => {
@@ -2641,13 +3728,21 @@ impl App {
                 }
             }
             KeyCode::Char('d') => {
-                let has_targets = !self.targets().is_empty();
-                self.visual = None;
-                if has_targets {
-                    self.mode = Mode::Prompt(Prompt::Delete);
-                }
+                let mode = if self.is_trash_view() {
+                    DeleteMode::FromTrash
+                } else {
+                    DeleteMode::Trash
+                };
+                self.start_delete(mode);
             }
-            KeyCode::Char('D') => self.delete_now(),
+            KeyCode::Char('D') => {
+                let mode = if self.is_trash_view() {
+                    DeleteMode::FromTrash
+                } else {
+                    DeleteMode::Permanent
+                };
+                self.start_delete(mode);
+            }
             KeyCode::Char('r') => {
                 self.visual = None;
                 if let Some(e) = self.current() {
@@ -2666,6 +3761,10 @@ impl App {
             KeyCode::Char('S') => self.start_search(SearchKind::Rg),
             KeyCode::Char('c') => self.prefix = Some(Prefix::Copy),
             KeyCode::Char('t') => self.prefix = Some(Prefix::Tab),
+            KeyCode::Char('w') => {
+                self.task_cursor = self.task_cursor.min(self.tasks.len().saturating_sub(1));
+                self.mode = Mode::Tasks;
+            }
             KeyCode::Tab => self.open_info(),
             KeyCode::Char(c @ '1'..='9') => {
                 let index = c as usize - '1' as usize;
@@ -2722,7 +3821,7 @@ impl App {
                 KeyCode::Char('v') => self.goto("~/Videos"),
                 KeyCode::Char(' ') => self.start_cd(),
                 KeyCode::Char('f') => self.follow_symlink(),
-                KeyCode::Char('t') => self.status = "trash is not supported".into(),
+                KeyCode::Char('t') => self.goto_trash(),
                 _ => {}
             },
             Prefix::Sort => match key.code {
@@ -2977,11 +4076,29 @@ impl App {
                 self.find_query
             ),
             Mode::Help => "rnn keys — press any key to close".into(),
-            Mode::Info => "info — j/k scroll · h/l swipe · c c copy · Esc close".into(),
-            Mode::OpenWith => "open with — j/k move · Enter open · Esc cancel".into(),
-            Mode::Prompt(Prompt::Delete) => {
-                format!("delete {} item(s)? (y/N)", self.targets().len())
+            Mode::Info => {
+                if self.info_from_tasks {
+                    "task — j/k scroll · c c copy · Esc close".into()
+                } else {
+                    "info — j/k scroll · h/l swipe · c c copy · Esc close".into()
+                }
             }
+            Mode::Tasks => "tasks — j/k move · Enter inspect · x cancel · Esc/w close".into(),
+            Mode::OpenWith => "open with — j/k move · Enter open · Esc cancel".into(),
+            Mode::Prompt(Prompt::Delete) => match self.pending_delete {
+                Some(DeleteMode::Trash) => {
+                    format!("trash {} item(s)? (y/N)", self.targets().len())
+                }
+                Some(DeleteMode::Permanent) => {
+                    format!("permanently delete {} item(s)? (y/N)", self.targets().len())
+                }
+                Some(DeleteMode::FromTrash) => format!(
+                    "permanently delete {} item(s) from trash? (y/N)",
+                    self.targets().len()
+                ),
+                Some(DeleteMode::EmptyTrash) => "empty trash? (y/N)".into(),
+                None => "delete? (y/N)".into(),
+            },
             Mode::Prompt(p) => {
                 let label = match p {
                     Prompt::Create => "create",
@@ -3030,6 +4147,19 @@ impl App {
                     };
                     s.push_str(&format!(" | lm:{lm}"));
                 }
+                let running = self
+                    .tasks
+                    .iter()
+                    .filter(|task| {
+                        task.state
+                            .lock()
+                            .map(|s| s.status == TaskStatus::Running)
+                            .unwrap_or(false)
+                    })
+                    .count();
+                if running > 0 {
+                    s.push_str(&format!(" | tasks {running}"));
+                }
                 s
             }
         };
@@ -3070,6 +4200,9 @@ impl App {
         }
         if matches!(self.mode, Mode::OpenWith) {
             self.draw_open_with(f);
+        }
+        if matches!(self.mode, Mode::Tasks) {
+            self.draw_tasks(f);
         }
     }
 
@@ -3167,6 +4300,7 @@ impl App {
                 InfoLine::Field(label, value) => {
                     Some(2 + label.chars().count() + 2 + value.chars().count())
                 }
+                InfoLine::Text(value) => Some(value.chars().count()),
                 InfoLine::Section(_) => None,
             })
             .max()
@@ -3211,6 +4345,10 @@ impl App {
                     ])
                     .style(base),
                 )),
+                InfoLine::Text(value) => rows.push((
+                    Some(i),
+                    Line::from(Span::raw(truncate_chars(value, avail))).style(base),
+                )),
             }
         }
 
@@ -3241,7 +4379,130 @@ impl App {
             .take(max)
             .map(|(_, line)| line)
             .collect();
-        let title = format!(" info {}/{} ", cursor + 1, total);
+        let title = if self.info_from_tasks {
+            " task ".to_string()
+        } else {
+            format!(" info {}/{} ", cursor + 1, total)
+        };
+        f.render_widget(Clear, rect);
+        f.render_widget(
+            Paragraph::new(lines).block(Block::bordered().title(title)),
+            rect,
+        );
+    }
+
+    fn draw_tasks(&mut self, f: &mut Frame) {
+        let area = f.area();
+        if area.width < 30 || area.height < 6 {
+            return;
+        }
+        let width = (area.width as u32 * 80 / 100)
+            .max(40)
+            .min(area.width as u32) as u16;
+        let height = (area.height as u32 * 80 / 100)
+            .max(8)
+            .min(area.height as u32) as u16;
+        let rect = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        let inner_width = width.saturating_sub(4) as usize;
+        let inner_height = height.saturating_sub(2) as usize;
+
+        let total = self.tasks.len();
+        let running = self
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.state
+                    .lock()
+                    .map(|s| s.status == TaskStatus::Running)
+                    .unwrap_or(false)
+            })
+            .count();
+        let cursor = self.task_cursor.min(total.saturating_sub(1));
+        let visible = (inner_height / 2).max(1);
+        let start = if cursor >= visible {
+            cursor + 1 - visible
+        } else {
+            0
+        };
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        if total == 0 {
+            lines.push(Line::from(Span::styled(
+                "  no tasks",
+                Style::new().fg(Color::DarkGray),
+            )));
+        } else {
+            for (i, task) in self.tasks.iter().enumerate().skip(start).take(visible) {
+                let (status, progress) = match task.state.lock() {
+                    Ok(state) => (state.status, state.progress.clone()),
+                    Err(_) => (TaskStatus::Failed, TaskProgress::default()),
+                };
+                let percent = if status == TaskStatus::Done {
+                    100
+                } else {
+                    task_percent(&progress)
+                };
+                let (icon, color) = match status {
+                    TaskStatus::Running => ("▶", Color::Yellow),
+                    TaskStatus::Done => ("✓", Color::Green),
+                    TaskStatus::Failed => ("✗", Color::Red),
+                    TaskStatus::Cancelled => ("⊘", Color::DarkGray),
+                };
+                let selected = i == cursor;
+                let base = if selected {
+                    Style::new().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::new()
+                };
+                let marker = if selected { "▸ " } else { "  " };
+                let bar_width = 20usize.min(inner_width.saturating_sub(30)).max(6);
+                let bar = progress_bar(percent, bar_width);
+                let title_width = inner_width.saturating_sub(bar_width + 12).max(8);
+                let title = truncate_chars(&task.title, title_width);
+                lines.push(
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{marker}{icon} "),
+                            Style::new().fg(color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(title, base),
+                        Span::raw(" "),
+                        Span::styled(bar, Style::new().fg(color)),
+                        Span::styled(format!(" {percent:>3}%"), Style::new().fg(Color::Gray)),
+                    ])
+                    .style(base),
+                );
+                let detail = if let Some(error) = progress.errors.last() {
+                    error.clone()
+                } else if !progress.current.is_empty() {
+                    progress.current.clone()
+                } else {
+                    match status {
+                        TaskStatus::Running => "…".into(),
+                        TaskStatus::Done => format!("{} item(s)", progress.done),
+                        TaskStatus::Cancelled => "cancelled".into(),
+                        TaskStatus::Failed => "failed".into(),
+                    }
+                };
+                lines.push(
+                    Line::from(Span::styled(
+                        format!(
+                            "    {}",
+                            truncate_chars(&detail, inner_width.saturating_sub(6))
+                        ),
+                        Style::new().fg(Color::DarkGray),
+                    ))
+                    .style(base),
+                );
+            }
+        }
+
+        let title = format!(" tasks {running} running · {total} total ");
         f.render_widget(Clear, rect);
         f.render_widget(
             Paragraph::new(lines).block(Block::bordered().title(title)),
@@ -3358,9 +4619,10 @@ impl App {
             "y / x       yank / cut",
             "p / P       paste / paste-force",
             "Y / X       cancel yank",
-            "d / D       delete confirm / now",
+            "d / D       trash / delete (confirm)",
             "r / a       rename / create",
             "A           bulk create",
+            "w           task manager",
             "Ctrl+n      create",
             "Ctrl+y/p    clipboard copy / paste",
             "; / :       run shell command",
@@ -3393,6 +4655,7 @@ impl App {
             "go gp gv    osu / pictures / videos",
             "g<Space>    go to path (live menu)",
             "gf / gt     follow symlink / trash",
+            "O in trash  restore / empty",
             ",a ,n ,s    sort name/natural/size",
             ",m ,b ,e    sort time / btime / ext",
             ",r          sort randomly",
@@ -3504,6 +4767,7 @@ impl App {
     pub fn run(&mut self, term: &mut DefaultTerminal) -> io::Result<()> {
         let time = std::env::var_os("RNN_TIME").is_some();
         let mut last_search_poll = std::time::Instant::now();
+        let mut last_task_poll = std::time::Instant::now();
         term.draw(|f| self.draw(f))?;
         loop {
             let mut dirty = false;
@@ -3534,6 +4798,12 @@ impl App {
                     dirty = true;
                 }
             }
+            if last_task_poll.elapsed() >= Duration::from_millis(100) {
+                last_task_poll = std::time::Instant::now();
+                if self.poll_tasks() {
+                    dirty = true;
+                }
+            }
             if dirty {
                 let t = std::time::Instant::now();
                 let mut closure = Duration::ZERO;
@@ -3553,5 +4823,95 @@ impl App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!(
+            "rnn-test-{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn percent_path_round_trip() {
+        for path in [
+            Path::new("/tmp/plain.txt"),
+            Path::new("/tmp/with space/and#hash"),
+            Path::new("/tmp/unicode-λ/文件"),
+            Path::new("/tmp/percent%25"),
+        ] {
+            let encoded = percent_encode_path(path);
+            assert_eq!(percent_decode_path(&encoded), path);
+        }
+        assert_eq!(percent_encode_path(Path::new("/a b")), "/a%20b");
+        assert_eq!(percent_decode_path("/a%20b"), Path::new("/a b"));
+    }
+
+    #[test]
+    fn parse_trashinfo_reads_path_and_date() {
+        let dir = tmp_dir("trashinfo");
+        let info = dir.join("notes.txt.trashinfo");
+        fs::write(
+            &info,
+            "[Trash Info]\nPath=/home/user/My%20Notes/notes.txt\nDeletionDate=2024-01-02T03:04:05\n",
+        )
+        .unwrap();
+        let parsed = parse_trashinfo(&info).unwrap();
+        assert_eq!(parsed.name, "notes.txt");
+        assert_eq!(parsed.original, Path::new("/home/user/My Notes/notes.txt"));
+        assert_eq!(parsed.date, "2024-01-02T03:04:05");
+        assert!(parse_trashinfo(&dir.join("missing.trashinfo")).is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn task_percent_clamps_and_handles_empty() {
+        let empty = TaskProgress::default();
+        assert_eq!(task_percent(&empty), 0);
+
+        let done_only = TaskProgress {
+            done: 3,
+            ..Default::default()
+        };
+        assert_eq!(task_percent(&done_only), 100);
+
+        let half = TaskProgress {
+            total: 4,
+            done: 2,
+            ..Default::default()
+        };
+        assert_eq!(task_percent(&half), 50);
+
+        let over = TaskProgress {
+            total: 4,
+            done: 9,
+            ..Default::default()
+        };
+        assert_eq!(task_percent(&over), 100);
+    }
+
+    #[test]
+    fn count_tree_walks_directories() {
+        let dir = tmp_dir("count");
+        fs::write(dir.join("a"), b"a").unwrap();
+        fs::create_dir_all(dir.join("sub/deep")).unwrap();
+        fs::write(dir.join("sub/b"), b"b").unwrap();
+        fs::write(dir.join("sub/deep/c"), b"c").unwrap();
+
+        // dir + a + sub + b + deep + c
+        assert_eq!(count_tree(std::slice::from_ref(&dir)), 6);
+        assert_eq!(count_tree(&[dir.join("a")]), 1);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

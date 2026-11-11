@@ -15,7 +15,10 @@ use std::{
 /// is unavailable (non-Linux, unsupported filesystem, no permission).
 pub fn create(data: &[u8]) -> io::Result<String> {
     if data.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty shm payload"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty shm payload",
+        ));
     }
     #[cfg(target_os = "linux")]
     {
@@ -24,7 +27,10 @@ pub fn create(data: &[u8]) -> io::Result<String> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = data;
-        Err(io::Error::new(io::ErrorKind::Unsupported, "shared memory is Linux-only"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "shared memory is Linux-only",
+        ))
     }
 }
 

@@ -1,9 +1,4 @@
-use std::{
-    fs,
-    io::Read,
-    path::Path,
-    sync::LazyLock,
-};
+use std::{fs, io::Read, path::Path, sync::LazyLock};
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -64,7 +59,12 @@ pub fn highlight(content: &str, ext: &str, name: &str) -> Vec<Line<'static>> {
                 SYNTAXES.find_syntax_by_name(name)
             }
         })
-        .or_else(|| content.lines().next().and_then(|l| SYNTAXES.find_syntax_by_first_line(l)))
+        .or_else(|| {
+            content
+                .lines()
+                .next()
+                .and_then(|l| SYNTAXES.find_syntax_by_first_line(l))
+        })
         .unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
     let theme = THEMES.get(EmbeddedThemeName::CatppuccinMocha);
 
@@ -89,11 +89,7 @@ pub fn highlight(content: &str, ext: &str, name: &str) -> Vec<Line<'static>> {
 }
 
 fn convert(s: SynStyle) -> Style {
-    let mut st = Style::new().fg(Color::Rgb(
-        s.foreground.r,
-        s.foreground.g,
-        s.foreground.b,
-    ));
+    let mut st = Style::new().fg(Color::Rgb(s.foreground.r, s.foreground.g, s.foreground.b));
     if s.font_style.contains(FontStyle::BOLD) {
         st = st.add_modifier(Modifier::BOLD);
     }
