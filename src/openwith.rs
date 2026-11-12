@@ -35,11 +35,22 @@ impl Opener {
 }
 
 /// Build the open-with list for `path`.
-pub fn options(path: &Path) -> Vec<Opener> {
-    let Some(doc) = load_config() else {
-        return fallback();
-    };
-
+///
+/// `doc` is the `[opener]`/`[open]` part of rnn's `config.toml` (if any). It
+/// replaces the matching section from the user's Yazi config; missing sections
+/// still fall back to Yazi's config and then to built-in defaults.
+pub fn options(path: &Path, doc: Option<&toml::Value>) -> Vec<Opener> {
+    let mut merged = load_config().unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
+    if let Some(over) = doc.and_then(|d| d.as_table()) {
+        if let Some(base) = merged.as_table_mut() {
+            for key in ["opener", "open"] {
+                if let Some(value) = over.get(key) {
+                    base.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+    }
+    let doc = &merged;
     let mut openers = builtin_openers();
     if let Some(table) = doc.get("opener").and_then(|v| v.as_table()) {
         for (name, value) in table {
@@ -49,7 +60,7 @@ pub fn options(path: &Path) -> Vec<Opener> {
         }
     }
 
-    let uses = matching_uses(&doc, path);
+    let uses = matching_uses(doc, path);
     let mut out = Vec::new();
     for name in uses {
         if let Some(op) = openers.get(&name) {

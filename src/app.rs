@@ -18,13 +18,19 @@ use std::{
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph},
     DefaultTerminal, Frame,
 };
 
 use crate::{
+    action::Action,
+    config::{
+        self,
+        keymap::{Context, KeyChord},
+        Config,
+    },
     openwith,
     preview::{
         detect::{self, Kind},
@@ -48,8 +54,8 @@ struct Entry {
     gid: u32,
 }
 
-#[derive(Clone, Copy)]
-enum Sort {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Sort {
     Name,
     Natural,
     Size,
@@ -92,86 +98,8 @@ enum Mode {
     Tasks,
 }
 
-#[derive(Clone, Copy)]
-enum Prefix {
-    Goto,
-    Sort,
-    Copy,
-    Linemode,
-    Tab,
-}
-
-impl Prefix {
-    fn label(self) -> &'static str {
-        match self {
-            Prefix::Goto => "g",
-            Prefix::Sort => ",",
-            Prefix::Copy => "c",
-            Prefix::Linemode => "m",
-            Prefix::Tab => "t",
-        }
-    }
-
-    /// Continuations shown in the which-key style popup.
-    fn items(self) -> &'static [(&'static str, &'static str)] {
-        match self {
-            Prefix::Goto => &[
-                ("g", "top of list"),
-                ("h", "home"),
-                ("c", "~/.config"),
-                ("d", "~/Downloads"),
-                ("o", "osu! (osu-wine)"),
-                ("p", "~/Pictures"),
-                ("v", "~/Videos"),
-                ("Space", "go to path…"),
-                ("f", "follow symlink"),
-                ("t", "trash bin"),
-            ],
-            Prefix::Sort => &[
-                ("a", "name ↑"),
-                ("A", "name ↓"),
-                ("n", "natural ↑"),
-                ("N", "natural ↓"),
-                ("s", "size ↑"),
-                ("S", "size ↓"),
-                ("m", "modified ↑"),
-                ("M", "modified ↓"),
-                ("b", "created ↑"),
-                ("B", "created ↓"),
-                ("e", "extension ↑"),
-                ("E", "extension ↓"),
-                ("r", "random"),
-            ],
-            Prefix::Copy => &[
-                ("c", "path"),
-                ("C", "url"),
-                ("d", "directory path"),
-                ("D", "directory url"),
-                ("f", "filename"),
-                ("n", "name without extension"),
-            ],
-            Prefix::Linemode => &[
-                ("s", "size"),
-                ("p", "permissions"),
-                ("b", "created"),
-                ("m", "modified"),
-                ("o", "owner"),
-                ("n", "none"),
-            ],
-            Prefix::Tab => &[
-                ("t", "new tab here"),
-                ("n", "new tab at home"),
-                ("r", "rename tab"),
-                ("c", "close tab"),
-                ("[", "previous tab"),
-                ("]", "next tab"),
-            ],
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Linemode {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Linemode {
     Size,
     Permissions,
     Btime,
@@ -180,8 +108,8 @@ enum Linemode {
     None,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum SearchKind {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SearchKind {
     Fd,
     Rg,
 }
@@ -312,8 +240,8 @@ fn spawn_search(search: Search, show_hidden: bool) -> (Receiver<SearchMsg>, mpsc
     (rx, cancel_tx)
 }
 
-#[derive(Clone, Copy)]
-enum CopyKind {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum CopyKind {
     Path,
     Url,
     DirPath,
@@ -382,6 +310,7 @@ struct OpenWith {
 }
 
 pub struct App {
+    config: Config,
     cwd: PathBuf,
     entries: Vec<Entry>,
     state: ListState,
@@ -393,7 +322,7 @@ pub struct App {
     selected: BTreeSet<PathBuf>,
     yank: Option<(Vec<PathBuf>, bool)>, // (paths, is_cut)
     mode: Mode,
-    prefix: Option<Prefix>,
+    pending: Vec<KeyChord>,
     visual: Option<Visual>,
     completions: Vec<Completion>,
     completion_index: usize,
@@ -417,7 +346,6 @@ pub struct App {
     info: Option<Info>,
     info_cursor: usize,
     info_scroll: usize,
-    info_copy_pending: bool,
     info_from_tasks: bool,
     open_with: Option<OpenWith>,
     tasks: Vec<Task>,
@@ -545,6 +473,16 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
             }
         }
     }
+}
+
+/// Turn relative pane weights (Yazi-style) into percentages that sum to 100.
+fn ratio_percentages((list, preview): (u16, u16)) -> (u16, u16) {
+    let total = u32::from(list) + u32::from(preview);
+    if total == 0 {
+        return (50, 50);
+    }
+    let first = ((u32::from(list) * 100) / total).clamp(1, 99) as u16;
+    (first, 100 - first)
 }
 
 fn permissions(mode: u32) -> String {
@@ -1510,25 +1448,29 @@ fn run_hardlink(
 // ───────────────────────── app ─────────────────────────
 
 impl App {
-    pub fn new() -> io::Result<Self> {
+    pub fn new(loaded: config::Loaded) -> io::Result<Self> {
         let start = env::args()
             .nth(1)
             .map(PathBuf::from)
             .unwrap_or(env::current_dir()?);
         let cwd = fs::canonicalize(start)?;
+        let config::Loaded { config, warnings } = loaded;
+        let status = warnings.join(" · ");
+        let mgr = config.mgr;
         let mut app = App {
+            config,
             cwd: cwd.clone(),
             entries: vec![],
             state: ListState::default(),
             filter: String::new(),
-            show_hidden: false,
-            show_preview: true,
-            sort: Sort::Name,
-            sort_reverse: false,
+            show_hidden: mgr.show_hidden,
+            show_preview: mgr.show_preview,
+            sort: mgr.sort,
+            sort_reverse: mgr.sort_reverse,
             selected: BTreeSet::new(),
             yank: None,
             mode: Mode::Normal,
-            prefix: None,
+            pending: Vec::new(),
             visual: None,
             completions: Vec::new(),
             completion_index: 0,
@@ -1539,11 +1481,11 @@ impl App {
             find_forward: true,
             find_origin: None,
             last_find: None,
-            linemode: Linemode::Size,
+            linemode: mgr.linemode,
             history: vec![cwd],
             history_pos: 0,
             input: String::new(),
-            status: String::new(),
+            status,
             focus: None,
             page: 10,
             tabs: Vec::new(),
@@ -1552,7 +1494,6 @@ impl App {
             info: None,
             info_cursor: 0,
             info_scroll: 0,
-            info_copy_pending: false,
             info_from_tasks: false,
             open_with: None,
             tasks: Vec::new(),
@@ -1565,6 +1506,7 @@ impl App {
             list_dirty: true,
             list_width: 0,
         };
+        app.preview.set_cache_size(app.config.preview.cache_size);
         app.reload();
         app.tabs = vec![app.snapshot()];
         Ok(app)
@@ -1620,10 +1562,9 @@ impl App {
         self.stop_search_job();
         self.state
             .select(tab.cursor.filter(|i| *i < self.entries.len()));
-        self.prefix = None;
+        self.pending.clear();
         self.mode = Mode::Normal;
         self.info = None;
-        self.info_copy_pending = false;
         self.input.clear();
         self.completions.clear();
         self.list_dirty = true;
@@ -1943,7 +1884,7 @@ impl App {
         self.search_cancel = None;
         self.entries.clear();
         self.state.select(None);
-        self.prefix = None;
+        self.pending.clear();
         self.visual = None;
         self.focus = focus;
         self.reload();
@@ -2327,7 +2268,7 @@ impl App {
                 block: false,
             });
         }
-        options.extend(openwith::options(&e.path));
+        options.extend(openwith::options(&e.path, self.config.open.as_ref()));
         if options.is_empty() {
             self.status = "open with: no openers configured".into();
             return;
@@ -3093,34 +3034,12 @@ impl App {
         self.info = Some(Info { lines });
         self.info_cursor = 0;
         self.info_scroll = 0;
-        self.info_copy_pending = false;
         self.info_from_tasks = true;
         self.mode = Mode::Info;
     }
 
-    fn handle_tasks_key(&mut self, key: KeyEvent) {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.mode = Mode::Normal;
-            return;
-        }
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('w') | KeyCode::Char('q') => self.mode = Mode::Normal,
-            KeyCode::Char('j') | KeyCode::Down => self.task_move(1),
-            KeyCode::Char('k') | KeyCode::Up => self.task_move(-1),
-            KeyCode::Char('g') | KeyCode::Home => self.task_cursor = 0,
-            KeyCode::Char('G') | KeyCode::End => {
-                self.task_cursor = self.tasks.len().saturating_sub(1);
-            }
-            KeyCode::Enter => self.inspect_task(),
-            KeyCode::Char('x') => self.cancel_task(),
-            KeyCode::Char('~') | KeyCode::F(1) => self.mode = Mode::Help,
-            _ => {}
-        }
-    }
-
     fn close_info(&mut self) {
         self.info = None;
-        self.info_copy_pending = false;
         self.mode = if self.info_from_tasks {
             Mode::Tasks
         } else {
@@ -3374,7 +3293,6 @@ impl App {
         self.info = Some(Info { lines });
         self.info_cursor = 0;
         self.info_scroll = 0;
-        self.info_copy_pending = false;
         self.info_from_tasks = false;
         self.mode = Mode::Info;
     }
@@ -3422,8 +3340,17 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent, term: &mut DefaultTerminal) -> io::Result<bool> {
         self.status.clear();
 
+        let ctrl_c =
+            key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c');
+
         match self.mode {
             Mode::Filter => {
+                if ctrl_c {
+                    self.filter.clear();
+                    self.mode = Mode::Normal;
+                    self.reload();
+                    return Ok(false);
+                }
                 match key.code {
                     KeyCode::Esc => {
                         self.filter.clear();
@@ -3444,6 +3371,16 @@ impl App {
                 return Ok(false);
             }
             Mode::Find => {
+                if ctrl_c {
+                    if let Some(o) = self.find_origin.take() {
+                        if !self.entries.is_empty() {
+                            self.state.select(Some(o.min(self.entries.len() - 1)));
+                        }
+                    }
+                    self.find_query.clear();
+                    self.mode = Mode::Normal;
+                    return Ok(false);
+                }
                 match key.code {
                     KeyCode::Esc => {
                         if let Some(o) = self.find_origin.take() {
@@ -3486,6 +3423,13 @@ impl App {
                 return Ok(false);
             }
             Mode::Prompt(p) => {
+                if ctrl_c {
+                    self.mode = Mode::Normal;
+                    self.input.clear();
+                    self.completions.clear();
+                    self.pending_delete = None;
+                    return Ok(false);
+                }
                 if p == Prompt::Delete {
                     if key.code == KeyCode::Char('y') {
                         self.confirm_delete();
@@ -3536,254 +3480,118 @@ impl App {
                 self.mode = Mode::Normal;
                 return Ok(false);
             }
-            Mode::Info => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    self.close_info();
-                    return Ok(false);
-                }
-                if self.info_copy_pending {
-                    self.info_copy_pending = false;
-                    if key.code == KeyCode::Char('c') {
-                        self.info_copy_cell();
-                        return Ok(false);
-                    }
-                }
-                match key.code {
-                    KeyCode::Esc | KeyCode::Tab => self.close_info(),
-                    KeyCode::Char('~') | KeyCode::F(1) => {
-                        self.info = None;
-                        self.info_from_tasks = false;
-                        self.mode = Mode::Help;
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => self.info_move(1),
-                    KeyCode::Char('k') | KeyCode::Up => self.info_move(-1),
-                    KeyCode::Char('h') | KeyCode::Left if !self.info_from_tasks => {
-                        self.info_swipe(-1)
-                    }
-                    KeyCode::Char('l') | KeyCode::Right if !self.info_from_tasks => {
-                        self.info_swipe(1)
-                    }
-                    KeyCode::Char('c') => self.info_copy_pending = true,
-                    _ => {}
-                }
-                return Ok(false);
-            }
-            Mode::Tasks => {
-                self.handle_tasks_key(key);
-                return Ok(false);
-            }
             Mode::OpenWith => {
                 self.handle_open_with_key(key, term);
                 return Ok(false);
             }
-            Mode::Normal => {}
+            Mode::Info | Mode::Tasks | Mode::Normal => {}
         }
 
-        if let Some(prefix) = self.prefix.take() {
-            self.handle_prefix(prefix, key);
-            return Ok(false);
-        }
-
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Char('c') => {
+        // Ctrl+c is a safety net: it always cancels or quits, even when the
+        // user has rebound it.
+        if ctrl_c {
+            match self.mode {
+                Mode::Info => self.close_info(),
+                Mode::Tasks => self.mode = Mode::Normal,
+                Mode::Normal => {
                     if self.tabs.len() > 1 {
                         self.close_tab();
-                    } else if self.tasks_running() && !self.quit_warned {
+                    } else if self.config.confirm.quit_with_tasks
+                        && self.tasks_running()
+                        && !self.quit_warned
+                    {
                         self.quit_warned = true;
                         self.status = "unfinished tasks — press Ctrl+c again to quit".into();
                     } else {
                         return Ok(true);
                     }
                 }
-                KeyCode::Char('d') => self.move_by((self.page / 2) as isize),
-                KeyCode::Char('u') => self.move_by(-((self.page / 2) as isize)),
-                KeyCode::Char('b') => self.move_by(-(self.page as isize)),
-                KeyCode::Char('f') => self.move_by(self.page as isize),
-                KeyCode::Char('a') => self.select_all(),
-                KeyCode::Char('r') => self.invert_selection(),
-                KeyCode::Char('n') => self.start_create(),
-                KeyCode::Char('y') => self.clipboard_copy(),
-                KeyCode::Char('p') => self.clipboard_paste(),
-                KeyCode::Char('s') => self.cancel_search(),
-                // Ctrl+- / Ctrl+_ arrive as `Ctrl+7` from terminals that send
-                // the legacy 0x1f byte (crossterm maps 0x1c..=0x1f to 4..=7).
-                KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Char('7') => self.hardlink(),
-                KeyCode::Char('z') => self.suspend(term),
                 _ => {}
             }
             return Ok(false);
         }
 
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') => {
-                if self.tasks_running() && !self.quit_warned {
+        if !self.pending.is_empty() && key.code == KeyCode::Esc {
+            self.pending.clear();
+            return Ok(false);
+        }
+
+        let ctx = match self.mode {
+            Mode::Normal => Context::Mgr,
+            Mode::Tasks => Context::Tasks,
+            Mode::Info => Context::Info,
+            _ => return Ok(false),
+        };
+        if let Some(quit) = self.handle_mapped_key(ctx, key, term)? {
+            return Ok(quit);
+        }
+        Ok(false)
+    }
+
+    /// Feed a key into the active keymap trie. Returns `Some(quit)` when an
+    /// action decided to exit rnn.
+    fn handle_mapped_key(
+        &mut self,
+        ctx: Context,
+        key: KeyEvent,
+        term: &mut DefaultTerminal,
+    ) -> io::Result<Option<bool>> {
+        let next = {
+            let root = self.config.keymap.node(ctx);
+            let Some(node) = root.walk(&self.pending) else {
+                self.pending.clear();
+                return Ok(None);
+            };
+            node.child(&key)
+                .map(|(chord, child)| (*chord, child.has_children(), child.action().cloned()))
+        };
+        let Some((chord, has_children, action)) = next else {
+            self.pending.clear();
+            return Ok(None);
+        };
+        if has_children {
+            self.pending.push(chord);
+            return Ok(None);
+        }
+        if let Some(action) = action {
+            self.pending.clear();
+            return self.dispatch(action, term).map(Some);
+        }
+        self.pending.clear();
+        Ok(None)
+    }
+
+    fn dispatch(&mut self, action: Action, term: &mut DefaultTerminal) -> io::Result<bool> {
+        match action {
+            Action::Nop => {}
+            Action::Quit => {
+                if self.config.confirm.quit_with_tasks && self.tasks_running() && !self.quit_warned
+                {
                     self.quit_warned = true;
                     self.status = "unfinished tasks — press q again to quit".into();
                 } else {
                     return Ok(true);
                 }
             }
-            KeyCode::Char('j') | KeyCode::Down => self.move_by(1),
-            KeyCode::Char('k') | KeyCode::Up => self.move_by(-1),
-            KeyCode::Char('J') => {
-                let s = self.preview.preview_seek().saturating_add(5);
-                self.preview.set_preview_seek(s);
-            }
-            KeyCode::Char('K') => {
-                let s = self.preview.preview_seek().saturating_sub(5);
-                self.preview.set_preview_seek(s);
-            }
-            KeyCode::PageDown => {
-                let n = if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.page / 2
+            Action::QuitOrClose => {
+                if self.tabs.len() > 1 {
+                    self.close_tab();
+                } else if self.config.confirm.quit_with_tasks
+                    && self.tasks_running()
+                    && !self.quit_warned
+                {
+                    self.quit_warned = true;
+                    self.status = "unfinished tasks — press Ctrl+c again to quit".into();
                 } else {
-                    self.page
-                };
-                self.move_by(n as isize);
-            }
-            KeyCode::PageUp => {
-                let n = if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    self.page / 2
-                } else {
-                    self.page
-                };
-                self.move_by(-(n as isize));
-            }
-            KeyCode::Char('g') => self.prefix = Some(Prefix::Goto),
-            KeyCode::Home => self.select_top(),
-            KeyCode::Char('G') | KeyCode::End => self.select_bottom(),
-            KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => self.go_parent(),
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => self.start_open_with(),
-            KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter | KeyCode::Char('o') => {
-                self.open(term)
-            }
-            KeyCode::Char('O') => self.start_open_with(),
-            KeyCode::Char('H') => self.history_back(),
-            KeyCode::Char('L') => self.history_forward(),
-            KeyCode::Char('~') | KeyCode::F(1) => self.mode = Mode::Help,
-            KeyCode::Char('e') => {
-                if let Some(e) = self.current().cloned().filter(|e| !e.is_dir) {
-                    let ed = env::var("VISUAL")
-                        .or_else(|_| env::var("EDITOR"))
-                        .unwrap_or_else(|_| "vi".into());
-                    self.external(term, &ed, &e.path);
-                    self.reload();
+                    return Ok(true);
                 }
             }
-            KeyCode::Char('i') => {
-                if let Some(e) = self.current().cloned().filter(|e| !e.is_dir) {
-                    let pg = env::var("PAGER").unwrap_or_else(|_| "less".into());
-                    self.external(term, &pg, &e.path);
-                }
-            }
-            KeyCode::Char(' ') => {
-                self.visual = None;
-                if let Some(e) = self.current() {
-                    let p = e.path.clone();
-                    if !self.selected.remove(&p) {
-                        self.selected.insert(p);
-                    }
-                    self.list_dirty = true;
-                    self.move_by(1);
-                }
-            }
-            KeyCode::Char('v') => {
-                if matches!(
-                    self.visual.as_ref().map(|v| v.kind),
-                    Some(VisualKind::Select)
-                ) {
-                    self.visual = None;
-                } else {
-                    self.enter_visual(VisualKind::Select);
-                }
-            }
-            KeyCode::Char('V') => {
-                if matches!(
-                    self.visual.as_ref().map(|v| v.kind),
-                    Some(VisualKind::Unselect)
-                ) {
-                    self.visual = None;
-                } else {
-                    self.enter_visual(VisualKind::Unselect);
-                }
-            }
-            KeyCode::Char('y') | KeyCode::Char('x') => {
-                let cut = key.code == KeyCode::Char('x');
-                let t = self.targets();
-                self.visual = None;
-                if !t.is_empty() {
-                    self.status =
-                        format!("{} item(s) {}", t.len(), if cut { "cut" } else { "yanked" });
-                    self.yank = Some((t, cut));
-                    self.selected.clear();
-                    self.list_dirty = true;
-                }
-            }
-            KeyCode::Char('p') => self.paste(false),
-            KeyCode::Char('P') => self.paste(true),
-            KeyCode::Char('Y') | KeyCode::Char('X') => {
-                if self.yank.take().is_some() {
-                    self.status = "unyanked".into();
-                }
-            }
-            KeyCode::Char('d') => {
-                let mode = if self.is_trash_view() {
-                    DeleteMode::FromTrash
-                } else {
-                    DeleteMode::Trash
-                };
-                self.start_delete(mode);
-            }
-            KeyCode::Char('D') => {
-                let mode = if self.is_trash_view() {
-                    DeleteMode::FromTrash
-                } else {
-                    DeleteMode::Permanent
-                };
-                self.start_delete(mode);
-            }
-            KeyCode::Char('r') => {
-                self.visual = None;
-                if let Some(e) = self.current() {
-                    self.input = e.name.clone();
-                    self.mode = Mode::Prompt(Prompt::Rename);
-                }
-            }
-            KeyCode::Char('a') => self.start_create(),
-            KeyCode::Char('A') => self.bulk_create(term),
-            KeyCode::Char('f') => self.mode = Mode::Filter,
-            KeyCode::Char('/') => self.start_find(true),
-            KeyCode::Char('?') => self.start_find(false),
-            KeyCode::Char('n') => self.find_next(true),
-            KeyCode::Char('N') => self.find_next(false),
-            KeyCode::Char('s') => self.start_search(SearchKind::Fd),
-            KeyCode::Char('S') => self.start_search(SearchKind::Rg),
-            KeyCode::Char('c') => self.prefix = Some(Prefix::Copy),
-            KeyCode::Char('t') => self.prefix = Some(Prefix::Tab),
-            KeyCode::Char('w') => {
-                self.task_cursor = self.task_cursor.min(self.tasks.len().saturating_sub(1));
-                self.mode = Mode::Tasks;
-            }
-            KeyCode::Tab => self.open_info(),
-            KeyCode::Char(c @ '1'..='9') => {
-                let index = c as usize - '1' as usize;
-                self.switch_tab(index);
-            }
-            KeyCode::Char('[') => self.next_tab(-1),
-            KeyCode::Char(']') => self.next_tab(1),
-            KeyCode::Char('{') => self.swap_tab(-1),
-            KeyCode::Char('}') => self.swap_tab(1),
-            KeyCode::Char('m') => self.prefix = Some(Prefix::Linemode),
-            KeyCode::Char('z') => self.fzf_jump(term),
-            KeyCode::Char(';') | KeyCode::Char(':') => self.start_shell(),
-            KeyCode::Char(',') => self.prefix = Some(Prefix::Sort),
-            KeyCode::Char('+') => self.zoom_in(),
-            KeyCode::Char('-') if key.modifiers.contains(KeyModifiers::ALT) => self.link(false),
-            KeyCode::Char('-') => self.zoom_out(),
-            KeyCode::Char('_') => self.link(true),
-            KeyCode::Char('0') => self.zoom_reset(),
-            KeyCode::Esc => {
+            Action::Close => match self.mode {
+                Mode::Tasks => self.mode = Mode::Normal,
+                Mode::Info => self.close_info(),
+                _ => {}
+            },
+            Action::Escape => {
                 if self.visual.is_some() {
                     self.visual = None;
                 } else if !self.filter.is_empty() {
@@ -3796,108 +3604,228 @@ impl App {
                     self.list_dirty = true;
                 }
             }
-            KeyCode::Char('.') => {
+            Action::Help => self.mode = Mode::Help,
+            Action::Tasks => {
+                self.task_cursor = self.task_cursor.min(self.tasks.len().saturating_sub(1));
+                self.mode = Mode::Tasks;
+            }
+            Action::Info => self.open_info(),
+            Action::Move(n) => self.move_by(n),
+            Action::HalfPage(n) => self.move_by((self.page / 2) as isize * n as isize),
+            Action::Page(n) => self.move_by(self.page as isize * n as isize),
+            Action::Top => self.select_top(),
+            Action::Bottom => self.select_bottom(),
+            Action::Parent => self.go_parent(),
+            Action::Open => self.open(term),
+            Action::OpenWith => self.start_open_with(),
+            Action::History(n) => {
+                if n < 0 {
+                    self.history_back();
+                } else {
+                    self.history_forward();
+                }
+            }
+            Action::Follow => self.follow_symlink(),
+            Action::Goto(path) => self.goto(&path),
+            Action::GotoTrash => self.goto_trash(),
+            Action::Cd => self.start_cd(),
+            Action::Hidden => {
                 self.show_hidden = !self.show_hidden;
                 self.reload();
             }
-            KeyCode::Char('T') => self.show_preview = !self.show_preview,
-            _ => {}
+            Action::TogglePreview => self.show_preview = !self.show_preview,
+            Action::Zoom(n) => match n {
+                0 => self.zoom_reset(),
+                n if n > 0 => self.zoom_in(),
+                _ => self.zoom_out(),
+            },
+            Action::Seek(n) => {
+                let current = self.preview.preview_seek();
+                let seek = if n >= 0 {
+                    current.saturating_add(n as usize)
+                } else {
+                    current.saturating_sub((-n) as usize)
+                };
+                self.preview.set_preview_seek(seek);
+            }
+            Action::ToggleSelect => {
+                self.visual = None;
+                if let Some(e) = self.current() {
+                    let p = e.path.clone();
+                    if !self.selected.remove(&p) {
+                        self.selected.insert(p);
+                    }
+                    self.list_dirty = true;
+                    self.move_by(1);
+                }
+            }
+            Action::SelectAll => self.select_all(),
+            Action::InvertSelection => self.invert_selection(),
+            Action::VisualSelect => {
+                if matches!(
+                    self.visual.as_ref().map(|v| v.kind),
+                    Some(VisualKind::Select)
+                ) {
+                    self.visual = None;
+                } else {
+                    self.enter_visual(VisualKind::Select);
+                }
+            }
+            Action::VisualUnset => {
+                if matches!(
+                    self.visual.as_ref().map(|v| v.kind),
+                    Some(VisualKind::Unselect)
+                ) {
+                    self.visual = None;
+                } else {
+                    self.enter_visual(VisualKind::Unselect);
+                }
+            }
+            Action::Yank => self.yank_selection(false),
+            Action::Cut => self.yank_selection(true),
+            Action::Paste(force) => self.paste(force),
+            Action::Unyank => {
+                if self.yank.take().is_some() {
+                    self.status = "unyanked".into();
+                }
+            }
+            Action::ClipboardCopy => self.clipboard_copy(),
+            Action::ClipboardPaste => self.clipboard_paste(),
+            Action::Trash => {
+                let mode = if self.is_trash_view() {
+                    DeleteMode::FromTrash
+                } else {
+                    DeleteMode::Trash
+                };
+                self.start_delete(mode);
+            }
+            Action::Delete => {
+                let mode = if self.is_trash_view() {
+                    DeleteMode::FromTrash
+                } else {
+                    DeleteMode::Permanent
+                };
+                self.start_delete(mode);
+            }
+            Action::Rename => {
+                self.visual = None;
+                if let Some(e) = self.current() {
+                    self.input = e.name.clone();
+                    self.mode = Mode::Prompt(Prompt::Rename);
+                }
+            }
+            Action::Create => self.start_create(),
+            Action::BulkCreate => self.bulk_create(term),
+            Action::Filter => self.mode = Mode::Filter,
+            Action::Find(forward) => self.start_find(forward),
+            Action::FindNext(forward) => self.find_next(forward),
+            Action::Search(kind) => self.start_search(kind),
+            Action::CancelSearch => self.cancel_search(),
+            Action::Shell => self.start_shell(),
+            Action::Fzf => self.fzf_jump(term),
+            Action::Suspend => self.suspend(term),
+            Action::Editor => {
+                if let Some(e) = self.current().cloned().filter(|e| !e.is_dir) {
+                    let ed = env::var("VISUAL")
+                        .or_else(|_| env::var("EDITOR"))
+                        .unwrap_or_else(|_| "vi".into());
+                    self.external(term, &ed, &e.path);
+                    self.reload();
+                }
+            }
+            Action::Pager => {
+                if let Some(e) = self.current().cloned().filter(|e| !e.is_dir) {
+                    let pg = env::var("PAGER").unwrap_or_else(|_| "less".into());
+                    self.external(term, &pg, &e.path);
+                }
+            }
+            Action::CopyPath(kind) => self.copy_paths(kind),
+            Action::SetLinemode(mode) => self.set_linemode(mode),
+            Action::SetSort(sort, reverse) => {
+                self.set_sort(sort, reverse);
+                match sort {
+                    Sort::Size => self.set_linemode(Linemode::Size),
+                    Sort::Time => self.set_linemode(Linemode::Mtime),
+                    Sort::Btime => self.set_linemode(Linemode::Btime),
+                    _ => {}
+                }
+            }
+            Action::Link(relative) => self.link(relative),
+            Action::Hardlink => self.hardlink(),
+            Action::NewTab(home) => {
+                let path = if home {
+                    match env::var_os("HOME") {
+                        Some(home) => PathBuf::from(home),
+                        None => {
+                            self.status = "HOME is not set".into();
+                            return Ok(false);
+                        }
+                    }
+                } else {
+                    self.cwd.clone()
+                };
+                self.new_tab(path);
+            }
+            Action::RenameTab => {
+                self.input = self
+                    .tab_name
+                    .clone()
+                    .unwrap_or_else(|| self.tab_label(self.tab_index));
+                self.mode = Mode::Prompt(Prompt::TabRename);
+            }
+            Action::CloseTab => self.close_tab(),
+            Action::SwitchTab(index) => self.switch_tab(index),
+            Action::NextTab(delta) => self.next_tab(delta),
+            Action::SwapTab(delta) => self.swap_tab(delta),
+            Action::TaskMove(delta) => self.task_move(delta),
+            Action::TaskTop => self.task_cursor = 0,
+            Action::TaskBottom => self.task_cursor = self.tasks.len().saturating_sub(1),
+            Action::TaskInspect => self.inspect_task(),
+            Action::TaskCancel => self.cancel_task(),
+            Action::InfoMove(delta) => self.info_move(delta),
+            Action::InfoSwipe(delta) => {
+                if !self.info_from_tasks {
+                    self.info_swipe(delta);
+                }
+            }
+            Action::InfoCopyCell => self.info_copy_cell(),
+            Action::Custom(name) => {
+                let result = self
+                    .config
+                    .lua
+                    .as_ref()
+                    .map(|lua| config::lua::run_action(lua, &name));
+                match result {
+                    Some(Ok(Some(message))) => {
+                        self.status = message;
+                    }
+                    Some(Ok(None)) => {}
+                    Some(Err(e)) => {
+                        self.status = e;
+                    }
+                    None => {
+                        self.status = format!("unknown action '{name}'");
+                    }
+                }
+            }
         }
         Ok(false)
     }
 
-    fn handle_prefix(&mut self, prefix: Prefix, key: KeyEvent) {
-        if key.code == KeyCode::Esc {
-            return;
-        }
-        match prefix {
-            Prefix::Goto => match key.code {
-                KeyCode::Char('g') => self.select_top(),
-                KeyCode::Char('h') => self.goto("~"),
-                KeyCode::Char('c') => self.goto("~/.config"),
-                KeyCode::Char('d') => self.goto("~/Downloads"),
-                KeyCode::Char('o') => self.goto("~/.local/share/osu-wine/osu!"),
-                KeyCode::Char('p') => self.goto("~/Pictures"),
-                KeyCode::Char('v') => self.goto("~/Videos"),
-                KeyCode::Char(' ') => self.start_cd(),
-                KeyCode::Char('f') => self.follow_symlink(),
-                KeyCode::Char('t') => self.goto_trash(),
-                _ => {}
-            },
-            Prefix::Sort => match key.code {
-                KeyCode::Char('a') => self.set_sort(Sort::Name, false),
-                KeyCode::Char('A') => self.set_sort(Sort::Name, true),
-                KeyCode::Char('n') => self.set_sort(Sort::Natural, false),
-                KeyCode::Char('N') => self.set_sort(Sort::Natural, true),
-                KeyCode::Char('s') => {
-                    self.set_sort(Sort::Size, false);
-                    self.set_linemode(Linemode::Size);
-                }
-                KeyCode::Char('S') => {
-                    self.set_sort(Sort::Size, true);
-                    self.set_linemode(Linemode::Size);
-                }
-                KeyCode::Char('m') => {
-                    self.set_sort(Sort::Time, false);
-                    self.set_linemode(Linemode::Mtime);
-                }
-                KeyCode::Char('M') => {
-                    self.set_sort(Sort::Time, true);
-                    self.set_linemode(Linemode::Mtime);
-                }
-                KeyCode::Char('b') => {
-                    self.set_sort(Sort::Btime, false);
-                    self.set_linemode(Linemode::Btime);
-                }
-                KeyCode::Char('B') => {
-                    self.set_sort(Sort::Btime, true);
-                    self.set_linemode(Linemode::Btime);
-                }
-                KeyCode::Char('e') => self.set_sort(Sort::Extension, false),
-                KeyCode::Char('E') => self.set_sort(Sort::Extension, true),
-                KeyCode::Char('r') => self.set_sort(Sort::Random, false),
-                _ => {}
-            },
-            Prefix::Copy => match key.code {
-                KeyCode::Char('c') => self.copy_paths(CopyKind::Path),
-                KeyCode::Char('C') => self.copy_paths(CopyKind::Url),
-                KeyCode::Char('d') => self.copy_paths(CopyKind::DirPath),
-                KeyCode::Char('D') => self.copy_paths(CopyKind::DirUrl),
-                KeyCode::Char('f') => self.copy_paths(CopyKind::FileName),
-                KeyCode::Char('n') => self.copy_paths(CopyKind::NameNoExt),
-                _ => {}
-            },
-            Prefix::Linemode => match key.code {
-                KeyCode::Char('s') => self.set_linemode(Linemode::Size),
-                KeyCode::Char('p') => self.set_linemode(Linemode::Permissions),
-                KeyCode::Char('b') => self.set_linemode(Linemode::Btime),
-                KeyCode::Char('m') => self.set_linemode(Linemode::Mtime),
-                KeyCode::Char('o') => self.set_linemode(Linemode::Owner),
-                KeyCode::Char('n') => self.set_linemode(Linemode::None),
-                _ => {}
-            },
-            Prefix::Tab => match key.code {
-                KeyCode::Char('t') => self.new_tab(self.cwd.clone()),
-                KeyCode::Char('n') => {
-                    if let Some(home) = env::var_os("HOME") {
-                        self.new_tab(PathBuf::from(home));
-                    }
-                }
-                KeyCode::Char('r') => {
-                    self.input = self
-                        .tab_name
-                        .clone()
-                        .unwrap_or_else(|| self.tab_label(self.tab_index));
-                    self.mode = Mode::Prompt(Prompt::TabRename);
-                }
-                KeyCode::Char('c') => self.close_tab(),
-                KeyCode::Char(']') => self.next_tab(1),
-                KeyCode::Char('[') => self.next_tab(-1),
-                _ => {}
-            },
+    fn yank_selection(&mut self, cut: bool) {
+        let targets = self.targets();
+        self.visual = None;
+        if !targets.is_empty() {
+            self.status = format!(
+                "{} item(s) {}",
+                targets.len(),
+                if cut { "cut" } else { "yanked" }
+            );
+            self.yank = Some((targets, cut));
+            self.selected.clear();
+            self.list_dirty = true;
         }
     }
-
     fn goto(&mut self, path: &str) {
         let path = if path == "~" {
             env::var_os("HOME").map(PathBuf::from)
@@ -3990,18 +3918,18 @@ impl App {
                 let used = left.chars().count() + right.chars().count();
                 let pad = inner.saturating_sub(used).max(1);
                 let style = if e.is_dir {
-                    Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD)
+                    self.config.theme.directory
                 } else {
-                    Style::new()
+                    self.config.theme.fg
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(left, style),
                     Span::raw(" ".repeat(pad)),
-                    Span::styled(right, Style::new().fg(Color::DarkGray)),
+                    Span::styled(right, self.config.theme.dim),
                 ]))
             })
             .collect();
-        self.list = List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+        self.list = List::new(items).highlight_style(self.config.theme.selection);
         self.list_width = width;
         self.list_dirty = false;
     }
@@ -4009,8 +3937,12 @@ impl App {
     fn draw(&mut self, f: &mut Frame) {
         let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
         let cols = if self.show_preview {
-            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                .split(rows[0])
+            let (list_pct, preview_pct) = ratio_percentages(self.config.mgr.ratio);
+            Layout::horizontal([
+                Constraint::Percentage(list_pct),
+                Constraint::Percentage(preview_pct),
+            ])
+            .split(rows[0])
         } else {
             Layout::horizontal([Constraint::Percentage(100)]).split(rows[0])
         };
@@ -4038,9 +3970,9 @@ impl App {
                     .map(|i| {
                         let name = self.tab_label(i);
                         let style = if i == self.tab_index {
-                            Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                            self.config.theme.tab_active
                         } else {
-                            Style::new().fg(Color::DarkGray)
+                            self.config.theme.tab_inactive
                         };
                         Span::styled(format!(" {}:{} ", i + 1, name), style)
                     })
@@ -4163,14 +4095,9 @@ impl App {
                 s
             }
         };
-        if let Some(prefix) = self.prefix {
-            text.push_str(match prefix {
-                Prefix::Goto => " | g…",
-                Prefix::Sort => " | ,…",
-                Prefix::Copy => " | c…",
-                Prefix::Linemode => " | m…",
-                Prefix::Tab => " | t…",
-            });
+        if !self.pending.is_empty() {
+            let keys: Vec<String> = self.pending.iter().map(|c| c.label()).collect();
+            text.push_str(&format!(" | {}…", keys.join(" ")));
         }
         if let Some(visual) = &self.visual {
             text.push_str(match visual.kind {
@@ -4186,9 +4113,15 @@ impl App {
                 text.push_str(&format!(" | zoom {z}x"));
             }
         }
-        f.render_widget(Paragraph::new(text), rows[1]);
+        let status_style = match self.mode {
+            Mode::Prompt(Prompt::Delete) => self.config.theme.status_error,
+            Mode::Prompt(_) | Mode::Filter | Mode::Find => self.config.theme.status_info,
+            Mode::Normal if !self.status.is_empty() => self.config.theme.status_info,
+            _ => self.config.theme.status,
+        };
+        f.render_widget(Paragraph::new(text).style(status_style), rows[1]);
         self.draw_completions(f);
-        if self.prefix.is_some() {
+        if !self.pending.is_empty() {
             self.draw_prefix_menu(f);
         }
 
@@ -4207,10 +4140,36 @@ impl App {
     }
 
     fn draw_prefix_menu(&self, f: &mut Frame) {
-        let Some(prefix) = self.prefix else {
+        if self.pending.is_empty() {
+            return;
+        }
+        let ctx = match self.mode {
+            Mode::Tasks => Context::Tasks,
+            Mode::Info => Context::Info,
+            _ => Context::Mgr,
+        };
+        let root = self.config.keymap.node(ctx);
+        let Some(node) = root.walk(&self.pending) else {
             return;
         };
-        let items = prefix.items();
+        let items: Vec<(String, String)> = node
+            .children()
+            .iter()
+            .map(|(chord, child)| {
+                let desc = child
+                    .desc()
+                    .map(str::to_string)
+                    .or_else(|| child.action().map(|action| action.label()))
+                    .unwrap_or_else(|| {
+                        if child.has_children() {
+                            "…".to_string()
+                        } else {
+                            String::new()
+                        }
+                    });
+                (chord.label(), desc)
+            })
+            .collect();
         if items.is_empty() {
             return;
         }
@@ -4260,27 +4219,32 @@ impl App {
                 let key_pad = key_w - key.chars().count();
                 spans.push(Span::styled(
                     format!("{key}{}", " ".repeat(key_pad + 2)),
-                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    self.config.theme.prefix_key,
                 ));
                 let desc_pad = desc_w.saturating_sub(desc.chars().count());
                 spans.push(Span::styled(
                     format!("{desc}{}", " ".repeat(desc_pad)),
-                    Style::new().fg(Color::Gray),
+                    self.config.theme.prefix_desc,
                 ));
             }
             lines.push(Line::from(spans));
         }
 
+        let keys: Vec<String> = self.pending.iter().map(|c| c.label()).collect();
         let title = Line::from(vec![
             Span::styled(
-                format!(" {} ", prefix.label()),
-                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                format!(" {} ", keys.join(" ")),
+                self.config.theme.prefix_key,
             ),
-            Span::styled("· Esc ", Style::new().fg(Color::DarkGray)),
+            Span::styled("· Esc ", self.config.theme.dim),
         ]);
         f.render_widget(Clear, rect);
         f.render_widget(
-            Paragraph::new(lines).block(Block::bordered().title(title)),
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_style(self.config.theme.border)
+                    .title(title),
+            ),
             rect,
         );
     }
@@ -4316,7 +4280,7 @@ impl App {
         for (i, line) in info.lines.iter().enumerate() {
             let selected = i == cursor;
             let base = if selected {
-                Style::new().add_modifier(Modifier::REVERSED)
+                self.config.theme.selection
             } else {
                 Style::new()
             };
@@ -4327,20 +4291,14 @@ impl App {
                     }
                     rows.push((
                         Some(i),
-                        Line::from(Span::styled(
-                            *title,
-                            Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
-                        ))
-                        .style(base),
+                        Line::from(Span::styled(*title, self.config.theme.info_section))
+                            .style(base),
                     ));
                 }
                 InfoLine::Field(label, value) => rows.push((
                     Some(i),
                     Line::from(vec![
-                        Span::styled(
-                            format!("  {label:<12}"),
-                            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                        ),
+                        Span::styled(format!("  {label:<12}"), self.config.theme.info_label),
                         Span::raw(truncate_chars(value, avail.saturating_sub(16))),
                     ])
                     .style(base),
@@ -4386,7 +4344,11 @@ impl App {
         };
         f.render_widget(Clear, rect);
         f.render_widget(
-            Paragraph::new(lines).block(Block::bordered().title(title)),
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_style(self.config.theme.border)
+                    .title(title),
+            ),
             rect,
         );
     }
@@ -4434,7 +4396,7 @@ impl App {
         if total == 0 {
             lines.push(Line::from(Span::styled(
                 "  no tasks",
-                Style::new().fg(Color::DarkGray),
+                self.config.theme.dim,
             )));
         } else {
             for (i, task) in self.tasks.iter().enumerate().skip(start).take(visible) {
@@ -4448,35 +4410,45 @@ impl App {
                     task_percent(&progress)
                 };
                 let (icon, color) = match status {
-                    TaskStatus::Running => ("▶", Color::Yellow),
-                    TaskStatus::Done => ("✓", Color::Green),
-                    TaskStatus::Failed => ("✗", Color::Red),
-                    TaskStatus::Cancelled => ("⊘", Color::DarkGray),
+                    TaskStatus::Running => ("▶", self.config.theme.task_running),
+                    TaskStatus::Done => ("✓", self.config.theme.task_done),
+                    TaskStatus::Failed => ("✗", self.config.theme.task_failed),
+                    TaskStatus::Cancelled => ("⊘", self.config.theme.task_cancelled),
                 };
                 let selected = i == cursor;
                 let base = if selected {
-                    Style::new().add_modifier(Modifier::REVERSED)
+                    self.config.theme.selection
                 } else {
                     Style::new()
                 };
                 let marker = if selected { "▸ " } else { "  " };
+                let show_progress = self.config.tasks.show_progress;
                 let bar_width = 20usize.min(inner_width.saturating_sub(30)).max(6);
-                let bar = progress_bar(percent, bar_width);
-                let title_width = inner_width.saturating_sub(bar_width + 12).max(8);
+                let bar = if show_progress {
+                    progress_bar(percent, bar_width)
+                } else {
+                    String::new()
+                };
+                let title_width = inner_width
+                    .saturating_sub(if show_progress { bar_width + 12 } else { 8 })
+                    .max(8);
                 let title = truncate_chars(&task.title, title_width);
-                lines.push(
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{marker}{icon} "),
-                            Style::new().fg(color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(title, base),
-                        Span::raw(" "),
-                        Span::styled(bar, Style::new().fg(color)),
-                        Span::styled(format!(" {percent:>3}%"), Style::new().fg(Color::Gray)),
-                    ])
-                    .style(base),
-                );
+                let mut spans = vec![
+                    Span::styled(
+                        format!("{marker}{icon} "),
+                        color.add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(title, base),
+                ];
+                if show_progress {
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(bar, color));
+                    spans.push(Span::styled(
+                        format!(" {percent:>3}%"),
+                        self.config.theme.task_percent,
+                    ));
+                }
+                lines.push(Line::from(spans).style(base));
                 let detail = if let Some(error) = progress.errors.last() {
                     error.clone()
                 } else if !progress.current.is_empty() {
@@ -4495,7 +4467,7 @@ impl App {
                             "    {}",
                             truncate_chars(&detail, inner_width.saturating_sub(6))
                         ),
-                        Style::new().fg(Color::DarkGray),
+                        self.config.theme.dim,
                     ))
                     .style(base),
                 );
@@ -4505,7 +4477,11 @@ impl App {
         let title = format!(" tasks {running} running · {total} total ");
         f.render_widget(Clear, rect);
         f.render_widget(
-            Paragraph::new(lines).block(Block::bordered().title(title)),
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .border_style(self.config.theme.border)
+                    .title(title),
+            ),
             rect,
         );
     }
@@ -4731,7 +4707,10 @@ impl App {
         if self.preview.is_loading() {
             title.push('…');
         }
-        f.render_widget(Paragraph::new(title), title_area);
+        f.render_widget(
+            Paragraph::new(title).style(self.config.theme.preview_title),
+            title_area,
+        );
 
         for y in inner.y..inner.y + inner.height {
             for x in inner.x..inner.x + inner.width {
@@ -4750,7 +4729,7 @@ impl App {
                 f.render_widget(
                     Paragraph::new(Line::styled(
                         "image preview needs kitty or ghostty",
-                        Style::new().fg(Color::DarkGray),
+                        self.config.theme.dim,
                     )),
                     inner,
                 );

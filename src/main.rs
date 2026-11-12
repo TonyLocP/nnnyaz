@@ -3,7 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod action;
 mod app;
+mod config;
 mod openwith;
 mod preview;
 mod util;
@@ -12,7 +14,7 @@ fn main() -> io::Result<()> {
     if std::env::var_os("RNN_PROBE").is_some() {
         return probe_graphics();
     }
-    let mut app = app::App::new()?;
+    let mut app = app::App::new(config::load())?;
     let graphics = graphics_supported();
     let font = probe_cell_size().unwrap_or((8, 16));
     let shm = graphics && probe_shm();

@@ -63,6 +63,7 @@ pub struct Preview {
     shm: bool,
     image_state: Option<ImgState>,
     last_streamed: u64,
+    cache_max: usize,
 }
 
 const CACHE_MAX: usize = 16;
@@ -95,7 +96,13 @@ impl Preview {
             shm: false,
             image_state: None,
             last_streamed: 0,
+            cache_max: CACHE_MAX,
         }
+    }
+
+    /// Set how many preview artifacts to keep before evicting the oldest.
+    pub fn set_cache_size(&mut self, size: usize) {
+        self.cache_max = size.max(1);
     }
 
     /// Enable kitty/ghostty image previews. Call once at startup. `shm` selects
@@ -333,7 +340,7 @@ impl Preview {
             }
         }
         self.order.push_back(k.clone());
-        while self.cache.len() > CACHE_MAX {
+        while self.cache.len() > self.cache_max {
             let n = self.order.len();
             let mut evict = None;
             for _ in 0..n {
