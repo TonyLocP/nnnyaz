@@ -20,6 +20,21 @@ Run it in a directory:
 rnn [path]
 ```
 
+## Terminal support
+
+Image and video thumbnails are drawn with the kitty graphics protocol in kitty
+and ghostty, and with sixel in terminals that support it (foot, WezTerm, mlterm,
+xterm with sixel enabled, …). The protocol is detected automatically; set
+`RNN_IMAGE_PROTOCOL=kitty|sixel|none` to override it.
+
+Inside tmux, enable graphics passthrough:
+
+```tmux
+set -g allow-passthrough on
+```
+
+Video thumbnails are generated with `ffmpeg`.
+
 ## Configuration
 
 rnn reads configuration from the first of:

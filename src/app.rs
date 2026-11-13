@@ -34,7 +34,7 @@ use crate::{
     openwith,
     preview::{
         detect::{self, Kind},
-        Key as PreviewKey, Preview,
+        ImageProtocol, Key as PreviewKey, Preview,
     },
     util::human,
 };
@@ -1669,9 +1669,9 @@ impl App {
             .unwrap_or_else(|| cwd.display().to_string())
     }
 
-    /// Enable kitty image previews (call before `run`).
-    pub fn preview_configure(&mut self, kitty_supported: bool, font: (u16, u16), shm: bool) {
-        self.preview.configure(kitty_supported, font, shm);
+    /// Enable image previews (call before `run`).
+    pub fn preview_configure(&mut self, protocol: ImageProtocol, font: (u16, u16), shm: bool) {
+        self.preview.configure(protocol, font, shm);
     }
 
     fn current(&self) -> Option<&Entry> {
@@ -2165,6 +2165,7 @@ impl App {
         ratatui::restore();
         let r = Command::new(p).args(parts).arg(path).status();
         *term = ratatui::init();
+        self.preview.force_sixel_redraw();
         if let Err(e) = r {
             self.status = format!("{p}: {e}");
         }
@@ -2353,6 +2354,7 @@ impl App {
                 .current_dir(&self.cwd)
                 .status();
             *term = ratatui::init();
+            self.preview.force_sixel_redraw();
             match r {
                 Ok(s) if !s.success() => self.status = format!("{}: {s}", op.name),
                 Err(e) => self.status = format!("{}: {e}", op.name),
@@ -2419,6 +2421,7 @@ impl App {
         ratatui::restore();
         let out = cmd.output();
         *term = ratatui::init();
+        self.preview.force_sixel_redraw();
         let out = match out {
             Ok(o) => o,
             Err(e) => {
@@ -3094,6 +3097,7 @@ impl App {
             .current_dir(&self.cwd)
             .status();
         *term = ratatui::init();
+        self.preview.force_sixel_redraw();
         match r {
             Ok(s) if !s.success() => self.status = format!("shell: {s}"),
             Err(e) => self.status = format!("shell: {e}"),
@@ -3107,6 +3111,7 @@ impl App {
         let _ =
             rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::Tstp);
         *term = ratatui::init();
+        self.preview.force_sixel_redraw();
         self.reload();
     }
 
@@ -4684,6 +4689,10 @@ impl App {
             self.preview.set_preview_seek(0);
             self.preload_neighbours();
         }
+        // Erase a stale sixel before this frame's text is written, and erase
+        // it when the pane moved (ratio change, preview toggled).
+        self.preview.clear_sixel_pending();
+        self.preview.clear_sixel_if_moved(inner);
         let meta = self.preview.artifact_meta();
         let name = self
             .current()
@@ -4723,16 +4732,34 @@ impl App {
             .map(|(k, _)| k == "image" || k == "video")
             .unwrap_or(false);
         if is_image {
-            if let Some(s) = self.preview.image_state_mut() {
-                s.render(inner, f.buffer_mut());
-            } else {
-                f.render_widget(
-                    Paragraph::new(Line::styled(
-                        "image preview needs kitty or ghostty",
-                        self.config.theme.dim,
-                    )),
-                    inner,
-                );
+            match self.preview.protocol() {
+                ImageProtocol::Kitty => {
+                    if let Some(s) = self.preview.image_state_mut() {
+                        s.render(inner, f.buffer_mut());
+                    } else {
+                        f.render_widget(
+                            Paragraph::new(Line::styled(
+                                "image preview needs kitty or ghostty",
+                                self.config.theme.dim,
+                            )),
+                            inner,
+                        );
+                    }
+                }
+                ImageProtocol::Sixel => {
+                    // Cells stay blank; the sixel is painted directly after
+                    // ratatui flushes this frame (see `flush_sixel`).
+                    self.preview.prepare_sixel(inner);
+                }
+                ImageProtocol::None => {
+                    f.render_widget(
+                        Paragraph::new(Line::styled(
+                            "image preview needs a kitty or sixel terminal",
+                            self.config.theme.dim,
+                        )),
+                        inner,
+                    );
+                }
             }
         } else {
             let h = inner.height as usize;
@@ -4741,13 +4768,30 @@ impl App {
         }
     }
 
+    /// Full-screen views that cover the preview pane, so sixels must not be
+    /// painted over them.
+    fn overlay_open(&self) -> bool {
+        if !self.pending.is_empty() {
+            return true;
+        }
+        if matches!(
+            self.mode,
+            Mode::Help | Mode::Info | Mode::Tasks | Mode::OpenWith
+        ) {
+            return true;
+        }
+        matches!(self.mode, Mode::Prompt(Prompt::Cd)) && !self.completions.is_empty()
+    }
+
     // ─────────────── main loop ───────────────
 
     pub fn run(&mut self, term: &mut DefaultTerminal) -> io::Result<()> {
         let time = std::env::var_os("RNN_TIME").is_some();
         let mut last_search_poll = std::time::Instant::now();
         let mut last_task_poll = std::time::Instant::now();
+        self.preview.begin_sixel(!self.overlay_open());
         term.draw(|f| self.draw(f))?;
+        self.preview.flush_sixel(!self.overlay_open());
         loop {
             let mut dirty = false;
             let mut key_ms = None;
@@ -4763,7 +4807,10 @@ impl App {
                         }
                         dirty = true;
                     }
-                    Event::Resize(_, _) => dirty = true,
+                    Event::Resize(_, _) => {
+                        self.preview.force_sixel_redraw();
+                        dirty = true;
+                    }
                     _ => {}
                 }
             }
@@ -4786,11 +4833,13 @@ impl App {
             if dirty {
                 let t = std::time::Instant::now();
                 let mut closure = Duration::ZERO;
+                self.preview.begin_sixel(!self.overlay_open());
                 term.draw(|f| {
                     let tc = std::time::Instant::now();
                     self.draw(f);
                     closure = tc.elapsed();
                 })?;
+                self.preview.flush_sixel(!self.overlay_open());
                 if time {
                     eprintln!(
                         "rnn-t: key={} draw={:?} render={:?} flush={:?}",

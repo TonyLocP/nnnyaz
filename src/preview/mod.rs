@@ -3,6 +3,7 @@ pub mod hex;
 pub mod kitty;
 pub mod media;
 pub mod shm;
+pub mod sixel;
 pub mod text;
 pub mod yazi;
 
@@ -17,12 +18,13 @@ use std::{
 
 use image::DynamicImage;
 use ratatui::{
+    layout::Rect,
     style::{Color, Style},
     text::Line,
 };
 
 use crate::{
-    preview::kitty::KittyState,
+    preview::{kitty::KittyState, sixel::SixelState},
     util::{human, sanitize},
 };
 
@@ -36,8 +38,28 @@ pub struct Artifact {
     img: Option<DynamicImage>,
 }
 
+/// Which graphics protocol the terminal speaks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageProtocol {
+    None,
+    Kitty,
+    Sixel,
+}
+
+/// True when rnn itself runs inside tmux, not merely launched from a tmux
+/// session. A foot window started from tmux inherits `$TMUX`, but its `$TERM`
+/// is `foot`, so the terminal name is the reliable signal.
+pub fn tmux_active() -> bool {
+    if std::env::var_os("TMUX").is_none() {
+        return false;
+    }
+    let term = std::env::var("TERM").unwrap_or_default();
+    term.starts_with("tmux") || term.starts_with("screen")
+}
+
 enum ImgState {
     Kitty(KittyState),
+    Sixel(SixelState),
 }
 
 struct Request {
@@ -57,12 +79,16 @@ pub struct Preview {
     dead: bool,
     preview_seek: usize,
     zoom_idx: usize,
-    kitty: bool,
+    protocol: ImageProtocol,
     font: (u16, u16),
     is_tmux: bool,
     shm: bool,
     image_state: Option<ImgState>,
     last_streamed: u64,
+    sixel_drawn: Option<(Rect, u64)>,
+    sixel_clear: bool,
+    sixel_force: bool,
+    last_sixel_gen: u64,
     cache_max: usize,
 }
 
@@ -90,12 +116,16 @@ impl Preview {
             dead: false,
             preview_seek: 0,
             zoom_idx: 0,
-            kitty: false,
+            protocol: ImageProtocol::None,
             font: (8, 16),
             is_tmux: false,
             shm: false,
             image_state: None,
             last_streamed: 0,
+            sixel_drawn: None,
+            sixel_clear: false,
+            sixel_force: false,
+            last_sixel_gen: 0,
             cache_max: CACHE_MAX,
         }
     }
@@ -105,27 +135,36 @@ impl Preview {
         self.cache_max = size.max(1);
     }
 
-    /// Enable kitty/ghostty image previews. Call once at startup. `shm` selects
-    /// the shared-memory transfer medium, which is far faster under tmux.
-    pub fn configure(&mut self, kitty_supported: bool, font: (u16, u16), shm: bool) {
-        self.kitty = kitty_supported;
+    /// Enable image previews. Call once at startup. `shm` selects the kitty
+    /// shared-memory transfer medium, which is far faster under tmux.
+    pub fn configure(&mut self, protocol: ImageProtocol, font: (u16, u16), shm: bool) {
+        self.protocol = protocol;
         self.font = font;
-        self.is_tmux = std::env::var_os("TMUX").is_some();
+        self.is_tmux = tmux_active();
         self.shm = shm;
+    }
+
+    pub fn protocol(&self) -> ImageProtocol {
+        self.protocol
     }
 
     /// The active kitty image renderer, if any.
     pub fn image_state_mut(&mut self) -> Option<&mut KittyState> {
         match &mut self.image_state {
             Some(ImgState::Kitty(k)) => Some(k),
-            None => None,
+            _ => None,
         }
     }
 
-    /// Whether images are displayed via kitty/ghostty (otherwise preloading
-    /// them would be wasted work).
+    /// Whether images are displayed at all (otherwise preloading them would be
+    /// wasted work).
+    pub fn images_enabled(&self) -> bool {
+        self.protocol != ImageProtocol::None
+    }
+
+    /// Backwards-compatible alias used by the kitty preloading path.
     pub fn kitty_enabled(&self) -> bool {
-        self.kitty
+        self.images_enabled()
     }
 
     /// Eagerly load `key` (an image) into both caches so navigating to it
@@ -139,9 +178,116 @@ impl Preview {
     }
 
     fn clear_image(&mut self) {
-        if let Some(ImgState::Kitty(old)) = self.image_state.take() {
-            kitty::stream_delete(old.id(), self.is_tmux);
+        match self.image_state.take() {
+            Some(ImgState::Kitty(old)) => kitty::stream_delete(old.id(), self.is_tmux),
+            Some(ImgState::Sixel(_)) if self.sixel_drawn.is_some() => {
+                self.sixel_clear = true;
+            }
+            Some(ImgState::Sixel(_)) | None => {}
         }
+    }
+
+    /// Ensure the sixel renderer has an encoding for `rect`. Called from the
+    /// draw callback, so the actual terminal write happens after ratatui's
+    /// buffer has been flushed.
+    pub fn prepare_sixel(&mut self, rect: Rect) {
+        if let Some(ImgState::Sixel(s)) = &mut self.image_state {
+            s.prepare(rect);
+        }
+    }
+
+    /// Erase a painted sixel that no longer matches the preview area, before
+    /// the new layout's text is rendered.
+    pub fn clear_sixel_if_moved(&mut self, rect: Rect) {
+        if let Some((old, _)) = self.sixel_drawn {
+            if old != rect {
+                let _ = sixel::clear(old);
+                self.sixel_drawn = None;
+                if let Some(ImgState::Sixel(s)) = &mut self.image_state {
+                    s.forget_drawn();
+                }
+            }
+        }
+    }
+
+    /// Erase the painted sixel immediately when a clear is pending. Called
+    /// from `draw_preview` after `set_target`, so the erase happens before the
+    /// new frame's text is written and cannot wipe it.
+    pub fn clear_sixel_pending(&mut self) {
+        if !self.sixel_clear {
+            return;
+        }
+        self.sixel_clear = false;
+        if let Some((rect, _)) = self.sixel_drawn.take() {
+            let _ = sixel::clear(rect);
+        }
+        if let Some(ImgState::Sixel(s)) = &mut self.image_state {
+            s.forget_drawn();
+        }
+    }
+
+    /// Called before each frame. Erases the sixel when it must be repainted
+    /// (resize, terminal re-init) or while an overlay covers the pane.
+    pub fn begin_sixel(&mut self, allow: bool) {
+        if self.sixel_force {
+            self.sixel_force = false;
+            if self.sixel_drawn.is_some() {
+                self.sixel_clear = true;
+            }
+            if let Some(ImgState::Sixel(s)) = &mut self.image_state {
+                s.forget_drawn();
+            }
+        }
+        if !allow {
+            if self.sixel_drawn.is_some() {
+                self.sixel_clear = true;
+            }
+            if let Some(ImgState::Sixel(s)) = &mut self.image_state {
+                s.forget_drawn();
+            }
+        }
+        self.clear_sixel_pending();
+    }
+
+    /// Paint a ready sixel after a ratatui frame. `allow` is false while a
+    /// full-screen overlay is open, so the overlay can cover the pane and the
+    /// image is repainted when it closes.
+    pub fn flush_sixel(&mut self, allow: bool) {
+        if !allow {
+            return;
+        }
+        let Some(ImgState::Sixel(s)) = &mut self.image_state else {
+            return;
+        };
+        let Some((rect, gen, data)) = s.ready() else {
+            return;
+        };
+        if s.drawn() == Some((rect, gen)) {
+            return;
+        }
+        if let Some((old, old_gen)) = self.sixel_drawn {
+            if old != rect || old_gen != gen {
+                let _ = sixel::clear(old);
+            }
+        }
+        let r = sixel::draw(rect, &data);
+        if std::env::var_os("RNN_DEBUG").is_some() {
+            eprintln!(
+                "sixel: draw gen={gen} rect={rect:?} bytes={} result={:?}",
+                data.len(),
+                r.as_ref().err()
+            );
+        }
+        if r.is_ok() {
+            s.mark_drawn(rect, gen);
+            self.sixel_drawn = Some((rect, gen));
+        }
+    }
+
+    /// Repaint the sixel on the next flush, e.g. after a resize or after
+    /// leaving the alternate screen.
+    pub fn force_sixel_redraw(&mut self) {
+        self.sixel_force = true;
     }
 
     pub fn take_changed(&mut self) -> bool {
@@ -190,8 +336,10 @@ impl Preview {
             return false;
         }
         self.zoom_idx = 0;
-        if let Some(ImgState::Kitty(k)) = &mut self.image_state {
-            k.set_zoom(ZOOM_LEVELS[0]);
+        match &mut self.image_state {
+            Some(ImgState::Kitty(k)) => k.set_zoom(ZOOM_LEVELS[0]),
+            Some(ImgState::Sixel(s)) => s.set_zoom(ZOOM_LEVELS[0]),
+            None => {}
         }
         self.changed = true;
         true
@@ -199,8 +347,10 @@ impl Preview {
 
     fn apply_zoom(&mut self, idx: usize) -> Option<f32> {
         self.zoom_idx = idx;
-        if let Some(ImgState::Kitty(k)) = &mut self.image_state {
-            k.set_zoom(ZOOM_LEVELS[self.zoom_idx]);
+        match &mut self.image_state {
+            Some(ImgState::Kitty(k)) => k.set_zoom(ZOOM_LEVELS[self.zoom_idx]),
+            Some(ImgState::Sixel(s)) => s.set_zoom(ZOOM_LEVELS[self.zoom_idx]),
+            None => {}
         }
         self.changed = true;
         Some(ZOOM_LEVELS[self.zoom_idx] as f32 / 100.0)
@@ -236,6 +386,13 @@ impl Preview {
                 if std::env::var_os("RNN_DEBUG").is_some() {
                     eprintln!("preview: stream gen {g} -> redraw");
                 }
+            }
+        }
+        if let Some(ImgState::Sixel(s)) = &self.image_state {
+            let g = s.encoded_gen();
+            if g != self.last_sixel_gen {
+                self.last_sixel_gen = g;
+                self.changed = true;
             }
         }
     }
@@ -306,12 +463,10 @@ impl Preview {
             Some(a) => a.clone(),
             None => return,
         };
-        if art.img.is_some() {
-            if self.kitty {
-                if let Some(ImgState::Kitty(old)) = &self.image_state {
-                    kitty::stream_delete(old.id(), self.is_tmux);
-                }
-                if let Some(img) = &art.img {
+        self.clear_image();
+        if let Some(img) = &art.img {
+            match self.protocol {
+                ImageProtocol::Kitty => {
                     let mut st = KittyState::new(
                         kitty::next_id(),
                         self.font,
@@ -323,11 +478,14 @@ impl Preview {
                     self.image_state = Some(ImgState::Kitty(st));
                     self.last_streamed = 0;
                 }
-            } else {
-                self.image_state = None;
+                ImageProtocol::Sixel => {
+                    let mut st = SixelState::new(self.font, self.is_tmux, img.clone());
+                    st.set_zoom(ZOOM_LEVELS[self.zoom_idx]);
+                    self.image_state = Some(ImgState::Sixel(st));
+                    self.last_sixel_gen = 0;
+                }
+                ImageProtocol::None => {}
             }
-        } else {
-            self.image_state = None;
         }
         self.active = Some((k, art));
         self.changed = true;
