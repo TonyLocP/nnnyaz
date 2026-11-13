@@ -3939,6 +3939,26 @@ impl App {
         self.list_dirty = false;
     }
 
+    /// Keep `scrolloff` rows of context above and below the cursor. Ratatui
+    /// only scrolls far enough to keep the selection visible, so adjust the
+    /// offset ourselves before rendering.
+    fn apply_scrolloff(&mut self, height: usize) {
+        let Some(selected) = self.state.selected() else {
+            return;
+        };
+        let offset = self.state.offset();
+        let next = scrolloff_offset(
+            selected,
+            offset,
+            height,
+            self.entries.len(),
+            self.config.mgr.scrolloff,
+        );
+        if next != offset {
+            *self.state.offset_mut() = next;
+        }
+    }
+
     fn draw(&mut self, f: &mut Frame) {
         let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
         let cols = if self.show_preview {
@@ -3985,6 +4005,7 @@ impl App {
             )),
             title_area,
         );
+        self.apply_scrolloff(list_area.height as usize);
         f.render_stateful_widget(&self.list, list_area, &mut self.state);
 
         // preview pane
@@ -4854,6 +4875,28 @@ impl App {
     }
 }
 
+/// Compute the list offset that keeps `margin` rows of context above and below
+/// the selected item, clamped so the list never scrolls past its end.
+fn scrolloff_offset(
+    selected: usize,
+    offset: usize,
+    height: usize,
+    len: usize,
+    margin: usize,
+) -> usize {
+    if height == 0 || margin == 0 {
+        return offset;
+    }
+    let margin = margin.min(height.saturating_sub(1) / 2);
+    let mut next = offset;
+    if selected < offset + margin {
+        next = selected.saturating_sub(margin);
+    } else if selected + margin >= offset + height {
+        next = selected + margin + 1 - height;
+    }
+    next.min(len.saturating_sub(height))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4941,5 +4984,24 @@ mod tests {
         assert_eq!(count_tree(std::slice::from_ref(&dir)), 6);
         assert_eq!(count_tree(&[dir.join("a")]), 1);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scrolloff_keeps_context_around_cursor() {
+        // 20 rows, margin 5: the cursor stays at least five rows from the edge.
+        assert_eq!(scrolloff_offset(14, 0, 20, 100, 5), 0);
+        assert_eq!(scrolloff_offset(15, 0, 20, 100, 5), 1);
+        assert_eq!(scrolloff_offset(16, 0, 20, 100, 5), 2);
+        // Scrolling up keeps the cursor five rows below the top.
+        assert_eq!(scrolloff_offset(14, 10, 20, 100, 5), 9);
+        assert_eq!(scrolloff_offset(3, 10, 20, 100, 5), 0);
+        // The list never scrolls past its end.
+        assert_eq!(scrolloff_offset(99, 80, 20, 100, 5), 80);
+        assert_eq!(scrolloff_offset(98, 0, 20, 100, 5), 80);
+        // A short list cannot scroll.
+        assert_eq!(scrolloff_offset(4, 0, 20, 10, 5), 0);
+        // Margin is capped at half the height and 0 disables it.
+        assert_eq!(scrolloff_offset(4, 0, 6, 100, 5), 1);
+        assert_eq!(scrolloff_offset(10, 0, 20, 100, 0), 0);
     }
 }

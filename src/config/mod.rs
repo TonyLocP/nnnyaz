@@ -30,6 +30,8 @@ pub struct MgrConfig {
     pub sort: Sort,
     pub sort_reverse: bool,
     pub linemode: Linemode,
+    /// Keep this many rows visible above and below the cursor when scrolling.
+    pub scrolloff: usize,
 }
 
 impl Default for MgrConfig {
@@ -41,6 +43,7 @@ impl Default for MgrConfig {
             sort: Sort::Name,
             sort_reverse: false,
             linemode: Linemode::Size,
+            scrolloff: 5,
         }
     }
 }
@@ -228,6 +231,9 @@ impl Config {
                 Err(e) => warnings.push(format!("config.toml: mgr.linemode: {e}")),
             }
         }
+        if let Some(v) = p.mgr.scrolloff {
+            self.mgr.scrolloff = v;
+        }
 
         if let Some(v) = p.preview.cache_size {
             if v == 0 {
@@ -280,6 +286,7 @@ struct PartialMgr {
     sort_by: Option<String>,
     sort_reverse: Option<bool>,
     linemode: Option<String>,
+    scrolloff: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
@@ -317,6 +324,7 @@ fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
                     "sort_by",
                     "sort_reverse",
                     "linemode",
+                    "scrolloff",
                 ],
                 warnings,
             ),

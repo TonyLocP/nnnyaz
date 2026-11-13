@@ -66,6 +66,7 @@ show_preview = true
 sort_by = "name"        # name | natural | size | mtime | btime | extension | random
 sort_reverse = false
 linemode = "size"       # size | permissions | btime | mtime | owner | none
+scrolloff = 5           # rows of context kept above/below the cursor (0 disables)
 
 [preview]
 cache_size = 16

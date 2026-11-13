@@ -82,6 +82,7 @@ fn set_snapshot(lua: &Lua, config: &Config) {
     let _ = mgr.set("ratio", vec![config.mgr.ratio.0, config.mgr.ratio.1]);
     let _ = mgr.set("show_hidden", config.mgr.show_hidden);
     let _ = mgr.set("show_preview", config.mgr.show_preview);
+    let _ = mgr.set("scrolloff", config.mgr.scrolloff as i64);
     let _ = snapshot.set("mgr", mgr);
     let _ = rnn.set("config", snapshot);
 }
