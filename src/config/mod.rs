@@ -32,6 +32,46 @@ pub struct MgrConfig {
     pub linemode: Linemode,
     /// Keep this many rows visible above and below the cursor when scrolling.
     pub scrolloff: usize,
+    /// Bitmask of accepted mouse events (see `MOUSE_*` constants).
+    pub mouse_events: u8,
+}
+
+/// Mouse event flags, mirroring Yazi's `mgr.mouse_events` values.
+pub const MOUSE_CLICK: u8 = 1 << 0;
+pub const MOUSE_SCROLL: u8 = 1 << 1;
+pub const MOUSE_TOUCH: u8 = 1 << 2;
+pub const MOUSE_MOVE: u8 = 1 << 3;
+pub const MOUSE_DRAG: u8 = 1 << 4;
+
+/// Parse `mgr.mouse_events` names into flags.
+pub fn parse_mouse_events(events: &[String]) -> Result<u8, String> {
+    let mut flags = 0;
+    for event in events {
+        flags |= match event.as_str() {
+            "click" => MOUSE_CLICK,
+            "scroll" => MOUSE_SCROLL,
+            "touch" => MOUSE_TOUCH,
+            "move" => MOUSE_MOVE,
+            "drag" => MOUSE_DRAG,
+            other => return Err(format!("invalid mouse event '{other}'")),
+        };
+    }
+    Ok(flags)
+}
+
+/// The configured mouse event names, in Yazi's order.
+pub fn mouse_event_names(flags: u8) -> Vec<&'static str> {
+    [
+        (MOUSE_CLICK, "click"),
+        (MOUSE_SCROLL, "scroll"),
+        (MOUSE_TOUCH, "touch"),
+        (MOUSE_MOVE, "move"),
+        (MOUSE_DRAG, "drag"),
+    ]
+    .into_iter()
+    .filter(|(flag, _)| flags & flag != 0)
+    .map(|(_, name)| name)
+    .collect()
 }
 
 impl Default for MgrConfig {
@@ -44,6 +84,7 @@ impl Default for MgrConfig {
             sort_reverse: false,
             linemode: Linemode::Size,
             scrolloff: 5,
+            mouse_events: MOUSE_CLICK | MOUSE_SCROLL | MOUSE_DRAG,
         }
     }
 }
@@ -234,6 +275,12 @@ impl Config {
         if let Some(v) = p.mgr.scrolloff {
             self.mgr.scrolloff = v;
         }
+        if let Some(events) = &p.mgr.mouse_events {
+            match parse_mouse_events(events) {
+                Ok(flags) => self.mgr.mouse_events = flags,
+                Err(e) => warnings.push(format!("config.toml: mgr.mouse_events: {e}")),
+            }
+        }
 
         if let Some(v) = p.preview.cache_size {
             if v == 0 {
@@ -287,6 +334,7 @@ struct PartialMgr {
     sort_reverse: Option<bool>,
     linemode: Option<String>,
     scrolloff: Option<usize>,
+    mouse_events: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -325,6 +373,7 @@ fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
                     "sort_reverse",
                     "linemode",
                     "scrolloff",
+                    "mouse_events",
                 ],
                 warnings,
             ),
@@ -437,6 +486,64 @@ mod tests {
         let loaded = load_from(&dir);
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
         assert_eq!(loaded.config.mgr.ratio, (4, 3));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mouse_events_parse_and_round_trip() {
+        assert_eq!(
+            parse_mouse_events(&["click".into(), "scroll".into(), "drag".into()]).unwrap(),
+            MOUSE_CLICK | MOUSE_SCROLL | MOUSE_DRAG
+        );
+        assert_eq!(parse_mouse_events(&[]).unwrap(), 0);
+        assert_eq!(
+            parse_mouse_events(&["touch".into(), "move".into()]).unwrap(),
+            MOUSE_TOUCH | MOUSE_MOVE
+        );
+        assert!(parse_mouse_events(&["nope".into()]).is_err());
+        assert_eq!(
+            mouse_event_names(MOUSE_CLICK | MOUSE_SCROLL | MOUSE_DRAG),
+            vec!["click", "scroll", "drag"]
+        );
+        assert!(mouse_event_names(0).is_empty());
+    }
+
+    #[test]
+    fn config_toml_mouse_events() {
+        let dir = temp_dir("mouse");
+        fs::write(
+            dir.join("config.toml"),
+            "[mgr]\nmouse_events = [\"click\", \"move\"]\n",
+        )
+        .unwrap();
+        let loaded = load_from(&dir);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert_eq!(loaded.config.mgr.mouse_events, MOUSE_CLICK | MOUSE_MOVE);
+
+        fs::write(dir.join("config.toml"), "[mgr]\nmouse_events = []\n").unwrap();
+        let loaded = load_from(&dir);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert_eq!(loaded.config.mgr.mouse_events, 0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bad_mouse_event_warns_and_keeps_default() {
+        let dir = temp_dir("bad-mouse");
+        fs::write(
+            dir.join("config.toml"),
+            "[mgr]\nmouse_events = [\"click\", \"wheel\"]\n",
+        )
+        .unwrap();
+        let loaded = load_from(&dir);
+        assert_eq!(
+            loaded.config.mgr.mouse_events,
+            MgrConfig::default().mouse_events
+        );
+        assert!(loaded
+            .warnings
+            .iter()
+            .any(|w| w.contains("mouse_events") && w.contains("wheel")));
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -16,7 +16,13 @@ use std::{
 };
 
 use ratatui::{
-    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    crossterm::{
+        event::{
+            self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+            KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        },
+        execute,
+    },
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
@@ -29,7 +35,7 @@ use crate::{
     config::{
         self,
         keymap::{Context, KeyChord},
-        Config,
+        Config, MOUSE_CLICK, MOUSE_DRAG, MOUSE_MOVE, MOUSE_SCROLL, MOUSE_TOUCH,
     },
     openwith,
     preview::{
@@ -65,7 +71,7 @@ pub(crate) enum Sort {
     Random,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Prompt {
     Create,
     Rename,
@@ -86,7 +92,7 @@ enum DeleteMode {
     EmptyTrash,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
     Normal,
     Filter,
@@ -357,6 +363,11 @@ pub struct App {
     list: List<'static>,
     list_dirty: bool,
     list_width: u16,
+    // Layout rectangles from the last frame, used for mouse hit-testing.
+    title_area: Rect,
+    list_area: Rect,
+    preview_area: Rect,
+    tab_spans: Vec<(u16, u16)>,
 }
 
 // ───────────────────────── helpers ─────────────────────────
@@ -1505,6 +1516,10 @@ impl App {
             list: List::new(Vec::<ListItem>::new()),
             list_dirty: true,
             list_width: 0,
+            title_area: Rect::default(),
+            list_area: Rect::default(),
+            preview_area: Rect::default(),
+            tab_spans: Vec::new(),
         };
         app.preview.set_cache_size(app.config.preview.cache_size);
         app.reload();
@@ -2162,10 +2177,9 @@ impl App {
     fn external(&mut self, term: &mut DefaultTerminal, prog: &str, path: &Path) {
         let mut parts = prog.split_whitespace();
         let Some(p) = parts.next() else { return };
-        ratatui::restore();
+        self.restore_terminal();
         let r = Command::new(p).args(parts).arg(path).status();
-        *term = ratatui::init();
-        self.preview.force_sixel_redraw();
+        *term = self.init_terminal();
         if let Err(e) = r {
             self.status = format!("{p}: {e}");
         }
@@ -2347,14 +2361,13 @@ impl App {
         let cmd = op.command_for(&state.path);
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
         if op.block {
-            ratatui::restore();
+            self.restore_terminal();
             let r = Command::new(&shell)
                 .arg("-c")
                 .arg(&cmd)
                 .current_dir(&self.cwd)
                 .status();
-            *term = ratatui::init();
-            self.preview.force_sixel_redraw();
+            *term = self.init_terminal();
             match r {
                 Ok(s) if !s.success() => self.status = format!("{}: {s}", op.name),
                 Err(e) => self.status = format!("{}: {e}", op.name),
@@ -2418,10 +2431,9 @@ impl App {
             .stdin(Stdio::inherit())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        ratatui::restore();
+        self.restore_terminal();
         let out = cmd.output();
-        *term = ratatui::init();
-        self.preview.force_sixel_redraw();
+        *term = self.init_terminal();
         let out = match out {
             Ok(o) => o,
             Err(e) => {
@@ -3090,14 +3102,13 @@ impl App {
             return;
         }
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        ratatui::restore();
+        self.restore_terminal();
         let r = Command::new(&shell)
             .arg("-c")
             .arg(&cmd)
             .current_dir(&self.cwd)
             .status();
-        *term = ratatui::init();
-        self.preview.force_sixel_redraw();
+        *term = self.init_terminal();
         match r {
             Ok(s) if !s.success() => self.status = format!("shell: {s}"),
             Err(e) => self.status = format!("shell: {e}"),
@@ -3107,11 +3118,10 @@ impl App {
     }
 
     fn suspend(&mut self, term: &mut DefaultTerminal) {
-        ratatui::restore();
+        self.restore_terminal();
         let _ =
             rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::Tstp);
-        *term = ratatui::init();
-        self.preview.force_sixel_redraw();
+        *term = self.init_terminal();
         self.reload();
     }
 
@@ -3644,15 +3654,7 @@ impl App {
                 n if n > 0 => self.zoom_in(),
                 _ => self.zoom_out(),
             },
-            Action::Seek(n) => {
-                let current = self.preview.preview_seek();
-                let seek = if n >= 0 {
-                    current.saturating_add(n as usize)
-                } else {
-                    current.saturating_sub((-n) as usize)
-                };
-                self.preview.set_preview_seek(seek);
-            }
+            Action::Seek(n) => self.seek_preview(n as isize),
             Action::ToggleSelect => {
                 self.visual = None;
                 if let Some(e) = self.current() {
@@ -3989,22 +3991,32 @@ impl App {
             cols[0].width,
             cols[0].height.saturating_sub(1),
         );
-        f.render_widget(
-            Paragraph::new(Line::from(
-                (0..self.tabs.len())
-                    .map(|i| {
-                        let name = self.tab_label(i);
-                        let style = if i == self.tab_index {
-                            self.config.theme.tab_active
-                        } else {
-                            self.config.theme.tab_inactive
-                        };
-                        Span::styled(format!(" {}:{} ", i + 1, name), style)
-                    })
-                    .collect::<Vec<_>>(),
-            )),
-            title_area,
-        );
+        self.title_area = title_area;
+        self.list_area = list_area;
+        self.preview_area = if self.show_preview {
+            cols.get(1).copied().unwrap_or_default()
+        } else {
+            Rect::default()
+        };
+
+        let mut tab_spans = Vec::with_capacity(self.tabs.len());
+        let mut spans = Vec::with_capacity(self.tabs.len());
+        let mut x = title_area.x;
+        for i in 0..self.tabs.len() {
+            let name = self.tab_label(i);
+            let style = if i == self.tab_index {
+                self.config.theme.tab_active
+            } else {
+                self.config.theme.tab_inactive
+            };
+            let span = Span::styled(format!(" {}:{} ", i + 1, name), style);
+            let width = span.width() as u16;
+            tab_spans.push((x, x.saturating_add(width)));
+            x = x.saturating_add(width);
+            spans.push(span);
+        }
+        self.tab_spans = tab_spans;
+        f.render_widget(Paragraph::new(Line::from(spans)), title_area);
         self.apply_scrolloff(list_area.height as usize);
         f.render_stateful_widget(&self.list, list_area, &mut self.state);
 
@@ -4804,6 +4816,162 @@ impl App {
         matches!(self.mode, Mode::Prompt(Prompt::Cd)) && !self.completions.is_empty()
     }
 
+    // ─────────────── terminal / mouse ───────────────
+
+    /// Mouse capture is enabled iff at least one event kind is configured,
+    /// matching Yazi's `mgr.mouse_events` semantics.
+    pub fn mouse_enabled(&self) -> bool {
+        self.config.mgr.mouse_events != 0
+    }
+
+    pub fn enable_mouse(&self) {
+        if self.mouse_enabled() {
+            let _ = execute!(io::stdout(), EnableMouseCapture);
+        }
+    }
+
+    pub fn disable_mouse(&self) {
+        if self.mouse_enabled() {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+        }
+    }
+
+    /// Leave the alternate screen and release the mouse before handing the
+    /// terminal to an external program or suspending.
+    fn restore_terminal(&self) {
+        self.disable_mouse();
+        ratatui::restore();
+    }
+
+    /// Re-enter the alternate screen and restore mouse capture afterwards.
+    fn init_terminal(&mut self) -> DefaultTerminal {
+        let term = ratatui::init();
+        self.enable_mouse();
+        self.preview.force_sixel_redraw();
+        term
+    }
+
+    /// Translate a crossterm mouse event into its `mgr.mouse_events` flag.
+    fn mouse_flag(kind: MouseEventKind) -> u8 {
+        match kind {
+            MouseEventKind::Down(_) | MouseEventKind::Up(_) => MOUSE_CLICK,
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => MOUSE_SCROLL,
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => MOUSE_TOUCH,
+            MouseEventKind::Moved => MOUSE_MOVE,
+            MouseEventKind::Drag(_) => MOUSE_DRAG,
+        }
+    }
+
+    /// Handle a mouse event in the manager view. Returns whether the screen
+    /// needs to be redrawn. Overlays and prompts ignore mouse input, mirroring
+    /// Yazi routing events to the `mgr` layer only.
+    fn handle_mouse(&mut self, mouse: MouseEvent, term: &mut DefaultTerminal) -> io::Result<bool> {
+        if self.config.mgr.mouse_events & Self::mouse_flag(mouse.kind) == 0 {
+            return Ok(false);
+        }
+        if std::env::var_os("RNN_DEBUG").is_some() {
+            eprintln!(
+                "mouse: {:?} at ({}, {}) mode={:?}",
+                mouse.kind, mouse.column, mouse.row, self.mode
+            );
+        }
+        if self.mode != Mode::Normal {
+            return Ok(false);
+        }
+
+        let x = mouse.column;
+        let y = mouse.row;
+        let inside = |r: Rect| {
+            r.width > 0 && r.height > 0 && x >= r.x && x < r.right() && y >= r.y && y < r.bottom()
+        };
+        let left = mouse.kind == MouseEventKind::Down(MouseButton::Left);
+        let right = mouse.kind == MouseEventKind::Down(MouseButton::Right);
+
+        // Tab bar: left or right click switches to the clicked tab.
+        if (left || right) && inside(self.title_area) {
+            if let Some(index) = tab_at(&self.tab_spans, x) {
+                self.begin_mouse_action();
+                self.switch_tab(index);
+                return Ok(true);
+            }
+        }
+
+        if inside(self.list_area) {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Down(MouseButton::Right) => {
+                    if let Some(index) = list_index_at(
+                        self.list_area,
+                        self.state.offset(),
+                        self.entries.len(),
+                        x,
+                        y,
+                    ) {
+                        self.begin_mouse_action();
+                        self.state.select(Some(index));
+                        self.apply_visual();
+                        if std::env::var_os("RNN_DEBUG").is_some() {
+                            eprintln!("mouse: select {index} ({})", self.entries[index].name);
+                        }
+                        if right {
+                            self.open(term);
+                        }
+                        return Ok(true);
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    self.begin_mouse_action();
+                    self.move_by(1);
+                    return Ok(true);
+                }
+                MouseEventKind::ScrollUp => {
+                    self.begin_mouse_action();
+                    self.move_by(-1);
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
+        if inside(self.preview_area) {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.begin_mouse_action();
+                    self.open(term);
+                    return Ok(true);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.begin_mouse_action();
+                    self.seek_preview(1);
+                    return Ok(true);
+                }
+                MouseEventKind::ScrollUp => {
+                    self.begin_mouse_action();
+                    self.seek_preview(-1);
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn begin_mouse_action(&mut self) {
+        self.pending.clear();
+        self.status.clear();
+    }
+
+    fn seek_preview(&mut self, delta: isize) {
+        let current = self.preview.preview_seek();
+        let seek = if delta >= 0 {
+            current.saturating_add(delta as usize)
+        } else {
+            current.saturating_sub((-delta) as usize)
+        };
+        self.preview.set_preview_seek(seek);
+    }
+
     // ─────────────── main loop ───────────────
 
     pub fn run(&mut self, term: &mut DefaultTerminal) -> io::Result<()> {
@@ -4827,6 +4995,11 @@ impl App {
                             key_ms = Some(t.elapsed());
                         }
                         dirty = true;
+                    }
+                    Event::Mouse(m) => {
+                        if self.handle_mouse(m, term)? {
+                            dirty = true;
+                        }
                     }
                     Event::Resize(_, _) => {
                         self.preview.force_sixel_redraw();
@@ -4873,6 +5046,29 @@ impl App {
             }
         }
     }
+}
+
+/// The tab at `x`. Like Yazi, pick the last tab whose start is at or before
+/// `x`, so clicking empty space to the right of the last tab selects it.
+fn tab_at(spans: &[(u16, u16)], x: u16) -> Option<usize> {
+    spans.iter().rposition(|&(start, _)| x >= start)
+}
+
+/// The entry index at a screen position inside the list area. `offset` is the
+/// first visible row (as reported by `ListState`), so this stays correct after
+/// scrolloff scrolling.
+fn list_index_at(area: Rect, offset: usize, len: usize, x: u16, y: u16) -> Option<usize> {
+    if area.width == 0
+        || area.height == 0
+        || x < area.x
+        || x >= area.right()
+        || y < area.y
+        || y >= area.bottom()
+    {
+        return None;
+    }
+    let index = offset + (y - area.y) as usize;
+    (index < len).then_some(index)
 }
 
 /// Compute the list offset that keeps `margin` rows of context above and below
@@ -5003,5 +5199,51 @@ mod tests {
         // Margin is capped at half the height and 0 disables it.
         assert_eq!(scrolloff_offset(4, 0, 6, 100, 5), 1);
         assert_eq!(scrolloff_offset(10, 0, 20, 100, 0), 0);
+    }
+
+    #[test]
+    fn mouse_hit_testing() {
+        let area = Rect::new(0, 1, 32, 10);
+        assert_eq!(list_index_at(area, 0, 5, 2, 1), Some(0));
+        assert_eq!(list_index_at(area, 0, 5, 2, 5), Some(4));
+        // Below the last entry or outside the pane.
+        assert_eq!(list_index_at(area, 0, 5, 2, 6), None);
+        assert_eq!(list_index_at(area, 0, 5, 2, 0), None);
+        assert_eq!(list_index_at(area, 0, 5, 32, 2), None);
+        // The visible offset is added to the clicked row.
+        assert_eq!(list_index_at(area, 3, 10, 2, 2), Some(4));
+        assert_eq!(list_index_at(area, 3, 10, 2, 9), None);
+        // An empty pane never hits.
+        assert_eq!(list_index_at(Rect::default(), 0, 5, 0, 0), None);
+
+        let tabs = [(0, 13), (13, 26), (26, 39)];
+        assert_eq!(tab_at(&tabs, 0), Some(0));
+        assert_eq!(tab_at(&tabs, 12), Some(0));
+        assert_eq!(tab_at(&tabs, 13), Some(1));
+        assert_eq!(tab_at(&tabs, 38), Some(2));
+        // Empty space right of the last tab selects it, as in Yazi.
+        assert_eq!(tab_at(&tabs, 100), Some(2));
+        assert_eq!(tab_at(&[], 0), None);
+    }
+
+    #[test]
+    fn mouse_flags_match_event_kinds() {
+        assert_eq!(
+            App::mouse_flag(MouseEventKind::Down(MouseButton::Left)),
+            MOUSE_CLICK
+        );
+        assert_eq!(
+            App::mouse_flag(MouseEventKind::Up(MouseButton::Right)),
+            MOUSE_CLICK
+        );
+        assert_eq!(App::mouse_flag(MouseEventKind::ScrollDown), MOUSE_SCROLL);
+        assert_eq!(App::mouse_flag(MouseEventKind::ScrollUp), MOUSE_SCROLL);
+        assert_eq!(App::mouse_flag(MouseEventKind::ScrollLeft), MOUSE_TOUCH);
+        assert_eq!(App::mouse_flag(MouseEventKind::ScrollRight), MOUSE_TOUCH);
+        assert_eq!(App::mouse_flag(MouseEventKind::Moved), MOUSE_MOVE);
+        assert_eq!(
+            App::mouse_flag(MouseEventKind::Drag(MouseButton::Left)),
+            MOUSE_DRAG
+        );
     }
 }

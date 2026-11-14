@@ -83,6 +83,10 @@ fn set_snapshot(lua: &Lua, config: &Config) {
     let _ = mgr.set("show_hidden", config.mgr.show_hidden);
     let _ = mgr.set("show_preview", config.mgr.show_preview);
     let _ = mgr.set("scrolloff", config.mgr.scrolloff as i64);
+    let _ = mgr.set(
+        "mouse_events",
+        crate::config::mouse_event_names(config.mgr.mouse_events),
+    );
     let _ = snapshot.set("mgr", mgr);
     let _ = rnn.set("config", snapshot);
 }
@@ -249,6 +253,7 @@ pub fn run_action(lua: &Lua, name: &str) -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MOUSE_CLICK;
     use std::path::PathBuf;
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -272,7 +277,11 @@ mod tests {
             r#"
             rnn.keymap.set("mgr", "<C-s>", "search fd")
             return {
-              mgr = { show_hidden = true, ratio = { 30, 70 } },
+              mgr = {
+                show_hidden = true,
+                ratio = { 30, 70 },
+                mouse_events = { "click" },
+              },
               theme = { directory = "red" },
             }
             "#,
@@ -284,6 +293,7 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(config.mgr.show_hidden);
         assert_eq!(config.mgr.ratio, (30, 70));
+        assert_eq!(config.mgr.mouse_events, MOUSE_CLICK);
         assert!(config.lua.is_some());
         let _ = fs::remove_dir_all(dir);
     }

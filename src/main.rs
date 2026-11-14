@@ -27,7 +27,9 @@ fn main() -> io::Result<()> {
     }
     app.preview_configure(protocol, font, shm);
     let mut terminal = ratatui::init();
+    app.enable_mouse();
     let res = app.run(&mut terminal);
+    app.disable_mouse();
     ratatui::restore();
     res
 }

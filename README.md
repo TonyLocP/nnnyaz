@@ -67,6 +67,7 @@ sort_by = "name"        # name | natural | size | mtime | btime | extension | ra
 sort_reverse = false
 linemode = "size"       # size | permissions | btime | mtime | owner | none
 scrolloff = 5           # rows of context kept above/below the cursor (0 disables)
+mouse_events = ["click", "scroll", "drag"]  # click | scroll | touch | move | drag; [] disables
 
 [preview]
 cache_size = 16
@@ -136,6 +137,18 @@ Unsupported Yazi contexts (`input`, `confirm`, `pick`, `cmp`, `help`, `which`)
 are ignored.
 
 Run `~` inside rnn for the built-in key list.
+
+### Mouse
+
+Mouse support mirrors Yazi and is controlled by `mgr.mouse_events` (default
+`["click", "scroll", "drag"]`). An empty list disables mouse capture entirely.
+
+- Left click a file to select it; right click selects and opens it.
+- Scroll over the list to move the cursor by one row.
+- Left click the preview to open the current entry; scroll over the preview to
+  seek text/image previews by one row.
+- Click a tab in the tab bar to switch to it.
+- Mouse input is ignored in prompts and overlays, matching Yazi's `mgr` layer.
 
 ### `theme.toml`
 
