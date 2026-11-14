@@ -539,7 +539,7 @@ impl Default for Keymap {
             ("<C-7>", "hardlink", None),
             ("<C-z>", "suspend", None),
             ("q", "quit", None),
-            ("Q", "quit", None),
+            ("Q", "quit_cwd", Some("quit and cd")),
             ("j", "move 1", None),
             ("<Down>", "move 1", None),
             ("k", "move -1", None),
@@ -760,6 +760,14 @@ mod tests {
         assert_eq!(node.action(), Some(&Action::Top));
         let node = km.mgr.walk(&parse_seq("<C-d>").unwrap()).unwrap();
         assert_eq!(node.action(), Some(&Action::HalfPage(1)));
+        assert_eq!(
+            km.mgr.walk(&parse_seq("q").unwrap()).unwrap().action(),
+            Some(&Action::Quit)
+        );
+        assert_eq!(
+            km.mgr.walk(&parse_seq("Q").unwrap()).unwrap().action(),
+            Some(&Action::QuitCwd)
+        );
         assert!(km
             .mgr
             .walk(&parse_seq("g").unwrap())

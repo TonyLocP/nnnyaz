@@ -10,6 +10,7 @@ use crate::app::{CopyKind, Linemode, SearchKind, Sort};
 pub enum Action {
     // application / modes
     Quit,
+    QuitCwd,
     QuitOrClose,
     Close,
     Escape,
@@ -170,6 +171,7 @@ impl Action {
     pub fn name(&self) -> &'static str {
         match self {
             Action::Quit => "quit",
+            Action::QuitCwd => "quit_cwd",
             Action::QuitOrClose => "quit_or_close",
             Action::Close => "close",
             Action::Escape => "escape",
@@ -265,6 +267,7 @@ impl Action {
 
         Ok(match name {
             "quit" => Action::Quit,
+            "quit_cwd" => Action::QuitCwd,
             "quit_or_close" => Action::QuitOrClose,
             "close" => Action::Close,
             "escape" => Action::Escape,
@@ -399,4 +402,16 @@ pub fn parse_sort(name: &str) -> Result<Sort, String> {
         "random" => Sort::Random,
         other => return Err(format!("sort: unknown key '{other}'")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quit_cwd_roundtrips() {
+        assert_eq!(Action::parse("quit_cwd").unwrap(), Action::QuitCwd);
+        assert_eq!(Action::QuitCwd.name(), "quit_cwd");
+        assert_eq!(Action::QuitCwd.label(), "quit_cwd");
+    }
 }

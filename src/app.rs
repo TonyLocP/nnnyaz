@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     env,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
     io::{self, BufRead, Read, Write},
     os::unix::fs::MetadataExt,
@@ -359,6 +359,8 @@ pub struct App {
     task_cursor: usize,
     pending_delete: Option<DeleteMode>,
     quit_warned: bool,
+    /// Where `quit_cwd` writes the current directory for a shell wrapper.
+    cwd_file: Option<PathBuf>,
     preview: Preview,
     list: List<'static>,
     list_dirty: bool,
@@ -1458,12 +1460,68 @@ fn run_hardlink(
 
 // ───────────────────────── app ─────────────────────────
 
+/// Command-line options. rnn has no argument-parser dependency, so this stays
+/// deliberately small: one optional starting path plus `--cwd-file`.
+#[derive(Debug, Default, PartialEq)]
+struct Cli {
+    path: Option<PathBuf>,
+    cwd_file: Option<PathBuf>,
+}
+
+/// Parse rnn's command line. `--cwd-file <path>` and `--cwd-file=<path>` are
+/// accepted; the first non-option argument is the starting path.
+fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
+    let mut cli = Cli::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let text = arg.to_string_lossy();
+        if text == "--cwd-file" {
+            let value = args
+                .next()
+                .ok_or_else(|| "--cwd-file requires a path".to_string())?;
+            cli.cwd_file = Some(PathBuf::from(value));
+        } else if let Some(value) = text.strip_prefix("--cwd-file=") {
+            if value.is_empty() {
+                return Err("--cwd-file requires a path".into());
+            }
+            cli.cwd_file = Some(PathBuf::from(value));
+        } else if text == "--" {
+            if let Some(path) = args.next() {
+                if cli.path.replace(PathBuf::from(path)).is_some() {
+                    return Err("too many arguments".into());
+                }
+            }
+            if args.next().is_some() {
+                return Err("too many arguments".into());
+            }
+        } else if text.starts_with('-') && text != "-" {
+            return Err(format!("unknown option '{text}'"));
+        } else if cli.path.replace(PathBuf::from(arg)).is_some() {
+            return Err("too many arguments".into());
+        }
+    }
+    Ok(cli)
+}
+
+/// Write `cwd` to the cwd file so a shell wrapper can `cd` there after rnn
+/// exits. Failures are reported on stderr, which is visible once the terminal
+/// is restored, and do not prevent quitting.
+fn write_cwd_file(path: &Path, cwd: &Path) {
+    if let Err(e) = fs::write(path, format!("{}\n", cwd.display())) {
+        eprintln!("rnn: cannot write cwd file {}: {e}", path.display());
+    }
+}
+
 impl App {
     pub fn new(loaded: config::Loaded) -> io::Result<Self> {
-        let start = env::args()
-            .nth(1)
-            .map(PathBuf::from)
-            .unwrap_or(env::current_dir()?);
+        let cli = parse_cli(env::args_os().skip(1))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let cwd_file = cli.cwd_file.or_else(|| {
+            env::var_os("RNN_CWD_FILE")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        });
+        let start = cli.path.unwrap_or(env::current_dir()?);
         let cwd = fs::canonicalize(start)?;
         let config::Loaded { config, warnings } = loaded;
         let status = warnings.join(" · ");
@@ -1512,6 +1570,7 @@ impl App {
             task_cursor: 0,
             pending_delete: None,
             quit_warned: false,
+            cwd_file,
             preview: Preview::new(),
             list: List::new(Vec::<ListItem>::new()),
             list_dirty: true,
@@ -2968,6 +3027,18 @@ impl App {
         changed
     }
 
+    /// Whether quitting is allowed now. With unfinished tasks running, warn
+    /// once and return false; `retry` is the key named in the warning.
+    fn quit_allowed(&mut self, retry: &str) -> bool {
+        if self.config.confirm.quit_with_tasks && self.tasks_running() && !self.quit_warned {
+            self.quit_warned = true;
+            self.status = format!("unfinished tasks — press {retry} again to quit");
+            false
+        } else {
+            true
+        }
+    }
+
     fn tasks_running(&self) -> bool {
         self.tasks.iter().any(|task| {
             task.state
@@ -3580,24 +3651,22 @@ impl App {
         match action {
             Action::Nop => {}
             Action::Quit => {
-                if self.config.confirm.quit_with_tasks && self.tasks_running() && !self.quit_warned
-                {
-                    self.quit_warned = true;
-                    self.status = "unfinished tasks — press q again to quit".into();
-                } else {
+                if self.quit_allowed("q") {
+                    return Ok(true);
+                }
+            }
+            Action::QuitCwd => {
+                if self.quit_allowed("Q") {
+                    if let Some(path) = &self.cwd_file {
+                        write_cwd_file(path, &self.cwd);
+                    }
                     return Ok(true);
                 }
             }
             Action::QuitOrClose => {
                 if self.tabs.len() > 1 {
                     self.close_tab();
-                } else if self.config.confirm.quit_with_tasks
-                    && self.tasks_running()
-                    && !self.quit_warned
-                {
-                    self.quit_warned = true;
-                    self.status = "unfinished tasks — press Ctrl+c again to quit".into();
-                } else {
+                } else if self.quit_allowed("Ctrl+c") {
                     return Ok(true);
                 }
             }
@@ -5245,5 +5314,52 @@ mod tests {
             App::mouse_flag(MouseEventKind::Drag(MouseButton::Left)),
             MOUSE_DRAG
         );
+    }
+
+    #[test]
+    fn cli_parses_path_and_cwd_file() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+
+        assert_eq!(parse_cli(args(&[])).unwrap(), Cli::default());
+        assert_eq!(
+            parse_cli(args(&["--cwd-file", "/tmp/cwd", "/tmp/start"])).unwrap(),
+            Cli {
+                path: Some(PathBuf::from("/tmp/start")),
+                cwd_file: Some(PathBuf::from("/tmp/cwd")),
+            }
+        );
+        assert_eq!(
+            parse_cli(args(&["--cwd-file=/tmp/cwd"])).unwrap(),
+            Cli {
+                path: None,
+                cwd_file: Some(PathBuf::from("/tmp/cwd")),
+            }
+        );
+        assert_eq!(
+            parse_cli(args(&["--", "-weird-dir"])).unwrap(),
+            Cli {
+                path: Some(PathBuf::from("-weird-dir")),
+                cwd_file: None,
+            }
+        );
+        assert!(parse_cli(args(&["--cwd-file"])).is_err());
+        assert!(parse_cli(args(&["--cwd-file="])).is_err());
+        assert!(parse_cli(args(&["--nope"])).is_err());
+        assert!(parse_cli(args(&["one", "two"])).is_err());
+    }
+
+    #[test]
+    fn cwd_file_gets_the_current_directory() {
+        let path = std::env::temp_dir().join(format!(
+            "rnn-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_cwd_file(&path, Path::new("/tmp/some dir"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "/tmp/some dir\n");
+        let _ = fs::remove_file(path);
     }
 }

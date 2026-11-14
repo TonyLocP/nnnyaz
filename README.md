@@ -20,6 +20,50 @@ Run it in a directory:
 rnn [path]
 ```
 
+## Quitting and the current directory
+
+`q` quits and leaves the shell where it was. `Q` quits and records rnn's
+current directory so a shell wrapper can `cd` there. A child process cannot
+change its parent shell's directory, so this needs a small wrapper.
+
+Pass a file with `--cwd-file <path>` (or set `RNN_CWD_FILE`); `Q` writes the
+current directory to it. The file is only written by `Q`, never by `q`, so the
+wrapper should remove it before starting rnn:
+
+```fish
+function rnn --description 'rnn with cd-on-quit'
+    set -l cwd_file (mktemp)
+    or return
+    rm -f $cwd_file
+    command rnn --cwd-file $cwd_file $argv
+    set -l status $status
+    if test -s $cwd_file
+        cd (cat $cwd_file)
+    end
+    rm -f $cwd_file
+    return $status
+end
+```
+
+Save it as `~/.config/fish/functions/rnn.fish`. Bash/zsh wrappers use the same
+idea:
+
+```sh
+rnn() {
+  local cwd_file
+  cwd_file=$(mktemp) || return
+  rm -f "$cwd_file"
+  command rnn --cwd-file "$cwd_file" "$@"
+  local status=$?
+  [ -s "$cwd_file" ] && cd "$(cat "$cwd_file")"
+  rm -f "$cwd_file"
+  return $status
+}
+```
+
+`quit_cwd` is also available as a normal action, so `Q` can be rebound in
+`keymap.toml`.
+
 ## Terminal support
 
 Image and video thumbnails are drawn with the kitty graphics protocol in kitty
