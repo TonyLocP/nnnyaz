@@ -510,6 +510,44 @@ fn permissions(mode: u32) -> String {
     out
 }
 
+/// `ls`/nnn-style mode string such as `drwxr-xr-x` or `-rw-r--r--`.
+fn mode_string(mode: u32) -> String {
+    let kind = match mode & 0o170000 {
+        0o040000 => 'd',
+        0o120000 => 'l',
+        0o010000 => 'p',
+        0o020000 => 'c',
+        0o060000 => 'b',
+        0o140000 => 's',
+        _ => '-',
+    };
+    let mut out = String::with_capacity(10);
+    out.push(kind);
+    let bits = mode & 0o777;
+    for (i, shift) in [6, 3, 0].into_iter().enumerate() {
+        let b = (bits >> shift) & 0o7;
+        out.push(if b & 0o4 != 0 { 'r' } else { '-' });
+        out.push(if b & 0o2 != 0 { 'w' } else { '-' });
+        let special = match i {
+            0 => mode & 0o4000 != 0,
+            1 => mode & 0o2000 != 0,
+            _ => mode & 0o1000 != 0,
+        };
+        let x = if b & 0o1 != 0 { 'x' } else { '-' };
+        out.push(if special {
+            match (i, x) {
+                (2, 'x') => 't',
+                (2, _) => 'T',
+                (_, 'x') => 's',
+                (_, _) => 'S',
+            }
+        } else {
+            x
+        });
+    }
+    out
+}
+
 fn format_age(t: Option<SystemTime>) -> String {
     let Some(t) = t else {
         return "-".into();
@@ -4219,11 +4257,16 @@ impl App {
             }
             Mode::Normal if !self.status.is_empty() => self.status.clone(),
             Mode::Normal => {
-                let mut s = format!(
+                let mut s = String::new();
+                if let Some(entry) = self.current() {
+                    s.push_str(&mode_string(entry.mode));
+                    s.push_str(" | ");
+                }
+                s.push_str(&format!(
                     "{} items | {} selected | sort:{sort}{direction}",
                     self.entries.len(),
                     self.selected.len()
-                );
+                ));
                 if let Some(search) = &self.search {
                     let kind = match search.kind {
                         SearchKind::Fd => "fd",
@@ -5244,6 +5287,17 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn mode_string_matches_ls_style() {
+        assert_eq!(mode_string(0o100644), "-rw-r--r--");
+        assert_eq!(mode_string(0o040755), "drwxr-xr-x");
+        assert_eq!(mode_string(0o120777), "lrwxrwxrwx");
+        assert_eq!(mode_string(0o104755), "-rwsr-xr-x");
+        assert_eq!(mode_string(0o102755), "-rwxr-sr-x");
+        assert_eq!(mode_string(0o041777), "drwxrwxrwt");
+        assert_eq!(mode_string(0o104644), "-rwSr--r--");
     }
 
     #[test]
