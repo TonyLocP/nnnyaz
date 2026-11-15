@@ -4298,6 +4298,12 @@ impl App {
                     self.entries.len(),
                     self.selected.len()
                 ));
+                if let Some(query) = self.last_find.as_deref().filter(|q| !q.is_empty()) {
+                    let (pos, total) = self.find_progress(query);
+                    if pos > 0 {
+                        s.push_str(&format!(" | find: {query} [{pos}/{total}]"));
+                    }
+                }
                 if let Some(search) = &self.search {
                     let kind = match search.kind {
                         SearchKind::Fd => "fd",
