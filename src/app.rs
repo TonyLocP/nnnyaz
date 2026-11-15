@@ -671,12 +671,6 @@ fn extension_label(entry: &Entry, md: Option<&fs::Metadata>) -> String {
     }
 }
 
-fn owner_group(uid: u32, gid: u32) -> String {
-    let user = id_name("/etc/passwd", uid).unwrap_or_else(|| uid.to_string());
-    let group = id_name("/etc/group", gid).unwrap_or_else(|| gid.to_string());
-    format!("{user}:{group}")
-}
-
 fn format_duration(secs: f64) -> String {
     let total = secs.max(0.0) as u64;
     let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
@@ -4382,12 +4376,6 @@ impl App {
                         s.push(' ');
                         s.push_str(&ext);
                     }
-                    let (uid, gid) = md
-                        .as_ref()
-                        .map(|m| (m.uid(), m.gid()))
-                        .unwrap_or((entry.uid, entry.gid));
-                    s.push(' ');
-                    s.push_str(&owner_group(uid, gid));
                     s.push_str(" | ");
                 } else {
                     s.push_str(&format!("{} items | ", self.entries.len()));
