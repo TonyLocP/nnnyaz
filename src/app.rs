@@ -3311,6 +3311,26 @@ impl App {
         self.find_match(from, forward, &query, false);
     }
 
+    /// 1-based position of the cursor among entries matching `query`, plus the
+    /// total number of matches. Returns `(0, 0)` when the query is empty.
+    fn find_progress(&self, query: &str) -> (usize, usize) {
+        if query.is_empty() {
+            return (0, 0);
+        }
+        let current = self.state.selected();
+        let mut pos = 0;
+        let mut total = 0;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if smart_contains(&entry.name, query) {
+                total += 1;
+                if Some(i) == current {
+                    pos = total;
+                }
+            }
+        }
+        (pos, total)
+    }
+
     fn set_linemode(&mut self, mode: Linemode) {
         self.linemode = mode;
         self.list_dirty = true;
@@ -4213,11 +4233,15 @@ impl App {
         let direction = if self.sort_reverse { "↓" } else { "↑" };
         let mut text = match self.mode {
             Mode::Filter => format!("filter: {}", self.filter),
-            Mode::Find => format!(
-                "find{}: {}",
-                if self.find_forward { "→" } else { "←" },
-                self.find_query
-            ),
+            Mode::Find => {
+                let arrow = if self.find_forward { "→" } else { "←" };
+                if self.find_query.is_empty() {
+                    format!("find{arrow}: ")
+                } else {
+                    let (pos, total) = self.find_progress(&self.find_query);
+                    format!("find{arrow}: {}  [{pos}/{total}]", self.find_query)
+                }
+            }
             Mode::Help => "rnn keys — press any key to close".into(),
             Mode::Info => {
                 if self.info_from_tasks {
