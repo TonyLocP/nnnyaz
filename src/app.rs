@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     env,
     ffi::{OsStr, OsString},
     fs,
@@ -10,7 +10,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, TryRecvError},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -361,6 +361,9 @@ pub struct App {
     quit_warned: bool,
     /// Where `quit_cwd` writes the current directory for a shell wrapper.
     cwd_file: Option<PathBuf>,
+    /// Local UTC offset captured at startup (before any threads spawn), used
+    /// to render mtimes in local time without shelling out to `date`.
+    local_offset: time::UtcOffset,
     preview: Preview,
     list: List<'static>,
     list_dirty: bool,
@@ -593,8 +596,31 @@ fn format_time(t: Option<SystemTime>) -> String {
     }
 }
 
+/// Cache of uid/gid → name lookups, keyed by (`/etc/passwd` or `/etc/group`, id).
+type IdCache = HashMap<(String, u32), Option<String>>;
+
 /// Look up a uid/gid name in `/etc/passwd` or `/etc/group` (field 2).
+///
+/// Results (including misses) are cached: the status line asks for the
+/// hovered entry's owner and group on every frame, and re-reading the files
+/// each time would be needlessly expensive.
 fn id_name(file: &str, id: u32) -> Option<String> {
+    static CACHE: OnceLock<Mutex<IdCache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (file.to_string(), id);
+    if let Ok(c) = cache.lock() {
+        if let Some(hit) = c.get(&key) {
+            return hit.clone();
+        }
+    }
+    let name = id_lookup(file, id);
+    if let Ok(mut c) = cache.lock() {
+        c.insert(key, name.clone());
+    }
+    name
+}
+
+fn id_lookup(file: &str, id: u32) -> Option<String> {
     let text = fs::read_to_string(file).ok()?;
     for line in text.lines() {
         let mut parts = line.split(':');
@@ -604,6 +630,51 @@ fn id_name(file: &str, id: u32) -> Option<String> {
         }
     }
     None
+}
+
+/// Local `YYYY-MM-DD HH:MM` timestamp for the status line, like nnn.
+fn format_mtime(t: Option<SystemTime>, offset: time::UtcOffset) -> String {
+    let Some(t) = t else {
+        return "-".into();
+    };
+    let Ok(age) = t.duration_since(SystemTime::UNIX_EPOCH) else {
+        return "-".into();
+    };
+    let Ok(dt) = time::OffsetDateTime::from_unix_timestamp(age.as_secs() as i64) else {
+        return "-".into();
+    };
+    let dt = dt.to_offset(offset);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute()
+    )
+}
+
+/// nnn-style trailing field: the symlink target (`->foo`) for links, the
+/// extension (`.txt`) for files, and nothing for directories.
+fn extension_label(entry: &Entry, md: Option<&fs::Metadata>) -> String {
+    if md.map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        return fs::read_link(&entry.path)
+            .map(|t| format!("->{}", t.display()))
+            .unwrap_or_default();
+    }
+    if entry.is_dir {
+        return String::new();
+    }
+    match entry.name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => format!(".{ext}"),
+        _ => String::new(),
+    }
+}
+
+fn owner_group(uid: u32, gid: u32) -> String {
+    let user = id_name("/etc/passwd", uid).unwrap_or_else(|| uid.to_string());
+    let group = id_name("/etc/group", gid).unwrap_or_else(|| gid.to_string());
+    format!("{user}:{group}")
 }
 
 fn format_duration(secs: f64) -> String {
@@ -1564,6 +1635,9 @@ impl App {
         let config::Loaded { config, warnings } = loaded;
         let status = warnings.join(" · ");
         let mgr = config.mgr;
+        // `time` refuses to read the local offset once the process is
+        // multi-threaded, so capture it now (main is still single-threaded).
+        let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
         let mut app = App {
             config,
             cwd: cwd.clone(),
@@ -1609,6 +1683,7 @@ impl App {
             pending_delete: None,
             quit_warned: false,
             cwd_file,
+            local_offset,
             preview: Preview::new(),
             list: List::new(Vec::<ListItem>::new()),
             list_dirty: true,
@@ -4283,19 +4358,42 @@ impl App {
             Mode::Normal => {
                 let mut s = String::new();
                 if let Some(entry) = self.current() {
-                    // Use lstat so symlinks show their own `l` mode and link
-                    // size like nnn, even though `entry` follows them.
+                    // nnn-style: cursor position, local mtime, then mode/size.
+                    // lstat supplies the type, link length, and mtime; the
+                    // permission bits come from the followed metadata so a
+                    // valid symlink shows its target's bits (like nnn).
                     let md = entry.path.symlink_metadata().ok();
-                    let mode = md.as_ref().map(|m| m.mode()).unwrap_or(entry.mode);
+                    let lmode = md.as_ref().map(|m| m.mode()).unwrap_or(entry.mode);
+                    let mode = (lmode & 0o170000) | (entry.mode & 0o7777);
                     let size = md.as_ref().map(|m| m.len()).unwrap_or(entry.size);
+                    let mtime = md
+                        .as_ref()
+                        .and_then(|m| m.modified().ok())
+                        .or(entry.modified);
+                    let pos = self.state.selected().map_or(0, |i| i + 1);
+                    s.push_str(&format!("{pos}/{}  ", self.entries.len()));
+                    s.push_str(&format_mtime(mtime, self.local_offset));
+                    s.push(' ');
                     s.push_str(&mode_string(mode));
                     s.push(' ');
                     s.push_str(&human(size));
+                    let ext = extension_label(entry, md.as_ref());
+                    if !ext.is_empty() {
+                        s.push(' ');
+                        s.push_str(&ext);
+                    }
+                    let (uid, gid) = md
+                        .as_ref()
+                        .map(|m| (m.uid(), m.gid()))
+                        .unwrap_or((entry.uid, entry.gid));
+                    s.push(' ');
+                    s.push_str(&owner_group(uid, gid));
                     s.push_str(" | ");
+                } else {
+                    s.push_str(&format!("{} items | ", self.entries.len()));
                 }
                 s.push_str(&format!(
-                    "{} items | {} selected | sort:{sort}{direction}",
-                    self.entries.len(),
+                    "{} selected | sort:{sort}{direction}",
                     self.selected.len()
                 ));
                 if let Some(query) = self.last_find.as_deref().filter(|q| !q.is_empty()) {
@@ -5335,6 +5433,42 @@ mod tests {
         assert_eq!(mode_string(0o102755), "-rwxr-sr-x");
         assert_eq!(mode_string(0o041777), "drwxrwxrwt");
         assert_eq!(mode_string(0o104644), "-rwSr--r--");
+    }
+
+    #[test]
+    fn format_mtime_uses_supplied_offset() {
+        let epoch = Some(SystemTime::UNIX_EPOCH);
+        assert_eq!(
+            format_mtime(epoch, time::UtcOffset::UTC),
+            "1970-01-01 00:00"
+        );
+        let mst = time::UtcOffset::from_hms(-7, 0, 0).unwrap();
+        assert_eq!(format_mtime(epoch, mst), "1969-12-31 17:00");
+        assert_eq!(format_mtime(None, mst), "-");
+    }
+
+    #[test]
+    fn extension_label_matches_nnn() {
+        let dir = tmp_dir("extlabel");
+        let file = dir.join("a.tar.gz");
+        fs::write(&file, b"x").unwrap();
+        let entry = entry_for(file.clone(), "a.tar.gz".into()).unwrap();
+        let md = fs::symlink_metadata(&file).unwrap();
+        assert_eq!(extension_label(&entry, Some(&md)), ".gz");
+
+        let plain = dir.join("plain.");
+        fs::write(&plain, b"x").unwrap();
+        let entry = entry_for(plain.clone(), "plain.".into()).unwrap();
+        let md = fs::symlink_metadata(&plain).unwrap();
+        assert_eq!(extension_label(&entry, Some(&md)), "");
+
+        let link = dir.join("link.sh");
+        std::os::unix::fs::symlink("a.tar.gz", &link).unwrap();
+        let entry = entry_for(link.clone(), "link.sh".into()).unwrap();
+        let md = fs::symlink_metadata(&link).unwrap();
+        assert_eq!(extension_label(&entry, Some(&md)), "->a.tar.gz");
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

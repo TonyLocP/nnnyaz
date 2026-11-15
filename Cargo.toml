@@ -16,6 +16,7 @@ base64-simd = "0.8"
 twox-hash = { version = "2", default-features = false, features = ["xxhash3_128", "alloc"] }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
+time = { version = "0.3", features = ["formatting", "local-offset"] }
 mlua = { version = "0.12", features = ["lua54", "vendored", "serde"] }
 
 [profile.release]
