@@ -4259,14 +4259,14 @@ impl App {
             Mode::Normal => {
                 let mut s = String::new();
                 if let Some(entry) = self.current() {
-                    // Use lstat for the mode so symlinks show `l` like nnn,
-                    // even though `entry` follows them for size/type.
-                    let mode = entry
-                        .path
-                        .symlink_metadata()
-                        .map(|m| m.mode())
-                        .unwrap_or(entry.mode);
+                    // Use lstat so symlinks show their own `l` mode and link
+                    // size like nnn, even though `entry` follows them.
+                    let md = entry.path.symlink_metadata().ok();
+                    let mode = md.as_ref().map(|m| m.mode()).unwrap_or(entry.mode);
+                    let size = md.as_ref().map(|m| m.len()).unwrap_or(entry.size);
                     s.push_str(&mode_string(mode));
+                    s.push(' ');
+                    s.push_str(&human(size));
                     s.push_str(" | ");
                 }
                 s.push_str(&format!(
