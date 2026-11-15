@@ -182,6 +182,15 @@ are ignored.
 
 Run `~` inside rnn for the built-in key list.
 
+Yazi's action names are accepted too, so most of a Yazi `keymap.toml` can be
+pasted in unchanged. For example: `arrow prev`, `enter`, `leave`,
+`remove --permanently`, `plugin fd`, `plugin zoxide`, `copy dirpath`,
+`copy name_without_ext`, `sort alphabetical --reverse=yes`, `cd ~`,
+`tab_switch 0`, `tab_swap 1`, and `tasks:show`. In the `tasks` and `info`
+contexts, `arrow` moves the task/info cursor.
+
+`Z` jumps to a directory from zoxide's database when `zoxide` is installed.
+
 ### Mouse
 
 Mouse support mirrors Yazi and is controlled by `mgr.mouse_events` (default

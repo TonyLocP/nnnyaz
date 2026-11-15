@@ -2563,6 +2563,42 @@ impl App {
         }
     }
 
+    /// Jump to a directory from zoxide's database using its interactive
+    /// picker (which delegates to fzf when available).
+    fn zoxide_jump(&mut self, term: &mut DefaultTerminal) {
+        let mut cmd = Command::new("zoxide");
+        cmd.args(["query", "--interactive"])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        self.restore_terminal();
+        let out = cmd.output();
+        *term = self.init_terminal();
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                self.status = format!("zoxide: {e}");
+                return;
+            }
+        };
+        if !out.status.success() {
+            if out.status.code() != Some(130) {
+                self.status = format!("zoxide exited with {}", out.status);
+            }
+            return;
+        }
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if path.is_empty() {
+            return;
+        }
+        let path = PathBuf::from(path);
+        if path.is_dir() {
+            self.cd(path, None);
+        } else {
+            self.status = format!("zoxide: not a directory: {}", path.display());
+        }
+    }
+
     /// Put `text` on the system clipboard using the given MIME type.
     fn clipboard_set(&mut self, text: String, mime: &str, ok: String) {
         let mut cmd = if env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -3649,6 +3685,13 @@ impl App {
 
     fn dispatch(&mut self, action: Action, term: &mut DefaultTerminal) -> io::Result<bool> {
         match action {
+            Action::Chain(actions) => {
+                for action in actions {
+                    if self.dispatch(action, term)? {
+                        return Ok(true);
+                    }
+                }
+            }
             Action::Nop => {}
             Action::Quit => {
                 if self.quit_allowed("q") {
@@ -3694,11 +3737,23 @@ impl App {
                 self.mode = Mode::Tasks;
             }
             Action::Info => self.open_info(),
-            Action::Move(n) => self.move_by(n),
+            Action::Move(n) => match self.mode {
+                Mode::Tasks => self.task_move(n),
+                Mode::Info => self.info_move(n),
+                _ => self.move_by(n),
+            },
             Action::HalfPage(n) => self.move_by((self.page / 2) as isize * n as isize),
             Action::Page(n) => self.move_by(self.page as isize * n as isize),
-            Action::Top => self.select_top(),
-            Action::Bottom => self.select_bottom(),
+            Action::Top => match self.mode {
+                Mode::Tasks => self.task_cursor = 0,
+                Mode::Info => self.info_move(isize::MIN / 2),
+                _ => self.select_top(),
+            },
+            Action::Bottom => match self.mode {
+                Mode::Tasks => self.task_cursor = self.tasks.len().saturating_sub(1),
+                Mode::Info => self.info_move(isize::MAX / 2),
+                _ => self.select_bottom(),
+            },
             Action::Parent => self.go_parent(),
             Action::Open => self.open(term),
             Action::OpenWith => self.start_open_with(),
@@ -3724,6 +3779,16 @@ impl App {
                 _ => self.zoom_out(),
             },
             Action::Seek(n) => self.seek_preview(n as isize),
+            Action::Toggle => {
+                self.visual = None;
+                if let Some(e) = self.current() {
+                    let p = e.path.clone();
+                    if !self.selected.remove(&p) {
+                        self.selected.insert(p);
+                    }
+                    self.list_dirty = true;
+                }
+            }
             Action::ToggleSelect => {
                 self.visual = None;
                 if let Some(e) = self.current() {
@@ -3799,6 +3864,7 @@ impl App {
             Action::CancelSearch => self.cancel_search(),
             Action::Shell => self.start_shell(),
             Action::Fzf => self.fzf_jump(term),
+            Action::Zoxide => self.zoxide_jump(term),
             Action::Suspend => self.suspend(term),
             Action::Editor => {
                 if let Some(e) = self.current().cloned().filter(|e| !e.is_dir) {
@@ -4730,6 +4796,7 @@ impl App {
             "n / N       next / previous found",
             "s / S       search fd / rg",
             "z           fzf jump",
+            "Z           zoxide jump",
             "c …         copy path/url/dir/name",
             "m …         linemode size/perms/time",
             "_ / Alt+-   symlink relative / absolute",

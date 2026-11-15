@@ -346,7 +346,7 @@ impl Keymap {
         desc: Option<String>,
         warnings: &mut Vec<String>,
     ) {
-        self.apply_def(ctx, on, run, desc, warnings);
+        self.apply_def(ctx, on, &[run.to_string()], desc, warnings);
     }
 
     fn replace(&mut self, ctx: Context) {
@@ -378,14 +378,14 @@ impl Keymap {
             if let Some(v) = section.get("keymap") {
                 let defs = parse_defs(v, name, warnings);
                 self.replace(ctx);
-                for (on, run, desc) in defs {
-                    self.apply_def(ctx, &on, &run, desc, warnings);
+                for (on, runs, desc) in defs {
+                    self.apply_def(ctx, &on, &runs, desc, warnings);
                 }
             } else {
                 for key in ["prepend_keymap", "append_keymap"] {
                     if let Some(v) = section.get(key) {
-                        for (on, run, desc) in parse_defs(v, name, warnings) {
-                            self.apply_def(ctx, &on, &run, desc, warnings);
+                        for (on, runs, desc) in parse_defs(v, name, warnings) {
+                            self.apply_def(ctx, &on, &runs, desc, warnings);
                         }
                     }
                 }
@@ -402,7 +402,7 @@ impl Keymap {
         &mut self,
         ctx: Context,
         on: &str,
-        run: &str,
+        runs: &[String],
         desc: Option<String>,
         warnings: &mut Vec<String>,
     ) {
@@ -413,21 +413,43 @@ impl Keymap {
                 return;
             }
         };
-        let action = match Action::parse(run) {
-            Ok(action) => action,
-            Err(e) => {
-                warnings.push(format!("keymap.toml: [{}] {e}", ctx.name()));
-                return;
+        let mut actions = Vec::new();
+        for run in runs {
+            match Action::parse(run) {
+                Ok(action) => actions.push(action),
+                Err(e) => {
+                    warnings.push(format!("keymap.toml: [{}] {e}", ctx.name()));
+                    return;
+                }
             }
+        }
+        if actions.is_empty() {
+            return;
+        }
+        let action = if actions.len() == 1 {
+            actions.pop().unwrap()
+        } else {
+            Action::Chain(actions)
         };
         self.node_mut(ctx).insert(&seq, action, desc);
     }
 
     /// Names of custom actions referenced by user bindings.
     pub fn custom_actions(&self) -> Vec<String> {
+        fn collect(action: &Action, out: &mut Vec<String>) {
+            match action {
+                Action::Custom(name) => out.push(name.clone()),
+                Action::Chain(actions) => {
+                    for action in actions {
+                        collect(action, out);
+                    }
+                }
+                _ => {}
+            }
+        }
         fn walk(node: &Node, out: &mut Vec<String>) {
-            if let Some(Action::Custom(name)) = node.action() {
-                out.push(name.clone());
+            if let Some(action) = node.action() {
+                collect(action, out);
             }
             for (_, child) in node.children() {
                 walk(child, out);
@@ -443,11 +465,41 @@ impl Keymap {
     }
 }
 
+/// A Yazi `on` value: either a key sequence string or an array of keys.
+fn parse_on(value: &toml::Value) -> Option<String> {
+    match value {
+        toml::Value::String(on) => Some(on.clone()),
+        toml::Value::Array(items) => {
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items {
+                parts.push(item.as_str()?.to_string());
+            }
+            (!parts.is_empty()).then(|| parts.join(" "))
+        }
+        _ => None,
+    }
+}
+
+/// A Yazi `run` value: either one command string or an array of them.
+fn parse_runs(value: &toml::Value) -> Option<Vec<String>> {
+    match value {
+        toml::Value::String(run) => Some(vec![run.clone()]),
+        toml::Value::Array(items) => {
+            let mut runs = Vec::with_capacity(items.len());
+            for item in items {
+                runs.push(item.as_str()?.to_string());
+            }
+            (!runs.is_empty()).then_some(runs)
+        }
+        _ => None,
+    }
+}
+
 fn parse_defs(
     value: &toml::Value,
     context: &str,
     warnings: &mut Vec<String>,
-) -> Vec<(String, String, Option<String>)> {
+) -> Vec<(String, Vec<String>, Option<String>)> {
     let mut out = Vec::new();
     match value {
         toml::Value::Array(items) => {
@@ -459,9 +511,9 @@ fn parse_defs(
                     ));
                     continue;
                 };
-                let on = table.get("on").and_then(|v| v.as_str());
-                let run = table.get("run").and_then(|v| v.as_str());
-                let (Some(on), Some(run)) = (on, run) else {
+                let on = table.get("on").and_then(parse_on);
+                let runs = table.get("run").and_then(parse_runs);
+                let (Some(on), Some(runs)) = (on, runs) else {
                     warnings.push(format!(
                         "keymap.toml: [{context}] binding {} needs 'on' and 'run'",
                         i + 1
@@ -470,7 +522,7 @@ fn parse_defs(
                 };
                 out.push((
                     on.to_string(),
-                    run.to_string(),
+                    runs,
                     table
                         .get("desc")
                         .and_then(|v| v.as_str())
@@ -482,18 +534,18 @@ fn parse_defs(
             for (on, spec) in map {
                 match spec {
                     toml::Value::String(run) => {
-                        out.push((on.clone(), run.clone(), None));
+                        out.push((on.clone(), vec![run.clone()], None));
                     }
                     toml::Value::Table(table) => {
-                        let Some(run) = table.get("run").and_then(|v| v.as_str()) else {
+                        let Some(runs) = table.get("run").and_then(parse_runs) else {
                             warnings.push(format!(
-                                "keymap.toml: [{context}] '{on}' needs a 'run' string"
+                                "keymap.toml: [{context}] '{on}' needs a 'run' string or array"
                             ));
                             continue;
                         };
                         out.push((
                             on.clone(),
-                            run.to_string(),
+                            runs,
                             table
                                 .get("desc")
                                 .and_then(|v| v.as_str())
@@ -523,6 +575,7 @@ impl Default for Keymap {
         use Context::*;
 
         let mgr: &[(&str, &str, Option<&str>)] = &[
+            ("<C-[>", "escape", None),
             ("<C-c>", "quit_or_close", None),
             ("<C-d>", "half_page 1", None),
             ("<C-u>", "half_page -1", None),
@@ -605,6 +658,7 @@ impl Default for Keymap {
             ("{", "swap_tab -1", None),
             ("}", "swap_tab 1", None),
             ("z", "fzf", None),
+            ("Z", "zoxide", Some("jump with zoxide")),
             (";", "shell", None),
             (":", "shell", None),
             ("+", "zoom in", None),
@@ -768,6 +822,10 @@ mod tests {
             km.mgr.walk(&parse_seq("Q").unwrap()).unwrap().action(),
             Some(&Action::QuitCwd)
         );
+        assert_eq!(
+            km.mgr.walk(&parse_seq("Z").unwrap()).unwrap().action(),
+            Some(&Action::Zoxide)
+        );
         assert!(km
             .mgr
             .walk(&parse_seq("g").unwrap())
@@ -804,6 +862,40 @@ mod tests {
             Some(&Action::Quit)
         );
         assert!(km.mgr.walk(&parse_seq("d").unwrap()).is_none());
+    }
+
+    #[test]
+    fn keymap_accepts_yazi_action_arrays() {
+        let mut km = Keymap::default();
+        let mut warnings = Vec::new();
+        let doc: toml::Value = toml::from_str(
+            r#"
+            [mgr]
+            prepend_keymap = [
+              { on = "<Space>", run = [ "toggle", "arrow 1" ] },
+              { on = [ "g", "g" ], run = "arrow top" },
+              { on = "X", run = [ "remove --permanently" ] },
+            ]
+            "#,
+        )
+        .unwrap();
+        km.apply(&doc, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            km.mgr
+                .walk(&parse_seq("<Space>").unwrap())
+                .unwrap()
+                .action(),
+            Some(&Action::Chain(vec![Action::Toggle, Action::Move(1)]))
+        );
+        assert_eq!(
+            km.mgr.walk(&parse_seq("g g").unwrap()).unwrap().action(),
+            Some(&Action::Top)
+        );
+        assert_eq!(
+            km.mgr.walk(&parse_seq("X").unwrap()).unwrap().action(),
+            Some(&Action::Delete)
+        );
     }
 
     #[test]
