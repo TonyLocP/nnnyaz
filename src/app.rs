@@ -310,9 +310,9 @@ fn rename_stem_end(name: &str) -> usize {
 /// Prompt editing hints for rename, longest first. `draw_prompt_status` picks
 /// the longest one that still leaves room for the filename.
 const RENAME_HINTS: [&str; 4] = [
-    "←→/Home/End move · ⇧ select · ⌫/Del edit · ^A all · ^U/^K kill · ^W word · Enter save · Esc cancel",
-    "←→/Home/End move · ⇧ select · ⌫/Del edit · ^A all · Enter save · Esc cancel",
-    "←→ move · ⇧ select · Enter save · Esc cancel",
+    "^H/^L move · ⇧ select · ⌫/Del edit · ^A/^E all/end · ^U/^K kill · ^W word · Enter save · Esc cancel",
+    "^H/^L move · ⇧ select · ⌫/Del edit · ^A/^E all/end · Enter save · Esc cancel",
+    "^H/^L move · ⇧ select · Enter save · Esc cancel",
     "Enter save · Esc cancel",
 ];
 
@@ -4108,6 +4108,8 @@ impl App {
                     KeyCode::End => self.input.move_end(),
                     KeyCode::Char('a') if ctrl => self.input.select_all(),
                     KeyCode::Char('e') if ctrl => self.input.move_end(),
+                    KeyCode::Char('h') if ctrl => self.input.move_left(),
+                    KeyCode::Char('l') if ctrl => self.input.move_right(),
                     KeyCode::Char('u') if ctrl => self.input.kill_to_start(),
                     KeyCode::Char('k') if ctrl => self.input.kill_to_end(),
                     KeyCode::Char('w') if ctrl => self.input.delete_word(),
@@ -5315,7 +5317,7 @@ impl App {
         let hint = if matches!(p, Prompt::Rename | Prompt::TabRename) {
             RENAME_HINTS
                 .into_iter()
-                .find(|hint| Span::raw(*hint).width() + 12 <= avail)
+                .find(|hint| Span::raw(*hint).width() + 16 <= avail)
         } else {
             None
         };

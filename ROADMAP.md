@@ -21,11 +21,11 @@ are candidates, roughly in priority order.
       documented; the stale “zoxide is not implemented” note is gone.
 - [x] **Rename cursor UX** — the rename prompt starts with the stem selected
       and the cursor before the extension, like nnn/Yazi. Dotfiles select the
-      whole name. Prompts now have a real editing buffer: arrows, Home/End,
-      Shift-selection, Backspace/Delete, and Ctrl+A/E/U/K/W. The selection is
-      highlighted and the terminal cursor follows the caret. A dim hint on the
-      right of the status line lists the rename binds, shortening itself to fit
-      narrow terminals.
+      whole name. Prompts now have a real editing buffer: arrows, Ctrl+H/L,
+      Home/End, Shift-selection, Backspace/Delete, and Ctrl+A/E/U/K/W. The
+      selection is highlighted and the terminal cursor follows the caret. A dim
+      hint on the right of the status line lists the rename binds, shortening
+      itself to fit narrow terminals.
 
 ## Next
 
