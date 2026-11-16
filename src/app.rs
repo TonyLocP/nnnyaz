@@ -2455,6 +2455,16 @@ impl App {
     }
 
     fn open_external(&mut self, path: &Path) {
+        // Browser-associated files (PDFs, XML, …) should follow the browser the
+        // user chose as the system default, not whatever browser owns the MIME
+        // type. A user-set OPENER is an explicit override, so leave it alone.
+        if env::var_os("OPENER").is_none() {
+            if let Some((browser, uri)) = openwith::browser_redirect(path) {
+                if openwith::launch_desktop(&browser, &uri) {
+                    return;
+                }
+            }
+        }
         let opener = env::var("OPENER").unwrap_or_else(|_| {
             if cfg!(target_os = "macos") {
                 "open"
@@ -2584,6 +2594,10 @@ impl App {
         }
         if op.command.starts_with("rnn:trash-empty") {
             self.start_delete(DeleteMode::EmptyTrash);
+            return;
+        }
+        if op.command == "rnn:open" {
+            self.open_external(&state.path);
             return;
         }
         let cmd = op.command_for(&state.path);

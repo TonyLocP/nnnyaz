@@ -7,8 +7,10 @@
 
 use std::{
     collections::HashMap,
+    env,
+    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 /// One entry in the open-with menu.
@@ -81,7 +83,7 @@ fn fallback() -> Vec<Opener> {
         Opener {
             name: "open".into(),
             desc: Some("system default".into()),
-            command: format!("{} %s1", default_opener()),
+            command: "rnn:open".into(),
             block: false,
         },
         Opener {
@@ -110,7 +112,7 @@ fn builtin_openers() -> HashMap<String, Opener> {
         Opener {
             name: "open".into(),
             desc: Some("system default".into()),
-            command: format!("{} %s1", default_opener()),
+            command: "rnn:open".into(),
             block: false,
         },
     );
@@ -335,6 +337,216 @@ pub fn file_mime(path: &Path) -> Option<String> {
     None
 }
 
+/// The desktop file id of the current default web browser, e.g. `zen.desktop`.
+///
+/// `xdg-settings` is authoritative, but it can be unset; fall back to the
+/// `http(s)` scheme handlers the way `xdg-settings` itself does.
+pub fn default_browser() -> Option<String> {
+    let probes: [(&str, &[&str]); 3] = [
+        ("xdg-settings", &["get", "default-web-browser"]),
+        ("xdg-mime", &["query", "default", "x-scheme-handler/https"]),
+        ("xdg-mime", &["query", "default", "x-scheme-handler/http"]),
+    ];
+    for (prog, args) in probes {
+        if let Some(id) = run_query(prog, args).and_then(|id| normalize_desktop_id(&id)) {
+            // The shim below already opens the default browser; don't recurse.
+            if id != BROWSER_SHIM {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// Desktop file id of the registered handler for `mime`, e.g.
+/// `brave-browser.desktop` for `application/pdf`.
+pub fn default_handler(mime: &str) -> Option<String> {
+    run_query("xdg-mime", &["query", "default", mime])
+        .or_else(|| gio_default(mime))
+        .and_then(|id| normalize_desktop_id(&id))
+}
+
+/// If `path` would open in a web browser that is not the current default
+/// browser, return the default browser's desktop id and a `file://` URI.
+///
+/// This makes PDFs and other browser-associated formats follow the browser the
+/// user picked with `xdg-settings`, instead of whatever browser the MIME
+/// database happens to name. Explicit `OPENER` values bypass this entirely.
+pub fn browser_redirect(path: &Path) -> Option<(String, String)> {
+    let mime = file_mime(path)?;
+    let handler = default_handler(&mime)?;
+    if !desktop_is_browser(&handler) {
+        return None;
+    }
+    let browser = default_browser()?;
+    if browser == handler {
+        return None;
+    }
+    Some((browser, file_uri(path)))
+}
+
+/// The `file://` URI for `path`, percent-encoding everything outside the
+/// unreserved set so spaces and `#`/`?` survive the trip through `gtk-launch`.
+pub fn file_uri(path: &Path) -> String {
+    let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut uri = String::from("file://");
+    for &byte in absolute.as_os_str().as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                uri.push(byte as char);
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri
+}
+
+/// Launch `uri` with the desktop application `id` (e.g. `zen.desktop`).
+///
+/// Prefers `gtk-launch`, which takes desktop ids directly, and falls back to
+/// `gio launch` with the resolved desktop file.
+pub fn launch_desktop(id: &str, uri: &str) -> bool {
+    if spawn_detached(Command::new("gtk-launch").arg(id).arg(uri)) {
+        return true;
+    }
+    let Some(path) = desktop_file(id) else {
+        return false;
+    };
+    spawn_detached(Command::new("gio").arg("launch").arg(path).arg(uri))
+}
+
+fn spawn_detached(cmd: &mut Command) -> bool {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
+/// The wrapper desktop file that already routes to the default browser.
+const BROWSER_SHIM: &str = "open-in-default-browser.desktop";
+
+/// Run a query command and return its first non-empty output line.
+fn run_query(prog: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(prog).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    Some(line.to_string())
+}
+
+/// Parse `gio mime` output:
+/// `Default application for “application/pdf”: brave-browser.desktop`.
+fn gio_default(mime: &str) -> Option<String> {
+    let out = Command::new("gio").args(["mime", mime]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().next()?.trim();
+    let (_, id) = line.rsplit_once(':')?;
+    let id = id.trim();
+    id.ends_with(".desktop").then(|| id.to_string())
+}
+
+/// Accept `zen.desktop` as well as a bare `zen` when that desktop file exists.
+fn normalize_desktop_id(id: &str) -> Option<String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    if id.ends_with(".desktop") || id.contains('/') {
+        return Some(id.to_string());
+    }
+    let with_ext = format!("{id}.desktop");
+    desktop_file(&with_ext).is_some().then_some(with_ext)
+}
+
+/// Locate a desktop file by id in the XDG application directories.
+fn desktop_file(id: &str) -> Option<PathBuf> {
+    let path = Path::new(id);
+    if path.is_absolute() {
+        return path.is_file().then(|| path.to_path_buf());
+    }
+
+    let mut dirs = Vec::new();
+    match env::var_os("XDG_DATA_HOME") {
+        Some(dir) => dirs.push(PathBuf::from(dir).join("applications")),
+        None => {
+            if let Some(home) = env::var_os("HOME") {
+                dirs.push(PathBuf::from(home).join(".local/share/applications"));
+            }
+        }
+    }
+    let data_dirs = env::var_os("XDG_DATA_DIRS")
+        .map(|v| v.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    for dir in data_dirs.split(':').filter(|d| !d.is_empty()) {
+        dirs.push(PathBuf::from(dir).join("applications"));
+    }
+    // Flatpak exports are not always listed in XDG_DATA_DIRS.
+    dirs.push(PathBuf::from("/var/lib/flatpak/exports/share/applications"));
+    if let Some(home) = env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".local/share/flatpak/exports/share/applications"));
+    }
+
+    dirs.into_iter()
+        .map(|dir| dir.join(id))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Whether the desktop file declares itself a web browser.
+fn desktop_is_browser(id: &str) -> bool {
+    let Some(path) = desktop_file(id) else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let (categories, mime_types) = desktop_entry_keys(&text);
+    categories.iter().any(|c| c == "WebBrowser")
+        || mime_types
+            .iter()
+            .any(|m| m == "x-scheme-handler/http" || m == "x-scheme-handler/https")
+}
+
+/// Read the `Categories=` and `MimeType=` values from the `[Desktop Entry]`
+/// group. Keys in action groups are ignored.
+fn desktop_entry_keys(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut categories = Vec::new();
+    let mut mime_types = Vec::new();
+    let mut in_main = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_main = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_main {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let values = || {
+            value
+                .split(';')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        match key.trim() {
+            "Categories" => categories = values(),
+            "MimeType" => mime_types = values(),
+            _ => {}
+        }
+    }
+    (categories, mime_types)
+}
+
 fn mime_matches(pattern: &str, mime: &str) -> bool {
     expand_braces(pattern).iter().any(|p| glob_match(p, mime))
 }
@@ -453,5 +665,37 @@ mod tests {
         assert_eq!(shell_quote("plain-name_1.txt"), "plain-name_1.txt");
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn parses_desktop_entry_categories() {
+        let text = "\
+[Desktop Entry]
+Name=Zen
+Categories=Network;WebBrowser;
+MimeType=text/html;x-scheme-handler/https;
+
+[Desktop Action new]
+Categories=Other;
+MimeType=application/pdf;
+";
+        let (categories, mime_types) = desktop_entry_keys(text);
+        assert_eq!(categories, vec!["Network", "WebBrowser"]);
+        assert_eq!(mime_types, vec!["text/html", "x-scheme-handler/https"]);
+    }
+
+    #[test]
+    fn file_uris_encode_special_characters() {
+        assert_eq!(
+            file_uri(Path::new("/tmp/a b#c?.pdf")),
+            "file:///tmp/a%20b%23c%3F.pdf"
+        );
+    }
+
+    #[test]
+    fn builtin_open_uses_the_internal_opener() {
+        let openers = builtin_openers();
+        assert_eq!(openers["open"].command, "rnn:open");
+        assert_eq!(fallback()[0].command, "rnn:open");
     }
 }

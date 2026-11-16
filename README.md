@@ -164,6 +164,12 @@ rules = [
 If `[opener]` or `[open]` is omitted, rnn falls back to your Yazi config and
 then to built-in defaults.
 
+`Enter` (and the built-in `open` opener) uses the system handler for the file's
+MIME type, but browser-associated files follow the browser you selected with
+`xdg-settings set default-web-browser`. For example, if PDFs are registered to
+Brave while Zen is your default browser, rnn opens the PDF in Zen. Set `OPENER`
+to override this and use your own launcher for everything.
+
 ### `keymap.toml`
 
 Bindings map a key sequence to an action command. Contexts are `mgr`, `tasks`,

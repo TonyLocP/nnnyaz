@@ -15,6 +15,8 @@ are candidates, roughly in priority order.
       stdout.
 - [x] Yazi default keymap loads without warnings; tabs, trash, tasks, zoxide,
       and the open-with menu.
+- [x] Browser-associated files (PDF, XML, …) open in the system default
+      browser instead of whichever browser owns the MIME type.
 
 ## Next
 
