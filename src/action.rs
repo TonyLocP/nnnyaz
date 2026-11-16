@@ -66,6 +66,7 @@ pub enum Action {
     Search(SearchKind),
     CancelSearch,
     Shell,
+    ShellBlock,
     Fzf,
     Zoxide,
     Suspend,
@@ -229,6 +230,7 @@ impl Action {
             Action::Search(_) => "search",
             Action::CancelSearch => "cancel_search",
             Action::Shell => "shell",
+            Action::ShellBlock => "shell_block",
             Action::Fzf => "fzf",
             Action::Zoxide => "zoxide",
             Action::Suspend => "suspend",
@@ -406,7 +408,13 @@ impl Action {
                 Some(other) => return Err(format!("plugin: unsupported plugin '{other}'")),
                 None => return Err("plugin: missing plugin name".into()),
             },
-            "shell" => Action::Shell,
+            "shell" => {
+                if args.contains(&"--block") {
+                    Action::ShellBlock
+                } else {
+                    Action::Shell
+                }
+            }
             "cancel_search" => Action::CancelSearch,
             "fzf" => Action::Fzf,
             "zoxide" => Action::Zoxide,
@@ -541,6 +549,14 @@ mod tests {
         assert_eq!(parse("plugin zoxide").unwrap(), Action::Zoxide);
         assert_eq!(parse("plugin trash").unwrap(), Action::GotoTrash);
         assert!(parse("plugin unknown").is_err());
+
+        assert_eq!(parse("shell").unwrap(), Action::Shell);
+        assert_eq!(parse("shell --interactive").unwrap(), Action::Shell);
+        assert_eq!(
+            parse("shell --block --interactive").unwrap(),
+            Action::ShellBlock
+        );
+        assert_eq!(Action::ShellBlock.name(), "shell_block");
 
         assert_eq!(
             parse("copy dirpath").unwrap(),

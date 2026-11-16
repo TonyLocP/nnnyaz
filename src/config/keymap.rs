@@ -660,7 +660,7 @@ impl Default for Keymap {
             ("z", "fzf", None),
             ("Z", "zoxide", Some("jump with zoxide")),
             (";", "shell", None),
-            (":", "shell", None),
+            (":", "shell --block", Some("run shell command (blocking)")),
             ("+", "zoom in", None),
             ("<A-->", "link absolute", None),
             ("-", "zoom out", None),

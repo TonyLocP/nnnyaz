@@ -260,6 +260,22 @@ shortens itself on narrow terminals. rnn requests a keyboard protocol that
 distinguishes modified keys: tmux's modifyOtherKeys inside tmux, kitty's
 protocol elsewhere. Terminals without support fall back to the legacy encoding.
 
+### Bulk rename
+
+With two or more entries selected, `r` opens their names — one per line — in
+`$VISUAL`/`$EDITOR`. Save and quit to apply the whole batch. Names can be
+swapped (`a`/`b`), because rnn moves them through temporary names. If the line
+count changes, a name is empty, duplicated, or contains `/`, or a destination
+already exists outside the batch, rnn refuses the rename and leaves everything
+untouched.
+
+### Shell commands
+
+`;` opens a command prompt and runs the command in the background as a task, so
+the file manager stays usable. Open the task manager (`w`), then `Enter` on the
+task to inspect captured stdout/stderr. `:` blocks and hands the terminal to the
+command, which is what interactive programs need.
+
 ### `theme.toml`
 
 Themes use rnn's semantic roles rather than Yazi's theme schema. A role can be

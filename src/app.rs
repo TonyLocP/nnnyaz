@@ -696,6 +696,7 @@ pub struct App {
     history: Vec<PathBuf>,
     history_pos: usize,
     input: Input,
+    shell_block: bool,
     status: String,
     focus: Option<String>,
     page: usize,
@@ -773,6 +774,109 @@ fn unique(mut p: PathBuf) -> PathBuf {
         p = PathBuf::from(s);
     }
     p
+}
+
+/// Validate the names typed into a bulk-rename buffer and return the
+/// source→destination pairs that actually change.
+fn bulk_rename_plan(
+    sources: &[PathBuf],
+    names: &[String],
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    if sources.len() != names.len() {
+        return Err(format!(
+            "expected {} name(s), found {} — nothing was renamed",
+            sources.len(),
+            names.len()
+        ));
+    }
+    let mut destinations = Vec::with_capacity(names.len());
+    let mut seen = BTreeSet::new();
+    for (i, name) in names.iter().enumerate() {
+        if name.is_empty() {
+            return Err(format!("line {}: empty name", i + 1));
+        }
+        if name == "." || name == ".." || name.contains('/') || name.contains('\0') {
+            return Err(format!("line {}: invalid name '{name}'", i + 1));
+        }
+        let Some(parent) = sources[i].parent() else {
+            return Err(format!("line {}: cannot find the parent directory", i + 1));
+        };
+        let dst = parent.join(name);
+        if !seen.insert(dst.clone()) {
+            return Err(format!("line {}: duplicate name '{name}'", i + 1));
+        }
+        destinations.push(dst);
+    }
+    let source_set: BTreeSet<&PathBuf> = sources.iter().collect();
+    for (i, dst) in destinations.iter().enumerate() {
+        if dst != &sources[i] && !source_set.contains(dst) && fs::symlink_metadata(dst).is_ok() {
+            return Err(format!("'{}' already exists", names[i]));
+        }
+    }
+    Ok(sources
+        .iter()
+        .cloned()
+        .zip(destinations)
+        .filter(|(src, dst)| src != dst)
+        .collect())
+}
+
+/// Apply a bulk rename through temporary names, so swaps like `a ↔ b` work.
+/// If a later step fails, restore the untouched temporary files where their
+/// original names are free instead of overwriting anything.
+fn apply_bulk_rename(plan: &[(PathBuf, PathBuf)]) -> io::Result<()> {
+    let pid = std::process::id();
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(plan.len());
+    for (i, (src, _)) in plan.iter().enumerate() {
+        let Some(parent) = src.parent() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "source has no parent directory",
+            ));
+        };
+        let mut suffix = 0usize;
+        let mut temp = parent.join(format!(".rnn-rename-{pid}-{i}"));
+        while fs::symlink_metadata(&temp).is_ok() {
+            suffix += 1;
+            temp = parent.join(format!(".rnn-rename-{pid}-{i}-{suffix}"));
+        }
+        if let Err(e) = fs::rename(src, &temp) {
+            restore_staged(&staged);
+            return Err(e);
+        }
+        staged.push((temp, src.clone()));
+    }
+    for (i, (temp, _)) in staged.iter().enumerate() {
+        if let Err(e) = fs::rename(temp, &plan[i].1) {
+            let leftovers = restore_staged(&staged[i..]);
+            if leftovers.is_empty() {
+                return Err(e);
+            }
+            return Err(io::Error::new(
+                e.kind(),
+                format!(
+                    "{e}; left {} temporary file(s), starting with {}",
+                    leftovers.len(),
+                    leftovers[0].display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn restore_staged(staged: &[(PathBuf, PathBuf)]) -> Vec<PathBuf> {
+    let mut leftovers = Vec::new();
+    for (temp, original) in staged.iter().rev() {
+        if fs::symlink_metadata(temp).is_err() {
+            continue;
+        }
+        if fs::symlink_metadata(original).is_err() && fs::rename(temp, original).is_ok() {
+            continue;
+        }
+        leftovers.push(temp.clone());
+    }
+    leftovers
 }
 
 fn extension(name: &str) -> String {
@@ -1409,6 +1513,7 @@ enum TaskKind {
     EmptyTrash,
     Link,
     Hardlink,
+    Shell,
 }
 
 impl TaskKind {
@@ -1422,6 +1527,7 @@ impl TaskKind {
             TaskKind::EmptyTrash => "empty trash",
             TaskKind::Link => "symlink",
             TaskKind::Hardlink => "hardlink",
+            TaskKind::Shell => "shell",
         }
     }
 }
@@ -1451,6 +1557,7 @@ struct TaskProgress {
     done: usize,
     current: String,
     errors: Vec<String>,
+    output: Vec<String>,
 }
 
 struct TaskState {
@@ -1494,6 +1601,10 @@ enum TaskOp {
     Hardlink {
         pairs: Vec<(PathBuf, PathBuf)>,
     },
+    Shell {
+        command: String,
+        cwd: PathBuf,
+    },
 }
 
 fn task_lock(state: &Arc<Mutex<TaskState>>) -> Option<std::sync::MutexGuard<'_, TaskState>> {
@@ -1522,6 +1633,17 @@ fn task_error(state: &Arc<Mutex<TaskState>>, message: String) {
     if let Some(mut s) = task_lock(state) {
         if s.progress.errors.len() < 50 {
             s.progress.errors.push(message);
+        }
+    }
+}
+
+fn task_output(state: &Arc<Mutex<TaskState>>, text: &str) {
+    if let Some(mut s) = task_lock(state) {
+        for line in text.lines() {
+            if s.progress.output.len() >= 200 {
+                break;
+            }
+            s.progress.output.push(line.to_string());
         }
     }
 }
@@ -1643,6 +1765,7 @@ fn run_task(op: TaskOp, state: &Arc<Mutex<TaskState>>, cancel: &Arc<AtomicBool>)
         TaskOp::EmptyTrash => run_empty_trash(state, cancel),
         TaskOp::Link { pairs, relative } => run_link(pairs, relative, state, cancel),
         TaskOp::Hardlink { pairs } => run_hardlink(pairs, state, cancel),
+        TaskOp::Shell { command, cwd } => run_shell_task(command, cwd, state, cancel),
     };
     if let Some(mut s) = task_lock(state) {
         s.status = if task_cancelled(cancel) {
@@ -1923,6 +2046,45 @@ fn run_hardlink(
     first_err.map_or(Ok(()), Err)
 }
 
+/// Run a background shell command (`;`), capturing its output for the task
+/// inspector. `:` uses the blocking path instead and hands over the terminal.
+fn run_shell_task(
+    command: String,
+    cwd: PathBuf,
+    state: &Arc<Mutex<TaskState>>,
+    cancel: &Arc<AtomicBool>,
+) -> io::Result<()> {
+    if task_cancelled(cancel) {
+        return Err(cancelled_error());
+    }
+    task_current(state, &cwd);
+    task_set_total(state, 1);
+    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let output = Command::new(&shell)
+        .arg("-c")
+        .arg(&command)
+        .current_dir(&cwd)
+        .stdin(Stdio::null())
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stdout.trim().is_empty() {
+        task_output(state, stdout.trim_end());
+    }
+    if !stderr.trim().is_empty() {
+        task_output(state, stderr.trim_end());
+    }
+    task_add(state, 1);
+    if task_cancelled(cancel) {
+        return Err(cancelled_error());
+    }
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("exited with {}", output.status)))
+    }
+}
+
 // ───────────────────────── app ─────────────────────────
 
 /// Command-line options. rnn has no argument-parser dependency, so this stays
@@ -2066,6 +2228,7 @@ impl App {
             history: vec![cwd],
             history_pos: 0,
             input: Input::default(),
+            shell_block: false,
             status,
             focus: None,
             page: 10,
@@ -2804,6 +2967,69 @@ impl App {
         self.reload();
         if n > 0 {
             self.status = format!("created {n} item(s)");
+        }
+    }
+
+    /// `r` with several entries selected: edit their names in `$EDITOR` and
+    /// apply the changes as one batch (Yazi's bulk rename).
+    fn bulk_rename(&mut self, term: &mut DefaultTerminal) {
+        let sources = self.targets();
+        if sources.len() < 2 {
+            return;
+        }
+        let editor = env::var("VISUAL")
+            .or_else(|_| env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".into());
+        let tmp = env::temp_dir().join(format!("rnn-bulk-rename-{}.txt", std::process::id()));
+        let mut content = String::new();
+        for src in &sources {
+            let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
+                self.status = "bulk rename: name is not valid UTF-8".into();
+                return;
+            };
+            content.push_str(name);
+            content.push('\n');
+        }
+        if let Err(e) = fs::write(&tmp, content) {
+            self.status = format!("bulk rename: {e}");
+            return;
+        }
+        self.external(term, &editor, &tmp);
+        let content = match fs::read_to_string(&tmp) {
+            Ok(content) => content,
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                self.status = format!("bulk rename: {e}");
+                return;
+            }
+        };
+        let _ = fs::remove_file(&tmp);
+
+        let names: Vec<String> = content.lines().map(ToString::to_string).collect();
+        let plan = match bulk_rename_plan(&sources, &names) {
+            Ok(plan) => plan,
+            Err(e) => {
+                self.status = format!("bulk rename: {e}");
+                return;
+            }
+        };
+        if plan.is_empty() {
+            self.status = "bulk rename: no changes".into();
+            return;
+        }
+        match apply_bulk_rename(&plan) {
+            Ok(()) => {
+                let n = plan.len();
+                self.focus = plan[0]
+                    .1
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(ToString::to_string);
+                self.selected.clear();
+                self.reload();
+                self.status = format!("renamed {n} item(s)");
+            }
+            Err(e) => self.status = format!("bulk rename: {e}"),
         }
     }
 
@@ -3740,6 +3966,12 @@ impl App {
                 lines.push(InfoLine::Text(format!("  {error}")));
             }
         }
+        if !progress.output.is_empty() {
+            lines.push(InfoLine::Section("Output"));
+            for line in &progress.output {
+                lines.push(InfoLine::Text(format!("  {line}")));
+            }
+        }
         self.info = Some(Info { lines });
         self.info_cursor = 0;
         self.info_scroll = 0;
@@ -3782,17 +4014,30 @@ impl App {
         });
     }
 
-    fn start_shell(&mut self) {
+    fn start_shell(&mut self, block: bool) {
         self.input.clear();
         self.completions.clear();
+        self.shell_block = block;
         self.mode = Mode::Prompt(Prompt::Shell);
     }
 
-    /// Run a shell command in the current directory, temporarily handing the
-    /// terminal over to it (Yazi's `;` / `:`).
+    /// Run a shell command in the current directory. Yazi's `;` runs it in the
+    /// background as a task; `:` (`--block`) hands the terminal over to it.
     fn run_shell(&mut self, term: &mut DefaultTerminal) {
         let cmd = self.input.as_str().trim().to_string();
         if cmd.is_empty() {
+            return;
+        }
+        if !self.shell_block {
+            self.spawn_task(
+                TaskKind::Shell,
+                format!("Shell: {cmd}"),
+                TaskOp::Shell {
+                    command: cmd.clone(),
+                    cwd: self.cwd.clone(),
+                },
+            );
+            self.status = format!("shell: {cmd}…");
             return;
         }
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
@@ -4477,7 +4722,9 @@ impl App {
             }
             Action::Rename => {
                 self.visual = None;
-                if let Some(e) = self.current() {
+                if self.targets().len() > 1 {
+                    self.bulk_rename(term);
+                } else if let Some(e) = self.current() {
                     self.input = Input::rename(&e.name);
                     self.mode = Mode::Prompt(Prompt::Rename);
                 }
@@ -4489,7 +4736,8 @@ impl App {
             Action::FindNext(forward) => self.find_next(forward),
             Action::Search(kind) => self.start_search(kind),
             Action::CancelSearch => self.cancel_search(),
-            Action::Shell => self.start_shell(),
+            Action::Shell => self.start_shell(false),
+            Action::ShellBlock => self.start_shell(true),
             Action::Fzf => self.fzf_jump(term),
             Action::Zoxide => self.zoxide_jump(term),
             Action::Suspend => self.suspend(term),
@@ -5526,7 +5774,7 @@ impl App {
             "w           task manager",
             "Ctrl+n      create",
             "Ctrl+y/p    clipboard copy / paste",
-            "; / :       run shell command",
+            "; / :       shell background / block",
             "Ctrl+z      suspend",
             "t t / t n   new tab / at home",
             "t r / t c   rename / close tab",
@@ -6080,6 +6328,81 @@ mod tests {
         let input = Input::rename(".bashrc");
         assert_eq!(input.cursor, 7);
         assert_eq!(input.selection(), Some(0..7));
+    }
+
+    #[test]
+    fn bulk_rename_plan_validates_names() {
+        let dir = tmp_dir("bulk-plan");
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        let c = dir.join("c.txt");
+        for path in [&a, &b, &c] {
+            fs::write(path, b"x").unwrap();
+        }
+        let sources = vec![a.clone(), b.clone()];
+
+        assert!(bulk_rename_plan(&sources, &["a.txt".into()]).is_err());
+        assert!(bulk_rename_plan(&sources, &["".into(), "b.txt".into()]).is_err());
+        assert!(bulk_rename_plan(&sources, &["x".into(), "x".into()]).is_err());
+        assert!(bulk_rename_plan(&sources, &["sub/x".into(), "b.txt".into()]).is_err());
+        assert!(bulk_rename_plan(&sources, &["c.txt".into(), "b.txt".into()]).is_err());
+        assert!(
+            bulk_rename_plan(&sources, &["a.txt".into(), "b.txt".into()])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            bulk_rename_plan(&sources, &["b.txt".into(), "a.txt".into()])
+                .unwrap()
+                .len(),
+            2
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bulk_rename_applies_swaps_through_temporaries() {
+        let dir = tmp_dir("bulk-apply");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&a, b"A").unwrap();
+        fs::write(&b, b"B").unwrap();
+        let plan = bulk_rename_plan(&[a.clone(), b.clone()], &["b".into(), "a".into()]).unwrap();
+        apply_bulk_rename(&plan).unwrap();
+
+        assert_eq!(fs::read_to_string(&a).unwrap(), "B");
+        assert_eq!(fs::read_to_string(&b).unwrap(), "A");
+        assert!(fs::read_dir(&dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rnn-rename-")
+        }));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn background_shell_task_captures_output_and_failure() {
+        let dir = tmp_dir("shell-task");
+        let state = Arc::new(Mutex::new(TaskState {
+            status: TaskStatus::Running,
+            progress: TaskProgress::default(),
+        }));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let result = run_shell_task(
+            "printf 'hello\\n' && printf 'oops\\n' >&2 && exit 3".into(),
+            dir.clone(),
+            &state,
+            &cancel,
+        );
+        assert!(result.is_err());
+        let state = state.lock().unwrap();
+        assert!(state.progress.output.iter().any(|line| line == "hello"));
+        assert!(state.progress.output.iter().any(|line| line == "oops"));
+        assert_eq!(state.progress.done, 1);
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

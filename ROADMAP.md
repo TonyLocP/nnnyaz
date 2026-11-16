@@ -19,6 +19,13 @@ are candidates, roughly in priority order.
       browser instead of whichever browser owns the MIME type.
 - [x] Docs refresh: picker mode, the status line, and browser routing are
       documented; the stale “zoxide is not implemented” note is gone.
+- [x] **Bulk rename** — with multiple entries selected, `r` edits their names
+      in `$EDITOR` and applies the batch. Swaps go through temporary names;
+      mismatched counts, empty/duplicate names, `/`, and collisions outside the
+      batch are refused before anything moves.
+- [x] **Shell parity** — `;` now runs the command in the background as a task
+      (stdout/stderr visible in the task inspector) while `:` keeps Yazi's
+      blocking, terminal-handover behavior.
 - [x] **Rename cursor UX** — the rename prompt starts with the stem selected
       and the cursor before the extension, like nnn/Yazi. Dotfiles select the
       whole name. Prompts now have a real editing buffer: arrows, Ctrl+H/L,
@@ -33,9 +40,9 @@ are candidates, roughly in priority order.
 
 ## Next
 
-- [ ] **Bulk rename** — edit the selected names in `$EDITOR` and apply the
-      changes in one batch.
-- [ ] **Shell parity** — align `:`/`;` blocking semantics with Yazi/nnn.
+- [ ] Review the remaining Yazi/nnn differences after bulk rename and shell
+      parity. Candidates: picker `--chooser-file` edge cases, open-with rules,
+      and previewer coverage.
 
 ## Local setup (outside this repo)
 
