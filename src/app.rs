@@ -307,6 +307,15 @@ fn rename_stem_end(name: &str) -> usize {
     }
 }
 
+/// Prompt editing hints for rename, longest first. `draw_prompt_status` picks
+/// the longest one that still leaves room for the filename.
+const RENAME_HINTS: [&str; 4] = [
+    "←→/Home/End move · ⇧ select · ⌫/Del edit · ^A all · ^U/^K kill · ^W word · Enter save · Esc cancel",
+    "←→/Home/End move · ⇧ select · ⌫/Del edit · ^A all · Enter save · Esc cancel",
+    "←→ move · ⇧ select · Enter save · Esc cancel",
+    "Enter save · Esc cancel",
+];
+
 /// Display width of one character in terminal cells.
 fn char_width(c: char) -> usize {
     Span::raw(c.to_string()).width()
@@ -5303,6 +5312,16 @@ impl App {
             return;
         }
         let avail = area.width as usize - prefix_w;
+        let hint = if matches!(p, Prompt::Rename | Prompt::TabRename) {
+            RENAME_HINTS
+                .into_iter()
+                .find(|hint| Span::raw(*hint).width() + 12 <= avail)
+        } else {
+            None
+        };
+        let hint_w = hint.map_or(0, |hint| Span::raw(hint).width());
+        let hint_gap = usize::from(hint_w > 0) * 2;
+        let avail = avail.saturating_sub(hint_w + hint_gap).max(1);
         let text = self.input.as_str();
         let cursor_col = Span::raw(&text[..self.input.cursor]).width();
         let scroll = cursor_col.saturating_sub(avail.saturating_sub(1));
@@ -5333,6 +5352,15 @@ impl App {
             Paragraph::new(Line::from(spans)).style(self.config.theme.status_info),
             area,
         );
+        if let Some(hint) = hint {
+            let hint_area = Rect::new(
+                area.x + area.width - hint_w as u16,
+                area.y,
+                hint_w as u16,
+                1,
+            );
+            f.render_widget(Paragraph::new(hint).style(self.config.theme.dim), hint_area);
+        }
         let x = area.x + (prefix_w + cursor_col - scroll) as u16;
         f.set_cursor_position((x.min(area.right().saturating_sub(1)), area.y));
     }
