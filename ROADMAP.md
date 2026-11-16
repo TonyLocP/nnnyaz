@@ -22,10 +22,13 @@ are candidates, roughly in priority order.
 - [x] **Rename cursor UX** — the rename prompt starts with the stem selected
       and the cursor before the extension, like nnn/Yazi. Dotfiles select the
       whole name. Prompts now have a real editing buffer: arrows, Ctrl+H/L,
-      Home/End, Shift-selection, Backspace/Delete, and Ctrl+A/E/U/K/W. The
+      Home/End, Ctrl+Shift+H/L and Shift-selection, Backspace/Delete,
+      Ctrl+A/E/U/K/W, and Ctrl+Z undo (typing runs undo as one step). The
       selection is highlighted and the terminal cursor follows the caret. A dim
       hint on the right of the status line lists the rename binds, shortening
-      itself to fit narrow terminals.
+      itself to fit narrow terminals. rnn asks tmux for modifyOtherKeys and
+      other terminals for kitty's keyboard protocol so Ctrl+Shift+letter is
+      distinguishable from Ctrl+letter.
 
 ## Next
 

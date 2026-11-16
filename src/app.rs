@@ -20,7 +20,8 @@ use ratatui::{
     crossterm::{
         event::{
             self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-            KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+            KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+            PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
         },
         execute,
     },
@@ -95,6 +96,11 @@ struct Input {
     cursor: usize,
     /// Selection anchor; the selection runs between this and `cursor`.
     anchor: Option<usize>,
+    /// Previous `(text, cursor, anchor)` states for Ctrl+Z, oldest first.
+    undo: Vec<(String, usize, Option<usize>)>,
+    /// True while the last edit was part of a typing run, so consecutive
+    /// insertions share one undo step instead of one per character.
+    typing: bool,
 }
 
 impl Input {
@@ -104,7 +110,7 @@ impl Input {
         Self {
             text,
             cursor,
-            anchor: None,
+            ..Self::default()
         }
     }
 
@@ -115,6 +121,7 @@ impl Input {
             text: name.to_string(),
             cursor,
             anchor: (cursor > 0).then_some(0),
+            ..Self::default()
         }
     }
 
@@ -126,10 +133,32 @@ impl Input {
         self.text.clear();
         self.cursor = 0;
         self.anchor = None;
+        self.undo.clear();
+        self.typing = false;
     }
 
     fn set(&mut self, text: impl Into<String>) {
         *self = Self::new(text);
+    }
+
+    /// Remember the current state before a change, for Ctrl+Z.
+    fn save(&mut self) {
+        const LIMIT: usize = 100;
+        self.undo
+            .push((self.text.clone(), self.cursor, self.anchor));
+        if self.undo.len() > LIMIT {
+            self.undo.remove(0);
+        }
+    }
+
+    /// Restore the state before the last edit.
+    fn undo(&mut self) {
+        if let Some((text, cursor, anchor)) = self.undo.pop() {
+            self.text = text;
+            self.cursor = cursor;
+            self.anchor = anchor;
+        }
+        self.typing = false;
     }
 
     fn selection(&self) -> Option<Range<usize>> {
@@ -147,28 +176,38 @@ impl Input {
     }
 
     fn insert(&mut self, c: char) {
+        if !self.typing {
+            self.save();
+            self.typing = true;
+        }
         self.replace_selection("");
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
     }
 
     fn backspace(&mut self) {
+        self.typing = false;
         if self.selection().is_some() {
+            self.save();
             self.replace_selection("");
             return;
         }
         if let Some(prev) = self.prev_boundary() {
+            self.save();
             self.text.remove(prev);
             self.cursor = prev;
         }
     }
 
     fn delete(&mut self) {
+        self.typing = false;
         if self.selection().is_some() {
+            self.save();
             self.replace_selection("");
             return;
         }
         if self.cursor < self.text.len() {
+            self.save();
             self.text.remove(self.cursor);
         }
     }
@@ -188,6 +227,7 @@ impl Input {
     }
 
     fn move_left(&mut self) {
+        self.typing = false;
         if let Some(range) = self.selection() {
             self.cursor = range.start;
             self.anchor = None;
@@ -197,6 +237,7 @@ impl Input {
     }
 
     fn move_right(&mut self) {
+        self.typing = false;
         if let Some(range) = self.selection() {
             self.cursor = range.end;
             self.anchor = None;
@@ -206,16 +247,19 @@ impl Input {
     }
 
     fn move_home(&mut self) {
+        self.typing = false;
         self.cursor = 0;
         self.anchor = None;
     }
 
     fn move_end(&mut self) {
+        self.typing = false;
         self.cursor = self.text.len();
         self.anchor = None;
     }
 
     fn select_left(&mut self) {
+        self.typing = false;
         let anchor = *self.anchor.get_or_insert(self.cursor);
         if let Some(prev) = self.prev_boundary() {
             self.cursor = prev;
@@ -226,6 +270,7 @@ impl Input {
     }
 
     fn select_right(&mut self) {
+        self.typing = false;
         let anchor = *self.anchor.get_or_insert(self.cursor);
         if let Some(next) = self.next_boundary() {
             self.cursor = next;
@@ -236,6 +281,7 @@ impl Input {
     }
 
     fn select_home(&mut self) {
+        self.typing = false;
         let anchor = *self.anchor.get_or_insert(self.cursor);
         self.cursor = 0;
         if self.cursor == anchor {
@@ -244,6 +290,7 @@ impl Input {
     }
 
     fn select_end(&mut self) {
+        self.typing = false;
         let anchor = *self.anchor.get_or_insert(self.cursor);
         self.cursor = self.text.len();
         if self.cursor == anchor {
@@ -252,32 +299,45 @@ impl Input {
     }
 
     fn select_all(&mut self) {
+        self.typing = false;
         self.cursor = self.text.len();
         self.anchor = (self.cursor > 0).then_some(0);
     }
 
     /// Delete from the cursor to the start of the line.
     fn kill_to_start(&mut self) {
+        self.typing = false;
         if self.selection().is_some() {
+            self.save();
             self.replace_selection("");
             return;
         }
-        self.text.drain(..self.cursor);
-        self.cursor = 0;
+        if self.cursor > 0 {
+            self.save();
+            self.text.drain(..self.cursor);
+            self.cursor = 0;
+        }
     }
 
     /// Delete from the cursor to the end of the line.
     fn kill_to_end(&mut self) {
+        self.typing = false;
         if self.selection().is_some() {
+            self.save();
             self.replace_selection("");
             return;
         }
-        self.text.truncate(self.cursor);
+        if self.cursor < self.text.len() {
+            self.save();
+            self.text.truncate(self.cursor);
+        }
     }
 
     /// Delete the word before the cursor (Ctrl+W).
     fn delete_word(&mut self) {
+        self.typing = false;
         if self.selection().is_some() {
+            self.save();
             self.replace_selection("");
             return;
         }
@@ -287,9 +347,48 @@ impl Input {
             .skip_while(|(_, c)| c.is_whitespace())
             .find(|(_, c)| c.is_whitespace())
             .map_or(0, |(i, c)| i + c.len_utf8());
-        self.text.drain(start..self.cursor);
-        self.cursor = start;
+        if start < self.cursor {
+            self.save();
+            self.text.drain(start..self.cursor);
+            self.cursor = start;
+        }
     }
+}
+
+/// Apply a Ctrl+letter edit to a prompt.
+///
+/// Terminals disagree on Ctrl+Shift+letter: some set the SHIFT modifier, others
+/// just send an uppercase char. Treat an uppercase letter as shifted so
+/// Ctrl+Shift+H/L extends the selection either way.
+fn apply_ctrl_edit(input: &mut Input, c: char, shift: bool) {
+    let shift = shift || c.is_ascii_uppercase();
+    match c.to_ascii_lowercase() {
+        'h' if shift => input.select_left(),
+        'l' if shift => input.select_right(),
+        'h' => input.move_left(),
+        'l' => input.move_right(),
+        'a' => input.select_all(),
+        'e' => input.move_end(),
+        'u' => input.kill_to_start(),
+        'k' => input.kill_to_end(),
+        'w' => input.delete_word(),
+        'z' => input.undo(),
+        _ => {}
+    }
+}
+
+/// tmux's mode-2 output is only parseable by crossterm when tmux reports
+/// modified keys in CSI-u form. With `extended-keys-format xterm` it emits
+/// `CSI 27;…~` instead, so leave the legacy encoding alone in that case.
+fn tmux_uses_csi_u() -> bool {
+    static CSI_U: OnceLock<bool> = OnceLock::new();
+    *CSI_U.get_or_init(|| {
+        Command::new("tmux")
+            .args(["show-options", "-gv", "extended-keys-format"])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim() != "xterm")
+            .unwrap_or(true)
+    })
 }
 
 /// Byte offset of the last extension dot, or the name length when the whole
@@ -310,10 +409,10 @@ fn rename_stem_end(name: &str) -> usize {
 /// Prompt editing hints for rename, longest first. `draw_prompt_status` picks
 /// the longest one that still leaves room for the filename.
 const RENAME_HINTS: [&str; 4] = [
-    "^H/^L move · ⇧ select · ⌫/Del edit · ^A/^E all/end · ^U/^K kill · ^W word · Enter save · Esc cancel",
-    "^H/^L move · ⇧ select · ⌫/Del edit · ^A/^E all/end · Enter save · Esc cancel",
-    "^H/^L move · ⇧ select · Enter save · Esc cancel",
-    "Enter save · Esc cancel",
+    "^H/^L move · ⇧ select · ⌫/Del edit · ^Z undo · ^A/^E all/end · ^U/^K kill · ^W word · Enter save · Esc cancel",
+    "^H/^L move · ⇧ select · ⌫/Del edit · ^Z undo · ^A/^E all/end · Enter save · Esc cancel",
+    "^H/^L move · ⇧ select · ^Z undo · Enter save · Esc",
+    "Enter save · Esc",
 ];
 
 /// Display width of one character in terminal cells.
@@ -4106,13 +4205,7 @@ impl App {
                     KeyCode::Right => self.input.move_right(),
                     KeyCode::Home => self.input.move_home(),
                     KeyCode::End => self.input.move_end(),
-                    KeyCode::Char('a') if ctrl => self.input.select_all(),
-                    KeyCode::Char('e') if ctrl => self.input.move_end(),
-                    KeyCode::Char('h') if ctrl => self.input.move_left(),
-                    KeyCode::Char('l') if ctrl => self.input.move_right(),
-                    KeyCode::Char('u') if ctrl => self.input.kill_to_start(),
-                    KeyCode::Char('k') if ctrl => self.input.kill_to_end(),
-                    KeyCode::Char('w') if ctrl => self.input.delete_word(),
+                    KeyCode::Char(c) if ctrl => apply_ctrl_edit(&mut self.input, c, shift),
                     KeyCode::Char(c) if !ctrl => {
                         self.input.insert(c);
                         if p == Prompt::Cd {
@@ -5628,16 +5721,51 @@ impl App {
         }
     }
 
+    /// Ask the terminal for a keyboard protocol that reports modified keys
+    /// distinctly (e.g. Ctrl+Shift+H vs Ctrl+H). tmux implements xterm's
+    /// modifyOtherKeys (mode 2 reports every key as CSI-u), while other
+    /// terminals use kitty's push protocol. Both are parsed by crossterm;
+    /// terminals without support ignore the request.
+    pub fn enable_keyboard_protocol(&self) {
+        let mut out = io::stdout();
+        if crate::preview::tmux_active() {
+            if tmux_uses_csi_u() {
+                let _ = out.write_all(b"\x1b[>4;2m");
+            }
+        } else {
+            let _ = execute!(
+                out,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            );
+        }
+        let _ = out.flush();
+    }
+
+    /// Undo [`Self::enable_keyboard_protocol`].
+    pub fn disable_keyboard_protocol(&self) {
+        let mut out = io::stdout();
+        if crate::preview::tmux_active() {
+            if tmux_uses_csi_u() {
+                let _ = out.write_all(b"\x1b[>4;0m");
+            }
+        } else {
+            let _ = execute!(out, PopKeyboardEnhancementFlags);
+        }
+        let _ = out.flush();
+    }
+
     /// Leave the alternate screen and release the mouse before handing the
     /// terminal to an external program or suspending.
     fn restore_terminal(&self) {
         self.disable_mouse();
+        self.disable_keyboard_protocol();
         ratatui::restore();
     }
 
     /// Re-enter the alternate screen and restore mouse capture afterwards.
     fn init_terminal(&mut self) -> DefaultTerminal {
         let term = ratatui::init();
+        self.enable_keyboard_protocol();
         self.enable_mouse();
         self.preview.force_sixel_redraw();
         term
@@ -6015,6 +6143,100 @@ mod tests {
         input.move_end();
         input.kill_to_end();
         assert_eq!(input.as_str(), "one two");
+    }
+
+    #[test]
+    fn input_undo_restores_text_cursor_and_selection() {
+        let mut input = Input::rename("notes.txt");
+        input.insert('x');
+        input.insert('y');
+        assert_eq!(input.as_str(), "xy.txt");
+        input.undo();
+        assert_eq!(input.as_str(), "notes.txt");
+        assert_eq!(input.selection(), Some(0..5));
+        assert_eq!(input.cursor, 5);
+        input.undo();
+        assert_eq!(input.as_str(), "notes.txt");
+    }
+
+    #[test]
+    fn input_undo_groups_typing_until_movement() {
+        let mut input = Input::new("");
+        input.insert('a');
+        input.insert('b');
+        input.move_left();
+        input.insert('X');
+        assert_eq!(input.as_str(), "aXb");
+        input.undo();
+        assert_eq!(input.as_str(), "ab");
+        assert_eq!(input.cursor, 1);
+        input.undo();
+        assert_eq!(input.as_str(), "");
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn input_undo_covers_deletes_and_kills() {
+        let mut input = Input::new("alpha beta");
+        input.backspace();
+        assert_eq!(input.as_str(), "alpha bet");
+        input.undo();
+        assert_eq!(input.as_str(), "alpha beta");
+
+        input.move_home();
+        input.kill_to_end();
+        assert_eq!(input.as_str(), "");
+        input.undo();
+        assert_eq!(input.as_str(), "alpha beta");
+        assert_eq!(input.cursor, 0);
+
+        input.move_end();
+        input.delete_word();
+        assert_eq!(input.as_str(), "alpha ");
+        input.undo();
+        assert_eq!(input.as_str(), "alpha beta");
+        assert_eq!(input.cursor, 10);
+    }
+
+    #[test]
+    fn input_noop_edits_do_not_fill_undo() {
+        let mut input = Input::new("abc");
+        input.delete();
+        input.move_home();
+        input.backspace();
+        assert!(input.undo.is_empty());
+        input.undo();
+        assert_eq!(input.as_str(), "abc");
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn input_shift_selection_extend_and_collapse() {
+        let mut input = Input::new("notes.txt");
+        input.move_home();
+        input.select_right();
+        input.select_right();
+        assert_eq!(input.selection(), Some(0..2));
+        input.select_left();
+        assert_eq!(input.selection(), Some(0..1));
+        input.select_left();
+        assert_eq!(input.selection(), None);
+    }
+
+    #[test]
+    fn ctrl_shift_letters_select_with_or_without_modifier() {
+        // Some terminals send Ctrl+Shift+L as uppercase 'L' without SHIFT.
+        let mut input = Input::new("notes.txt");
+        input.move_home();
+        apply_ctrl_edit(&mut input, 'L', false);
+        assert_eq!(input.selection(), Some(0..1));
+        apply_ctrl_edit(&mut input, 'l', true);
+        assert_eq!(input.selection(), Some(0..2));
+        apply_ctrl_edit(&mut input, 'H', false);
+        assert_eq!(input.selection(), Some(0..1));
+        apply_ctrl_edit(&mut input, 'h', false);
+        assert_eq!(input.cursor, 0);
+        assert_eq!(input.selection(), None);
     }
 
     #[test]

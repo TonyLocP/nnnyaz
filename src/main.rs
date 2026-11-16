@@ -28,9 +28,11 @@ fn main() -> io::Result<()> {
     }
     app.preview_configure(protocol, font, shm);
     let mut terminal = ratatui::init();
+    app.enable_keyboard_protocol();
     app.enable_mouse();
     let res = app.run(&mut terminal);
     app.disable_mouse();
+    app.disable_keyboard_protocol();
     ratatui::restore();
     // `Terminal` shows the cursor again on drop; drop it while stdout still
     // points at the terminal, before restoring the real stdout.

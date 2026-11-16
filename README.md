@@ -237,6 +237,28 @@ Mouse support mirrors Yazi and is controlled by `mgr.mouse_events` (default
 - Click a tab in the tab bar to switch to it.
 - Mouse input is ignored in prompts and overlays, matching Yazi's `mgr` layer.
 
+### Prompt editing
+
+Prompts share a single-line editing buffer. Rename starts with the stem selected
+and the cursor before the extension, so typing replaces the stem; dotfiles
+select the whole name.
+
+| Keys | Action |
+| --- | --- |
+| `Ctrl+H` / `Ctrl+L` (or `←` / `→`) | Move left / right |
+| `Ctrl+Shift+H` / `Ctrl+Shift+L` (or `Shift+←` / `Shift+→`) | Extend the selection |
+| `Home` / `End`, `Ctrl+A` / `Ctrl+E` | Jump to start / end |
+| `Ctrl+U` / `Ctrl+K` | Delete to start / end |
+| `Ctrl+W` | Delete the previous word |
+| `Ctrl+Z` | Undo the last edit (a run of typing undoes as one step) |
+| `Backspace` / `Delete` | Delete before / at the caret |
+| `Enter` / `Esc` | Save / cancel |
+
+While renaming, a dim hint on the right of the status line lists the binds and
+shortens itself on narrow terminals. rnn requests a keyboard protocol that
+distinguishes modified keys: tmux's modifyOtherKeys inside tmux, kitty's
+protocol elsewhere. Terminals without support fall back to the legacy encoding.
+
 ### `theme.toml`
 
 Themes use rnn's semantic roles rather than Yazi's theme schema. A role can be
