@@ -17,6 +17,8 @@ are candidates, roughly in priority order.
       and the open-with menu.
 - [x] Browser-associated files (PDF, XML, …) open in the system default
       browser instead of whichever browser owns the MIME type.
+- [x] Docs refresh: picker mode, the status line, and browser routing are
+      documented; the stale “zoxide is not implemented” note is gone.
 
 ## Next
 
@@ -26,8 +28,12 @@ are candidates, roughly in priority order.
 - [ ] **Bulk rename** — edit the selected names in `$EDITOR` and apply the
       changes in one batch.
 - [ ] **Shell parity** — align `:`/`;` blocking semantics with Yazi/nnn.
-- [ ] **Docs refresh** — the README still says zoxide is unimplemented and
-      should document picker mode and the status line.
+
+## Local setup (outside this repo)
+
+- `~/.local/bin/set-default-browser` chooses the default browser, moves
+  browser-owned document types to it, and keeps browser-owned audio/video on
+  `mpv`. `--dry-run` previews the changes.
 
 ## Known divergences
 

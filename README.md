@@ -296,7 +296,6 @@ prepend_keymap = [ { on = "H", run = "hello" } ]
 ## Yazi compatibility
 
 rnn deliberately mirrors Yazi where it has an equivalent feature: default
-keybindings, prefix menus, open-with rules, trash, and tasks. It does not try
-to be a drop-in Yazi replacement: config lives under `rnn`, the theme schema is
-rnn-specific, `Z`/zoxide is not implemented, and the plugin API is intentionally
-minimal.
+keybindings, prefix menus, open-with rules, trash, tasks, and zoxide. It does
+not try to be a drop-in Yazi replacement: config lives under `rnn`, the theme
+schema is rnn-specific, and the plugin API is intentionally minimal.
