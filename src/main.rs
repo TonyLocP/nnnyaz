@@ -15,6 +15,7 @@ fn main() -> io::Result<()> {
         return probe_graphics();
     }
     let mut app = app::App::new(config::load())?;
+    let saved_stdout = app.redirect_stdout_for_chooser();
     let protocol = detect_protocol();
     let font = probe_cell_size().unwrap_or((8, 16));
     let shm = protocol == preview::ImageProtocol::Kitty && probe_shm();
@@ -31,6 +32,13 @@ fn main() -> io::Result<()> {
     let res = app.run(&mut terminal);
     app.disable_mouse();
     ratatui::restore();
+    // `Terminal` shows the cursor again on drop; drop it while stdout still
+    // points at the terminal, before restoring the real stdout.
+    drop(terminal);
+    if let Some(saved) = saved_stdout {
+        let _ = rustix::stdio::dup2_stdout(&saved);
+    }
+    app.flush_chooser_stdout();
     res
 }
 

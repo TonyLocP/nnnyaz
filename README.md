@@ -64,6 +64,34 @@ rnn() {
 `quit_cwd` is also available as a normal action, so `Q` can be rebound in
 `keymap.toml`.
 
+## Picker mode
+
+rnn can act as a file picker, like nnn's `-p` or Yazi's `--chooser-file`.
+Pass a file with `--chooser-file <path>`, `-p <path>`, or set
+`RNN_CHOOSER_FILE`. Select entries with `Space`; press `Enter` on a file to
+pick the selection (or the hovered file) and quit. Quitting normally with `q`
+or `Q` also writes an existing selection.
+
+`-p -` writes the paths to stdout instead of a file, which is useful in
+command substitution. `-0` (or `--null`) separates paths with NUL instead of a
+newline. If nothing is selected on a plain quit, the chooser file is left
+untouched.
+
+```fish
+# Pick files and print them one per line.
+set -l files (rnn -p - ~/Downloads)
+for f in $files
+    echo $f
+end
+```
+
+```sh
+# Pick files and pass them to a command with NUL separators.
+rnn -p - -0 ~/Downloads | xargs -0 some-command
+```
+
+The status line shows `picker` while picker mode is active.
+
 ## Terminal support
 
 Image and video thumbnails are drawn with the kitty graphics protocol in kitty

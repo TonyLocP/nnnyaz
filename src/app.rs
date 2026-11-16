@@ -4,7 +4,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{self, BufRead, Read, Write},
-    os::unix::fs::MetadataExt,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -359,8 +359,17 @@ pub struct App {
     task_cursor: usize,
     pending_delete: Option<DeleteMode>,
     quit_warned: bool,
+    /// Set when picker mode chooses an entry; the run loop exits at the next
+    /// opportunity.
+    quit: bool,
     /// Where `quit_cwd` writes the current directory for a shell wrapper.
     cwd_file: Option<PathBuf>,
+    /// Where picker mode writes selected paths (`-` means stdout).
+    chooser_file: Option<PathBuf>,
+    /// Separate picker paths with NUL instead of newline (`-0`).
+    chooser_null: bool,
+    /// Deferred `-p -` output, flushed after the terminal is restored.
+    chooser_stdout: Option<Vec<u8>>,
     /// Local UTC offset captured at startup (before any threads spawn), used
     /// to render mtimes in local time without shelling out to `date`.
     local_offset: time::UtcOffset,
@@ -1564,15 +1573,20 @@ fn run_hardlink(
 // ───────────────────────── app ─────────────────────────
 
 /// Command-line options. rnn has no argument-parser dependency, so this stays
-/// deliberately small: one optional starting path plus `--cwd-file`.
+/// deliberately small: one optional starting path, `--cwd-file`, and the
+/// picker options (`--chooser-file` / `-p`, `-0`).
 #[derive(Debug, Default, PartialEq)]
 struct Cli {
     path: Option<PathBuf>,
     cwd_file: Option<PathBuf>,
+    chooser_file: Option<PathBuf>,
+    chooser_null: bool,
 }
 
 /// Parse rnn's command line. `--cwd-file <path>` and `--cwd-file=<path>` are
-/// accepted; the first non-option argument is the starting path.
+/// accepted; so are `--chooser-file <path>`, `--chooser-file=<path>`, nnn's
+/// `-p <path>` (or `-p<path>`), and `-0` for NUL-separated picker output. The
+/// first non-option argument is the starting path.
 fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
     let mut cli = Cli::default();
     let mut args = args.into_iter();
@@ -1588,6 +1602,28 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
                 return Err("--cwd-file requires a path".into());
             }
             cli.cwd_file = Some(PathBuf::from(value));
+        } else if text == "--chooser-file" {
+            let value = args
+                .next()
+                .ok_or_else(|| "--chooser-file requires a path".to_string())?;
+            cli.chooser_file = Some(PathBuf::from(value));
+        } else if let Some(value) = text.strip_prefix("--chooser-file=") {
+            if value.is_empty() {
+                return Err("--chooser-file requires a path".into());
+            }
+            cli.chooser_file = Some(PathBuf::from(value));
+        } else if text == "-p" {
+            let value = args
+                .next()
+                .ok_or_else(|| "-p requires a path".to_string())?;
+            cli.chooser_file = Some(PathBuf::from(value));
+        } else if let Some(value) = text.strip_prefix("-p") {
+            if value.is_empty() {
+                return Err("-p requires a path".into());
+            }
+            cli.chooser_file = Some(PathBuf::from(value));
+        } else if text == "-0" || text == "--null" {
+            cli.chooser_null = true;
         } else if text == "--" {
             if let Some(path) = args.next() {
                 if cli.path.replace(PathBuf::from(path)).is_some() {
@@ -1604,6 +1640,17 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
         }
     }
     Ok(cli)
+}
+
+/// Serialize picker paths: one per line, or NUL-separated with `-0`.
+fn chooser_bytes(paths: &[PathBuf], null: bool) -> Vec<u8> {
+    let sep = if null { b'\0' } else { b'\n' };
+    let mut out = Vec::new();
+    for path in paths {
+        out.extend_from_slice(path.as_os_str().as_bytes());
+        out.push(sep);
+    }
+    out
 }
 
 /// Write `cwd` to the cwd file so a shell wrapper can `cd` there after rnn
@@ -1624,6 +1671,12 @@ impl App {
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
         });
+        let chooser_file = cli.chooser_file.or_else(|| {
+            env::var_os("RNN_CHOOSER_FILE")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        });
+        let chooser_null = cli.chooser_null;
         let start = cli.path.unwrap_or(env::current_dir()?);
         let cwd = fs::canonicalize(start)?;
         let config::Loaded { config, warnings } = loaded;
@@ -1676,7 +1729,11 @@ impl App {
             task_cursor: 0,
             pending_delete: None,
             quit_warned: false,
+            quit: false,
             cwd_file,
+            chooser_file,
+            chooser_null,
+            chooser_stdout: None,
             local_offset,
             preview: Preview::new(),
             list: List::new(Vec::<ListItem>::new()),
@@ -2424,6 +2481,11 @@ impl App {
         let _ = term;
         if e.is_dir {
             self.cd(e.path, None);
+        } else if self.chooser_file.is_some() {
+            // Picker mode: opening a file picks it (and any selection) and
+            // exits, like nnn's `-p` and Yazi's `--chooser-file`.
+            self.write_chooser(true);
+            self.quit = true;
         } else {
             self.open_external(&e.path);
         }
@@ -3191,6 +3253,57 @@ impl App {
         })
     }
 
+    /// Write the current selection to the chooser file. On a plain quit only
+    /// an existing selection is written (like nnn); picker-mode `Enter` also
+    /// includes the hovered entry when nothing is selected.
+    fn write_chooser(&mut self, include_hovered: bool) {
+        let Some(dest) = self.chooser_file.clone() else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = self.selected.iter().cloned().collect();
+        if paths.is_empty() && include_hovered {
+            if let Some(e) = self.current() {
+                paths.push(e.path.clone());
+            }
+        }
+        if paths.is_empty() {
+            return;
+        }
+        let out = chooser_bytes(&paths, self.chooser_null);
+        if dest == Path::new("-") {
+            self.chooser_stdout = Some(out);
+        } else if let Err(e) = fs::write(&dest, &out) {
+            eprintln!("rnn: cannot write chooser file {}: {e}", dest.display());
+        }
+    }
+
+    /// When picker output goes to stdout, point fd 1 at the controlling
+    /// terminal for the duration of the TUI so escape sequences do not pollute
+    /// the picked paths. Returns the original stdout fd for restoration.
+    pub fn redirect_stdout_for_chooser(&self) -> Option<rustix::fd::OwnedFd> {
+        if self.chooser_file.as_deref() != Some(Path::new("-")) {
+            return None;
+        }
+        let tty = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .ok()?;
+        let saved = rustix::io::dup(rustix::stdio::stdout()).ok()?;
+        rustix::stdio::dup2_stdout(&tty).ok()?;
+        Some(saved)
+    }
+
+    /// Flush deferred `-p -` output after the terminal has been restored, so
+    /// the picked paths are visible in the caller's shell.
+    pub fn flush_chooser_stdout(&mut self) {
+        if let Some(out) = self.chooser_stdout.take() {
+            let mut stdout = io::stdout();
+            let _ = stdout.write_all(&out);
+            let _ = stdout.flush();
+        }
+    }
+
     fn task_move(&mut self, delta: isize) {
         if self.tasks.is_empty() {
             self.task_cursor = 0;
@@ -3822,11 +3935,13 @@ impl App {
             Action::Nop => {}
             Action::Quit => {
                 if self.quit_allowed("q") {
+                    self.write_chooser(false);
                     return Ok(true);
                 }
             }
             Action::QuitCwd => {
                 if self.quit_allowed("Q") {
+                    self.write_chooser(false);
                     if let Some(path) = &self.cwd_file {
                         write_cwd_file(path, &self.cwd);
                     }
@@ -3837,6 +3952,7 @@ impl App {
                 if self.tabs.len() > 1 {
                     self.close_tab();
                 } else if self.quit_allowed("Ctrl+c") {
+                    self.write_chooser(false);
                     return Ok(true);
                 }
             }
@@ -4384,6 +4500,9 @@ impl App {
                     "{} selected | sort:{sort}{direction}",
                     self.selected.len()
                 ));
+                if self.chooser_file.is_some() {
+                    s.push_str(" | picker");
+                }
                 if let Some(query) = self.last_find.as_deref().filter(|q| !q.is_empty()) {
                     let (pos, total) = self.find_progress(query);
                     if pos > 0 {
@@ -5310,6 +5429,9 @@ impl App {
                     _ => {}
                 }
             }
+            if self.quit {
+                return Ok(());
+            }
             self.preview.poll();
             if self.preview.take_changed() {
                 dirty = true;
@@ -5606,26 +5728,68 @@ mod tests {
             Cli {
                 path: Some(PathBuf::from("/tmp/start")),
                 cwd_file: Some(PathBuf::from("/tmp/cwd")),
+                ..Cli::default()
             }
         );
         assert_eq!(
             parse_cli(args(&["--cwd-file=/tmp/cwd"])).unwrap(),
             Cli {
-                path: None,
                 cwd_file: Some(PathBuf::from("/tmp/cwd")),
+                ..Cli::default()
             }
         );
         assert_eq!(
             parse_cli(args(&["--", "-weird-dir"])).unwrap(),
             Cli {
                 path: Some(PathBuf::from("-weird-dir")),
-                cwd_file: None,
+                ..Cli::default()
             }
         );
         assert!(parse_cli(args(&["--cwd-file"])).is_err());
         assert!(parse_cli(args(&["--cwd-file="])).is_err());
         assert!(parse_cli(args(&["--nope"])).is_err());
         assert!(parse_cli(args(&["one", "two"])).is_err());
+    }
+
+    #[test]
+    fn cli_parses_picker_options() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+        let expected = |path: Option<&str>, null: bool| Cli {
+            chooser_file: path.map(PathBuf::from),
+            chooser_null: null,
+            ..Cli::default()
+        };
+
+        assert_eq!(
+            parse_cli(args(&["--chooser-file", "/tmp/pick"])).unwrap(),
+            expected(Some("/tmp/pick"), false)
+        );
+        assert_eq!(
+            parse_cli(args(&["--chooser-file=/tmp/pick"])).unwrap(),
+            expected(Some("/tmp/pick"), false)
+        );
+        assert_eq!(
+            parse_cli(args(&["-p", "/tmp/pick"])).unwrap(),
+            expected(Some("/tmp/pick"), false)
+        );
+        assert_eq!(
+            parse_cli(args(&["-p/tmp/pick"])).unwrap(),
+            expected(Some("/tmp/pick"), false)
+        );
+        assert_eq!(
+            parse_cli(args(&["-p", "-", "-0"])).unwrap(),
+            expected(Some("-"), true)
+        );
+        assert!(parse_cli(args(&["--chooser-file"])).is_err());
+        assert!(parse_cli(args(&["--chooser-file="])).is_err());
+        assert!(parse_cli(args(&["-p"])).is_err());
+    }
+
+    #[test]
+    fn chooser_bytes_uses_the_requested_separator() {
+        let paths = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b c")];
+        assert_eq!(chooser_bytes(&paths, false), b"/tmp/a\n/tmp/b c\n");
+        assert_eq!(chooser_bytes(&paths, true), b"/tmp/a\0/tmp/b c\0");
     }
 
     #[test]

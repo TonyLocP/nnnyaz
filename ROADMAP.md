@@ -9,15 +9,15 @@ are candidates, roughly in priority order.
       size, and extension or symlink target.
 - [x] Find match counter in the `/` and `?` prompt and while cycling with
       `n`/`N`.
+- [x] Picker mode: `--chooser-file <path>` (Yazi) and `-p <path>` (nnn),
+      plus `-0` for NUL-separated output. `Space` selects entries; `Enter` on a
+      file, or quitting with a selection, writes the paths. `-` writes to
+      stdout.
 - [x] Yazi default keymap loads without warnings; tabs, trash, tasks, zoxide,
       and the open-with menu.
 
 ## Next
 
-- [ ] **Picker mode** — `--chooser-file <path>` (Yazi) and `-p <path>` (nnn),
-      plus `-0` for NUL-separated output. `Space` selects entries; `Enter` on a
-      file, or quitting with a selection, writes the paths. `-` writes to
-      stdout.
 - [ ] **Rename cursor UX** — start the rename prompt with the cursor before the
       extension and the stem selected, like nnn/Yazi, instead of selecting the
       whole name.
