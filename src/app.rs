@@ -366,6 +366,7 @@ fn apply_ctrl_edit(input: &mut Input, c: char, shift: bool) {
         'h' if shift => input.select_left(),
         'l' if shift => input.select_right(),
         'a' if shift => input.select_all(),
+        's' if shift => input.select_all(),
         'h' => input.move_left(),
         'l' => input.move_right(),
         'a' => input.move_home(),
@@ -410,7 +411,7 @@ fn rename_stem_end(name: &str) -> usize {
 /// Prompt editing hints for rename, longest first. `draw_prompt_status` picks
 /// the longest one that still leaves room for the filename.
 const RENAME_HINTS: [&str; 5] = [
-    "^H/^L move · ⇧ select · ⌫/Del edit · ^Z undo · ^A/^E start/end · ⇧^A all · ^U/^K kill · ^W word · Enter save · Esc cancel",
+    "^H/^L move · ⇧ select · ⌫/Del edit · ^Z undo · ^A/^E start/end · ⇧^S all · ^U/^K kill · ^W word · Enter save · Esc cancel",
     "^H/^L move · ⇧ select · ⌫/Del edit · ^Z undo · ^A/^E start/end · Enter save · Esc cancel",
     "^H/^L move · ⇧ select · ^A/^E start/end · ^Z undo · Enter save · Esc",
     "^H/^L move · ⇧ select · ^Z undo · Enter save · Esc",
@@ -6242,18 +6243,21 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_a_moves_home_and_shift_a_selects_all() {
+    fn ctrl_a_moves_home_and_shift_s_selects_all() {
         let mut input = Input::new("notes.txt");
         apply_ctrl_edit(&mut input, 'a', false);
         assert_eq!(input.cursor, 0);
         assert_eq!(input.selection(), None);
-        // Uppercase without SHIFT still counts as Shift+A.
-        apply_ctrl_edit(&mut input, 'A', false);
+        // Uppercase without SHIFT still counts as Shift+S.
+        apply_ctrl_edit(&mut input, 'S', false);
         assert_eq!(input.selection(), Some(0..9));
         assert_eq!(input.cursor, 9);
         apply_ctrl_edit(&mut input, 'e', false);
         assert_eq!(input.selection(), None);
         assert_eq!(input.cursor, 9);
+        // Ctrl+Shift+A works where the terminal passes it through.
+        apply_ctrl_edit(&mut input, 'A', false);
+        assert_eq!(input.selection(), Some(0..9));
     }
 
     #[test]
