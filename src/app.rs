@@ -4,6 +4,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::{self, BufRead, Read, Write},
+    ops::Range,
     os::unix::{ffi::OsStrExt, fs::MetadataExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -81,6 +82,247 @@ enum Prompt {
     SearchRg,
     Shell,
     TabRename,
+}
+
+/// A single-line prompt buffer with a cursor and an optional selection.
+///
+/// Indices are byte offsets on char boundaries, so editing multibyte names is
+/// safe. The rename prompt starts with the stem selected and the cursor just
+/// before the extension, like nnn and Yazi.
+#[derive(Default)]
+struct Input {
+    text: String,
+    cursor: usize,
+    /// Selection anchor; the selection runs between this and `cursor`.
+    anchor: Option<usize>,
+}
+
+impl Input {
+    fn new(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let cursor = text.len();
+        Self {
+            text,
+            cursor,
+            anchor: None,
+        }
+    }
+
+    /// Start renaming `name`: select the stem, leave the extension intact.
+    fn rename(name: &str) -> Self {
+        let cursor = rename_stem_end(name);
+        Self {
+            text: name.to_string(),
+            cursor,
+            anchor: (cursor > 0).then_some(0),
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+        self.anchor = None;
+    }
+
+    fn set(&mut self, text: impl Into<String>) {
+        *self = Self::new(text);
+    }
+
+    fn selection(&self) -> Option<Range<usize>> {
+        let anchor = self.anchor?;
+        (anchor != self.cursor).then(|| anchor.min(self.cursor)..anchor.max(self.cursor))
+    }
+
+    /// Replace the selection, if any, with `with`.
+    fn replace_selection(&mut self, with: &str) {
+        if let Some(range) = self.selection() {
+            self.text.replace_range(range.clone(), with);
+            self.cursor = range.start + with.len();
+            self.anchor = None;
+        }
+    }
+
+    fn insert(&mut self, c: char) {
+        self.replace_selection("");
+        self.text.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    fn backspace(&mut self) {
+        if self.selection().is_some() {
+            self.replace_selection("");
+            return;
+        }
+        if let Some(prev) = self.prev_boundary() {
+            self.text.remove(prev);
+            self.cursor = prev;
+        }
+    }
+
+    fn delete(&mut self) {
+        if self.selection().is_some() {
+            self.replace_selection("");
+            return;
+        }
+        if self.cursor < self.text.len() {
+            self.text.remove(self.cursor);
+        }
+    }
+
+    fn prev_boundary(&self) -> Option<usize> {
+        self.text[..self.cursor]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+    }
+
+    fn next_boundary(&self) -> Option<usize> {
+        self.text[self.cursor..]
+            .char_indices()
+            .nth(1)
+            .map(|(i, _)| self.cursor + i)
+    }
+
+    fn move_left(&mut self) {
+        if let Some(range) = self.selection() {
+            self.cursor = range.start;
+            self.anchor = None;
+        } else if let Some(prev) = self.prev_boundary() {
+            self.cursor = prev;
+        }
+    }
+
+    fn move_right(&mut self) {
+        if let Some(range) = self.selection() {
+            self.cursor = range.end;
+            self.anchor = None;
+        } else if let Some(next) = self.next_boundary() {
+            self.cursor = next;
+        }
+    }
+
+    fn move_home(&mut self) {
+        self.cursor = 0;
+        self.anchor = None;
+    }
+
+    fn move_end(&mut self) {
+        self.cursor = self.text.len();
+        self.anchor = None;
+    }
+
+    fn select_left(&mut self) {
+        let anchor = *self.anchor.get_or_insert(self.cursor);
+        if let Some(prev) = self.prev_boundary() {
+            self.cursor = prev;
+        }
+        if self.cursor == anchor {
+            self.anchor = None;
+        }
+    }
+
+    fn select_right(&mut self) {
+        let anchor = *self.anchor.get_or_insert(self.cursor);
+        if let Some(next) = self.next_boundary() {
+            self.cursor = next;
+        }
+        if self.cursor == anchor {
+            self.anchor = None;
+        }
+    }
+
+    fn select_home(&mut self) {
+        let anchor = *self.anchor.get_or_insert(self.cursor);
+        self.cursor = 0;
+        if self.cursor == anchor {
+            self.anchor = None;
+        }
+    }
+
+    fn select_end(&mut self) {
+        let anchor = *self.anchor.get_or_insert(self.cursor);
+        self.cursor = self.text.len();
+        if self.cursor == anchor {
+            self.anchor = None;
+        }
+    }
+
+    fn select_all(&mut self) {
+        self.cursor = self.text.len();
+        self.anchor = (self.cursor > 0).then_some(0);
+    }
+
+    /// Delete from the cursor to the start of the line.
+    fn kill_to_start(&mut self) {
+        if self.selection().is_some() {
+            self.replace_selection("");
+            return;
+        }
+        self.text.drain(..self.cursor);
+        self.cursor = 0;
+    }
+
+    /// Delete from the cursor to the end of the line.
+    fn kill_to_end(&mut self) {
+        if self.selection().is_some() {
+            self.replace_selection("");
+            return;
+        }
+        self.text.truncate(self.cursor);
+    }
+
+    /// Delete the word before the cursor (Ctrl+W).
+    fn delete_word(&mut self) {
+        if self.selection().is_some() {
+            self.replace_selection("");
+            return;
+        }
+        let start = self.text[..self.cursor]
+            .char_indices()
+            .rev()
+            .skip_while(|(_, c)| c.is_whitespace())
+            .find(|(_, c)| c.is_whitespace())
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        self.text.drain(start..self.cursor);
+        self.cursor = start;
+    }
+}
+
+/// Byte offset of the last extension dot, or the name length when the whole
+/// name is the stem (no extension, a dotfile, or a trailing dot).
+fn rename_stem_end(name: &str) -> usize {
+    let Some(dot) = name.rfind('.') else {
+        return name.len();
+    };
+    let stem = &name[..dot];
+    let suffix = &name[dot + 1..];
+    if suffix.is_empty() || stem.is_empty() || stem.chars().all(|c| c == '.') {
+        name.len()
+    } else {
+        dot
+    }
+}
+
+/// Display width of one character in terminal cells.
+fn char_width(c: char) -> usize {
+    Span::raw(c.to_string()).width()
+}
+
+/// Byte offset of the first character that starts at or after display column
+/// `col`.
+fn byte_at_col(text: &str, col: usize) -> usize {
+    let mut used = 0;
+    for (i, c) in text.char_indices() {
+        if used >= col {
+            return i;
+        }
+        used += char_width(c);
+    }
+    text.len()
 }
 
 /// What a `d` / `D` confirmation should do when accepted.
@@ -342,7 +584,7 @@ pub struct App {
     linemode: Linemode,
     history: Vec<PathBuf>,
     history_pos: usize,
-    input: String,
+    input: Input,
     status: String,
     focus: Option<String>,
     page: usize,
@@ -1712,7 +1954,7 @@ impl App {
             linemode: mgr.linemode,
             history: vec![cwd],
             history_pos: 0,
-            input: String::new(),
+            input: Input::default(),
             status,
             focus: None,
             page: 10,
@@ -2361,13 +2603,13 @@ impl App {
 
     fn accept_completion(&mut self) {
         if let Some(c) = self.completions.get(self.completion_index).cloned() {
-            self.input = c.display;
+            self.input.set(c.display);
             self.refresh_completions();
         }
     }
 
     fn submit_cd(&mut self) {
-        let name = self.input.trim().to_string();
+        let name = self.input.as_str().trim().to_string();
         if !name.is_empty() {
             let path = self.expand_path(&name);
             let path = fs::canonicalize(&path).unwrap_or(path);
@@ -2930,7 +3172,7 @@ impl App {
     }
 
     fn submit(&mut self, p: Prompt) {
-        let name = self.input.trim().to_string();
+        let name = self.input.as_str().trim().to_string();
 
         if p == Prompt::TabRename {
             self.tab_name = if name.is_empty() { None } else { Some(name) };
@@ -3438,7 +3680,7 @@ impl App {
     /// Run a shell command in the current directory, temporarily handing the
     /// terminal over to it (Yazi's `;` / `:`).
     fn run_shell(&mut self, term: &mut DefaultTerminal) {
-        let cmd = self.input.trim().to_string();
+        let cmd = self.input.as_str().trim().to_string();
         if cmd.is_empty() {
             return;
         }
@@ -3815,6 +4057,8 @@ impl App {
                     self.mode = Mode::Normal;
                     return Ok(false);
                 }
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
                 match key.code {
                     KeyCode::Esc => {
                         self.mode = Mode::Normal;
@@ -3834,13 +4078,32 @@ impl App {
                         self.completions.clear();
                     }
                     KeyCode::Backspace => {
-                        self.input.pop();
+                        self.input.backspace();
                         if p == Prompt::Cd {
                             self.refresh_completions();
                         }
                     }
-                    KeyCode::Char(c) => {
-                        self.input.push(c);
+                    KeyCode::Delete => {
+                        self.input.delete();
+                        if p == Prompt::Cd {
+                            self.refresh_completions();
+                        }
+                    }
+                    KeyCode::Left if shift => self.input.select_left(),
+                    KeyCode::Right if shift => self.input.select_right(),
+                    KeyCode::Home if shift => self.input.select_home(),
+                    KeyCode::End if shift => self.input.select_end(),
+                    KeyCode::Left => self.input.move_left(),
+                    KeyCode::Right => self.input.move_right(),
+                    KeyCode::Home => self.input.move_home(),
+                    KeyCode::End => self.input.move_end(),
+                    KeyCode::Char('a') if ctrl => self.input.select_all(),
+                    KeyCode::Char('e') if ctrl => self.input.move_end(),
+                    KeyCode::Char('u') if ctrl => self.input.kill_to_start(),
+                    KeyCode::Char('k') if ctrl => self.input.kill_to_end(),
+                    KeyCode::Char('w') if ctrl => self.input.delete_word(),
+                    KeyCode::Char(c) if !ctrl => {
+                        self.input.insert(c);
                         if p == Prompt::Cd {
                             self.refresh_completions();
                         }
@@ -4108,7 +4371,7 @@ impl App {
             Action::Rename => {
                 self.visual = None;
                 if let Some(e) = self.current() {
-                    self.input = e.name.clone();
+                    self.input = Input::rename(&e.name);
                     self.mode = Mode::Prompt(Prompt::Rename);
                 }
             }
@@ -4166,10 +4429,11 @@ impl App {
                 self.new_tab(path);
             }
             Action::RenameTab => {
-                self.input = self
-                    .tab_name
-                    .clone()
-                    .unwrap_or_else(|| self.tab_label(self.tab_index));
+                self.input.set(
+                    self.tab_name
+                        .clone()
+                        .unwrap_or_else(|| self.tab_label(self.tab_index)),
+                );
                 self.mode = Mode::Prompt(Prompt::TabRename);
             }
             Action::CloseTab => self.close_tab(),
@@ -4476,7 +4740,7 @@ impl App {
                     Prompt::TabRename => "rename tab",
                     Prompt::Delete => "",
                 };
-                format!("{label}: {}", self.input)
+                format!("{label}: {}", self.input.as_str())
             }
             Mode::Normal if !self.status.is_empty() => self.status.clone(),
             Mode::Normal => {
@@ -4591,7 +4855,13 @@ impl App {
             Mode::Normal if !self.status.is_empty() => self.config.theme.status_info,
             _ => self.config.theme.status,
         };
-        f.render_widget(Paragraph::new(text).style(status_style), rows[1]);
+        match self.mode {
+            Mode::Prompt(Prompt::Delete) => {
+                f.render_widget(Paragraph::new(text).style(status_style), rows[1]);
+            }
+            Mode::Prompt(p) => self.draw_prompt_status(f, rows[1], p),
+            _ => f.render_widget(Paragraph::new(text).style(status_style), rows[1]),
+        }
         self.draw_completions(f);
         if !self.pending.is_empty() {
             self.draw_prefix_menu(f);
@@ -5008,6 +5278,63 @@ impl App {
             Paragraph::new(lines).block(Block::bordered().title(" open with ")),
             rect,
         );
+    }
+
+    /// Render a prompt label and editable buffer, highlighting the selection
+    /// and placing the terminal cursor so the caret stays visible.
+    fn draw_prompt_status(&self, f: &mut Frame, area: Rect, p: Prompt) {
+        let label = match p {
+            Prompt::Create => "create",
+            Prompt::Rename => "rename",
+            Prompt::Cd => "go to",
+            Prompt::SearchFd => "fd",
+            Prompt::SearchRg => "rg",
+            Prompt::Shell => "shell",
+            Prompt::TabRename => "rename tab",
+            Prompt::Delete => "",
+        };
+        let prefix = format!("{label}: ");
+        let prefix_w = Span::raw(prefix.as_str()).width();
+        if prefix_w >= area.width as usize {
+            f.render_widget(
+                Paragraph::new(prefix).style(self.config.theme.status_info),
+                area,
+            );
+            return;
+        }
+        let avail = area.width as usize - prefix_w;
+        let text = self.input.as_str();
+        let cursor_col = Span::raw(&text[..self.input.cursor]).width();
+        let scroll = cursor_col.saturating_sub(avail.saturating_sub(1));
+        let start = byte_at_col(text, scroll);
+        let end = byte_at_col(text, scroll + avail);
+
+        let mut spans = vec![Span::raw(prefix)];
+        let mut pos = start;
+        if let Some(sel) = self.input.selection() {
+            let sel_start = sel.start.max(start).min(end);
+            let sel_end = sel.end.min(end).max(sel_start);
+            if sel_start > pos {
+                spans.push(Span::raw(&text[pos..sel_start]));
+            }
+            if sel_end > sel_start {
+                spans.push(Span::styled(
+                    &text[sel_start..sel_end],
+                    self.config.theme.selection,
+                ));
+            }
+            pos = sel_end.max(pos);
+        }
+        if end > pos {
+            spans.push(Span::raw(&text[pos..end]));
+        }
+
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).style(self.config.theme.status_info),
+            area,
+        );
+        let x = area.x + (prefix_w + cursor_col - scroll) as u16;
+        f.set_cursor_position((x.min(area.right().saturating_sub(1)), area.y));
     }
 
     fn draw_completions(&self, f: &mut Frame) {
@@ -5557,6 +5884,107 @@ mod tests {
         assert_eq!(mode_string(0o102755), "-rwxr-sr-x");
         assert_eq!(mode_string(0o041777), "drwxrwxrwt");
         assert_eq!(mode_string(0o104644), "-rwSr--r--");
+    }
+
+    #[test]
+    fn rename_stem_stops_before_extension() {
+        assert_eq!(rename_stem_end("file.txt"), 4);
+        assert_eq!(rename_stem_end("archive.tar.gz"), 11);
+        assert_eq!(rename_stem_end("README"), 6);
+        assert_eq!(rename_stem_end("file."), 5);
+        assert_eq!(rename_stem_end(""), 0);
+    }
+
+    #[test]
+    fn rename_stem_keeps_dotfiles_whole() {
+        assert_eq!(rename_stem_end(".bashrc"), 7);
+        assert_eq!(rename_stem_end(".."), 2);
+        assert_eq!(rename_stem_end("..."), 3);
+    }
+
+    #[test]
+    fn rename_input_selects_stem_and_keeps_extension() {
+        let mut input = Input::rename("notes.txt");
+        assert_eq!(input.as_str(), "notes.txt");
+        assert_eq!(input.cursor, 5);
+        assert_eq!(input.selection(), Some(0..5));
+        input.insert('x');
+        assert_eq!(input.as_str(), "x.txt");
+        assert_eq!(input.cursor, 1);
+        assert_eq!(input.selection(), None);
+    }
+
+    #[test]
+    fn rename_input_selects_whole_dotfile() {
+        let input = Input::rename(".bashrc");
+        assert_eq!(input.cursor, 7);
+        assert_eq!(input.selection(), Some(0..7));
+    }
+
+    #[test]
+    fn input_editing_respects_char_boundaries() {
+        let mut input = Input::new("héllo");
+        assert_eq!(input.cursor, 6);
+        input.backspace();
+        assert_eq!(input.as_str(), "héll");
+        input.move_home();
+        input.delete();
+        assert_eq!(input.as_str(), "éll");
+        assert_eq!(input.cursor, 0);
+        input.insert('x');
+        assert_eq!(input.as_str(), "xéll");
+    }
+
+    #[test]
+    fn input_selection_edits_and_collapses() {
+        let mut input = Input::new("abc.def");
+        input.select_all();
+        assert_eq!(input.selection(), Some(0..7));
+        input.insert('z');
+        assert_eq!(input.as_str(), "z");
+        assert_eq!(input.cursor, 1);
+        assert_eq!(input.selection(), None);
+
+        let mut input = Input::new("abc.def");
+        input.move_end();
+        for _ in 0..3 {
+            input.select_left();
+        }
+        assert_eq!(input.selection(), Some(4..7));
+        input.backspace();
+        assert_eq!(input.as_str(), "abc.");
+        assert_eq!(input.cursor, 4);
+
+        let mut input = Input::new("abc");
+        input.select_left();
+        input.select_home();
+        assert_eq!(input.selection(), Some(0..3));
+        input.move_right();
+        assert_eq!(input.cursor, 3);
+        assert_eq!(input.selection(), None);
+    }
+
+    #[test]
+    fn input_kill_and_word_delete() {
+        let mut input = Input::new("alpha beta ");
+        input.move_end();
+        input.delete_word();
+        assert_eq!(input.as_str(), "alpha ");
+        input.insert('g');
+        assert_eq!(input.as_str(), "alpha g");
+        input.kill_to_start();
+        assert_eq!(input.as_str(), "");
+        assert_eq!(input.cursor, 0);
+
+        let mut input = Input::new("one two three");
+        input.move_home();
+        input.kill_to_end();
+        assert_eq!(input.as_str(), "");
+
+        let mut input = Input::new("one two");
+        input.move_end();
+        input.kill_to_end();
+        assert_eq!(input.as_str(), "one two");
     }
 
     #[test]

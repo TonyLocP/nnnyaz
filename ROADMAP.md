@@ -19,12 +19,14 @@ are candidates, roughly in priority order.
       browser instead of whichever browser owns the MIME type.
 - [x] Docs refresh: picker mode, the status line, and browser routing are
       documented; the stale “zoxide is not implemented” note is gone.
+- [x] **Rename cursor UX** — the rename prompt starts with the stem selected
+      and the cursor before the extension, like nnn/Yazi. Dotfiles select the
+      whole name. Prompts now have a real editing buffer: arrows, Home/End,
+      Shift-selection, Backspace/Delete, and Ctrl+A/E/U/K/W. The selection is
+      highlighted and the terminal cursor follows the caret.
 
 ## Next
 
-- [ ] **Rename cursor UX** — start the rename prompt with the cursor before the
-      extension and the stem selected, like nnn/Yazi, instead of selecting the
-      whole name.
 - [ ] **Bulk rename** — edit the selected names in `$EDITOR` and apply the
       changes in one batch.
 - [ ] **Shell parity** — align `:`/`;` blocking semantics with Yazi/nnn.
