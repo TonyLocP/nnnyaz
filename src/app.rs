@@ -365,9 +365,10 @@ fn apply_ctrl_edit(input: &mut Input, c: char, shift: bool) {
     match c.to_ascii_lowercase() {
         'h' if shift => input.select_left(),
         'l' if shift => input.select_right(),
+        'a' if shift => input.select_all(),
         'h' => input.move_left(),
         'l' => input.move_right(),
-        'a' => input.select_all(),
+        'a' => input.move_home(),
         'e' => input.move_end(),
         'u' => input.kill_to_start(),
         'k' => input.kill_to_end(),
@@ -408,9 +409,10 @@ fn rename_stem_end(name: &str) -> usize {
 
 /// Prompt editing hints for rename, longest first. `draw_prompt_status` picks
 /// the longest one that still leaves room for the filename.
-const RENAME_HINTS: [&str; 4] = [
-    "^H/^L move · ⇧ select · ⌫/Del edit · ^Z undo · ^A/^E all/end · ^U/^K kill · ^W word · Enter save · Esc cancel",
-    "^H/^L move · ⇧ select · ⌫/Del edit · ^Z undo · ^A/^E all/end · Enter save · Esc cancel",
+const RENAME_HINTS: [&str; 5] = [
+    "^H/^L move · ⇧ select · ⌫/Del edit · ^Z undo · ^A/^E start/end · ⇧^A all · ^U/^K kill · ^W word · Enter save · Esc cancel",
+    "^H/^L move · ⇧ select · ⌫/Del edit · ^Z undo · ^A/^E start/end · Enter save · Esc cancel",
+    "^H/^L move · ⇧ select · ^A/^E start/end · ^Z undo · Enter save · Esc",
     "^H/^L move · ⇧ select · ^Z undo · Enter save · Esc",
     "Enter save · Esc",
 ];
@@ -6237,6 +6239,21 @@ mod tests {
         apply_ctrl_edit(&mut input, 'h', false);
         assert_eq!(input.cursor, 0);
         assert_eq!(input.selection(), None);
+    }
+
+    #[test]
+    fn ctrl_a_moves_home_and_shift_a_selects_all() {
+        let mut input = Input::new("notes.txt");
+        apply_ctrl_edit(&mut input, 'a', false);
+        assert_eq!(input.cursor, 0);
+        assert_eq!(input.selection(), None);
+        // Uppercase without SHIFT still counts as Shift+A.
+        apply_ctrl_edit(&mut input, 'A', false);
+        assert_eq!(input.selection(), Some(0..9));
+        assert_eq!(input.cursor, 9);
+        apply_ctrl_edit(&mut input, 'e', false);
+        assert_eq!(input.selection(), None);
+        assert_eq!(input.cursor, 9);
     }
 
     #[test]

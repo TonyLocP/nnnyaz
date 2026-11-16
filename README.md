@@ -248,6 +248,7 @@ select the whole name.
 | `Ctrl+H` / `Ctrl+L` (or `←` / `→`) | Move left / right |
 | `Ctrl+Shift+H` / `Ctrl+Shift+L` (or `Shift+←` / `Shift+→`) | Extend the selection |
 | `Home` / `End`, `Ctrl+A` / `Ctrl+E` | Jump to start / end |
+| `Ctrl+Shift+A` | Select the whole name |
 | `Ctrl+U` / `Ctrl+K` | Delete to start / end |
 | `Ctrl+W` | Delete the previous word |
 | `Ctrl+Z` | Undo the last edit (a run of typing undoes as one step) |
