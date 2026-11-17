@@ -23,7 +23,8 @@ use std::{
 
 use image::{
     imageops::{self, FilterType},
-    DynamicImage, ImageReader, RgbaImage,
+    metadata::Orientation,
+    DynamicImage, ImageDecoder, ImageReader, RgbaImage,
 };
 use ratatui::{
     buffer::Buffer,
@@ -36,8 +37,65 @@ use super::{media, yazi};
 /// Pixel size of a single terminal cell, used to size the transmit canvas.
 pub type FontSize = (u16, u16);
 
-/// Hard cap on the decoded/transmitted image size.
+/// Default cap on the decoded/transmitted image size.
 pub const IMAGE_MAX: (u32, u32) = (1920, 1080);
+
+/// Resize filter for preview scaling. `Box` uses `image::imageops::thumbnail`,
+/// which is much faster than the named filters for the large downscales typical
+/// of camera images; the other names match Yazi's `preview.image_filter`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Filter {
+    Box,
+    Nearest,
+    Triangle,
+    CatmullRom,
+    Gaussian,
+    Lanczos3,
+}
+
+impl Filter {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "box" => Filter::Box,
+            "nearest" => Filter::Nearest,
+            "triangle" => Filter::Triangle,
+            "catmull-rom" | "catmullrom" => Filter::CatmullRom,
+            "gaussian" => Filter::Gaussian,
+            "lanczos3" => Filter::Lanczos3,
+            _ => return None,
+        })
+    }
+
+    /// The `image` filter, or `None` for the box filter (`thumbnail`).
+    fn filter_type(self) -> Option<FilterType> {
+        Some(match self {
+            Filter::Box => return None,
+            Filter::Nearest => FilterType::Nearest,
+            Filter::Triangle => FilterType::Triangle,
+            Filter::CatmullRom => FilterType::CatmullRom,
+            Filter::Gaussian => FilterType::Gaussian,
+            Filter::Lanczos3 => FilterType::Lanczos3,
+        })
+    }
+}
+
+/// Preview decode/resize settings, resolved from `[preview]` at startup.
+#[derive(Clone, Copy, Debug)]
+pub struct Settings {
+    pub max: (u32, u32),
+    pub filter: Filter,
+    pub quality: u8,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            max: IMAGE_MAX,
+            filter: Filter::Box,
+            quality: 90,
+        }
+    }
+}
 
 /// A per-process image id, masked to 24 bits (the id is carried entirely by the
 /// placeholder foreground colour, like yazi's `pid % (0xffffff + 1)`). The
@@ -58,16 +116,21 @@ pub fn next_id() -> u32 {
 /// decode entirely. When a yazi cache is available that cache is used
 /// exclusively; otherwise rnn keeps its own. `mtime`/`size` are part of rnn's
 /// fallback key, so edited files are re-decoded.
-pub fn load_image(path: &Path, mtime: Option<SystemTime>, size: u64) -> io::Result<DynamicImage> {
+pub fn load_image(
+    path: &Path,
+    mtime: Option<SystemTime>,
+    size: u64,
+    settings: &Settings,
+) -> io::Result<DynamicImage> {
     if let Some(dir) = yazi::cache_dir() {
-        return load_shared(&dir, path);
+        return load_shared(&dir, path, settings);
     }
-    load_from(&cache_dir(), path, mtime, size)
+    load_from(&cache_dir(), path, mtime, size, settings)
 }
 
 /// Read or fill a preview in yazi's cache. A miss is decoded from the source
 /// and written back under yazi's key; rnn's own cache is never touched.
-fn load_shared(dir: &Path, path: &Path) -> io::Result<DynamicImage> {
+fn load_shared(dir: &Path, path: &Path, settings: &Settings) -> io::Result<DynamicImage> {
     let target = yazi::target(dir, path);
     if let Some(target) = &target {
         if let Some(img) = decode(target) {
@@ -79,9 +142,9 @@ fn load_shared(dir: &Path, path: &Path) -> io::Result<DynamicImage> {
     }
 
     let img = decode_source(path)?;
-    let capped = cap_size(&img, IMAGE_MAX);
+    let capped = cap_size(&img, settings.max, settings.filter);
     if let Some(target) = &target {
-        schedule_shared(target, &capped);
+        schedule_shared(target, &capped, settings.quality);
     }
     Ok(capped)
 }
@@ -92,14 +155,15 @@ pub fn load_video_thumbnail(
     path: &Path,
     mtime: Option<SystemTime>,
     size: u64,
+    settings: &Settings,
 ) -> io::Result<DynamicImage> {
     if let Some(dir) = yazi::cache_dir() {
-        return load_video_shared(&dir, path);
+        return load_video_shared(&dir, path, settings);
     }
-    load_video_from(&cache_dir(), path, mtime, size)
+    load_video_from(&cache_dir(), path, mtime, size, settings)
 }
 
-fn load_video_shared(dir: &Path, path: &Path) -> io::Result<DynamicImage> {
+fn load_video_shared(dir: &Path, path: &Path, settings: &Settings) -> io::Result<DynamicImage> {
     let target = yazi::target(dir, path);
     if let Some(target) = &target {
         if let Some(img) = decode(target) {
@@ -118,9 +182,9 @@ fn load_video_shared(dir: &Path, path: &Path) -> io::Result<DynamicImage> {
     ));
     let img = media::extract_video_frame(path, &tmp).and_then(|_| decode_source(&tmp));
     let _ = fs::remove_file(&tmp);
-    let capped = cap_size(&img?, IMAGE_MAX);
+    let capped = cap_size(&img?, settings.max, settings.filter);
     if let Some(target) = &target {
-        schedule_shared(target, &capped);
+        schedule_shared(target, &capped, settings.quality);
     }
     Ok(capped)
 }
@@ -130,6 +194,7 @@ fn load_video_from(
     path: &Path,
     mtime: Option<SystemTime>,
     size: u64,
+    settings: &Settings,
 ) -> io::Result<DynamicImage> {
     let stem = cache_stem(path, mtime, size);
     if let Some(img) = ["png", "jpg"]
@@ -143,8 +208,8 @@ fn load_video_from(
     let tmp = dir.join(format!(".{stem}.{}.frame.jpg", std::process::id()));
     let img = media::extract_video_frame(path, &tmp).and_then(|_| decode_source(&tmp));
     let _ = fs::remove_file(&tmp);
-    let capped = cap_size(&img?, IMAGE_MAX);
-    schedule_cache(dir, &stem, &capped);
+    let capped = cap_size(&img?, settings.max, settings.filter);
+    schedule_cache(dir, &stem, &capped, settings.quality);
     Ok(capped)
 }
 
@@ -158,6 +223,7 @@ pub fn load_pdf_page(
     page: usize,
     mtime: Option<SystemTime>,
     size: u64,
+    settings: &Settings,
 ) -> io::Result<DynamicImage> {
     let dir = cache_dir();
     let stem = format!("{}-p{}", cache_stem(path, mtime, size), page);
@@ -174,8 +240,8 @@ pub fn load_pdf_page(
     let rendered = PathBuf::from(format!("{}.jpg", prefix.to_string_lossy()));
     let img = decode_source(&rendered);
     let _ = fs::remove_file(&rendered);
-    let capped = cap_size(&img?, IMAGE_MAX);
-    schedule_cache(&dir, &stem, &capped);
+    let capped = cap_size(&img?, settings.max, settings.filter);
+    schedule_cache(&dir, &stem, &capped, settings.quality);
     Ok(capped)
 }
 
@@ -205,11 +271,18 @@ fn decode(path: &Path) -> Option<DynamicImage> {
         .ok()
 }
 
+/// Decode a source image, applying its EXIF orientation so phone/camera photos
+/// are shown upright (matching Yazi). Cache entries are already upright, so
+/// [`decode`] deliberately skips this.
 fn decode_source(path: &Path) -> io::Result<DynamicImage> {
-    ImageReader::open(path)?
-        .with_guessed_format()?
-        .decode()
-        .map_err(io::Error::other)
+    let reader = ImageReader::open(path)?.with_guessed_format()?;
+    let mut decoder = reader.into_decoder().map_err(io::Error::other)?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut img = DynamicImage::from_decoder(decoder).map_err(io::Error::other)?;
+    if orientation != Orientation::NoTransforms {
+        img.apply_orientation(orientation);
+    }
+    Ok(img)
 }
 
 fn load_from(
@@ -217,6 +290,7 @@ fn load_from(
     path: &Path,
     mtime: Option<SystemTime>,
     size: u64,
+    settings: &Settings,
 ) -> io::Result<DynamicImage> {
     let stem = cache_stem(path, mtime, size);
     if let Some(img) = ["png", "jpg"]
@@ -227,14 +301,14 @@ fn load_from(
     }
 
     let img = decode_source(path)?;
-    let capped = cap_size(&img, IMAGE_MAX);
-    schedule_cache(dir, &stem, &capped);
+    let capped = cap_size(&img, settings.max, settings.filter);
+    schedule_cache(dir, &stem, &capped, settings.quality);
     Ok(capped)
 }
 
-/// Re-encode `img` as PNG when it has alpha, otherwise a quality-90 JPEG (the
-/// same choice yazi makes).
-fn encode(img: &DynamicImage) -> io::Result<(&'static str, Vec<u8>)> {
+/// Re-encode `img` as PNG when it has alpha, otherwise a JPEG at `quality`
+/// (yazi makes the same format choice).
+fn encode(img: &DynamicImage, quality: u8) -> io::Result<(&'static str, Vec<u8>)> {
     use image::codecs::{jpeg::JpegEncoder, png::PngEncoder};
 
     let alpha = img.color().has_alpha();
@@ -245,7 +319,7 @@ fn encode(img: &DynamicImage) -> io::Result<(&'static str, Vec<u8>)> {
         img.write_with_encoder(PngEncoder::new(&mut buf))
             .map_err(io::Error::other)?;
     } else {
-        img.write_with_encoder(JpegEncoder::new_with_quality(&mut buf, 90))
+        img.write_with_encoder(JpegEncoder::new_with_quality(&mut buf, quality))
             .map_err(io::Error::other)?;
     }
     Ok((ext, buf))
@@ -259,10 +333,12 @@ enum CacheJob {
         dir: PathBuf,
         stem: String,
         img: DynamicImage,
+        quality: u8,
     },
     Shared {
         target: PathBuf,
         img: DynamicImage,
+        quality: u8,
     },
 }
 
@@ -275,12 +351,21 @@ fn cache_tx() -> &'static mpsc::Sender<CacheJob> {
             .spawn(move || {
                 for job in rx {
                     match job {
-                        CacheJob::Own { dir, stem, img } => {
-                            let _ = write_cache(&dir, &stem, &img);
+                        CacheJob::Own {
+                            dir,
+                            stem,
+                            img,
+                            quality,
+                        } => {
+                            let _ = write_cache(&dir, &stem, &img, quality);
                         }
-                        CacheJob::Shared { target, img } => {
-                            let written =
-                                encode(&img).and_then(|(_, buf)| yazi::write_entry(&target, &buf));
+                        CacheJob::Shared {
+                            target,
+                            img,
+                            quality,
+                        } => {
+                            let written = encode(&img, quality)
+                                .and_then(|(_, buf)| yazi::write_entry(&target, &buf));
                             if std::env::var_os("RNN_DEBUG").is_some() {
                                 match &written {
                                     Ok(()) => eprintln!("cache: yazi store {}", target.display()),
@@ -299,29 +384,31 @@ fn cache_tx() -> &'static mpsc::Sender<CacheJob> {
 }
 
 /// Queue a fallback-cache write; the caller keeps the in-memory image.
-fn schedule_cache(dir: &Path, stem: &str, img: &DynamicImage) {
+fn schedule_cache(dir: &Path, stem: &str, img: &DynamicImage, quality: u8) {
     let _ = cache_tx().send(CacheJob::Own {
         dir: dir.to_path_buf(),
         stem: stem.to_string(),
         img: img.clone(),
+        quality,
     });
 }
 
 /// Queue a shared (yazi) cache write; the caller keeps the in-memory image.
-fn schedule_shared(target: &Path, img: &DynamicImage) {
+fn schedule_shared(target: &Path, img: &DynamicImage, quality: u8) {
     let _ = cache_tx().send(CacheJob::Shared {
         target: target.to_path_buf(),
         img: img.clone(),
+        quality,
     });
 }
 
 /// Write a preview into rnn's fallback cache. The encoded bytes go to a unique
 /// temp name and are renamed, so a reader never sees a half-written file.
-fn write_cache(dir: &Path, stem: &str, img: &DynamicImage) -> io::Result<()> {
+fn write_cache(dir: &Path, stem: &str, img: &DynamicImage, quality: u8) -> io::Result<()> {
     static SEQ: AtomicU32 = AtomicU32::new(0);
 
     fs::create_dir_all(dir)?;
-    let (ext, buf) = encode(img)?;
+    let (ext, buf) = encode(img, quality)?;
 
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!("{stem}.{}.{n}.tmp", std::process::id()));
@@ -358,11 +445,7 @@ fn prune(dir: &Path) {
 }
 
 /// Scale down to fit within `max`, never upscaling.
-///
-/// Uses the box filter (`thumbnail`) rather than a triangle resize: for the
-/// large reductions typical of camera images it is several times faster and
-/// looks at least as good, which keeps the first view of a big photo snappy.
-pub fn cap_size(img: &DynamicImage, max: (u32, u32)) -> DynamicImage {
+pub fn cap_size(img: &DynamicImage, max: (u32, u32), filter: Filter) -> DynamicImage {
     let (iw, ih) = (img.width(), img.height());
     let scale = (max.0 as f32 / iw as f32)
         .min(max.1 as f32 / ih as f32)
@@ -374,28 +457,29 @@ pub fn cap_size(img: &DynamicImage, max: (u32, u32)) -> DynamicImage {
         (iw as f32 * scale).max(1.0) as u32,
         (ih as f32 * scale).max(1.0) as u32,
     );
-    img.thumbnail(nw, nh)
+    scale_to(img, nw, nh, filter)
 }
 
-/// Downscale with the fast box filter, falling back to a triangle resize when
-/// the target is larger than the source (zoomed-in previews), where a box
-/// filter would look blocky.
-fn scale_to(img: &DynamicImage, w: u32, h: u32) -> DynamicImage {
-    if w < img.width() && h < img.height() {
-        img.thumbnail(w, h)
-    } else {
-        img.resize_exact(w, h, FilterType::Triangle)
+/// Resize with the configured filter. The box filter (`thumbnail`) is the fast
+/// default for downscaling; it falls back to a triangle resize when the target
+/// is larger than the source (zoomed-in previews), where it would look blocky.
+fn scale_to(img: &DynamicImage, w: u32, h: u32, filter: Filter) -> DynamicImage {
+    let down = w < img.width() && h < img.height();
+    match (filter.filter_type(), down) {
+        (None, true) => img.thumbnail(w, h),
+        (None, false) => img.resize_exact(w, h, FilterType::Triangle),
+        (Some(ft), _) => img.resize_exact(w, h, ft),
     }
 }
 
-/// Pixel dimensions of an area of `cells` cells, capped at [`IMAGE_MAX`].
-pub fn cell_pixels(font: FontSize, cells: (u16, u16)) -> (u32, u32) {
+/// Pixel dimensions of an area of `cells` cells, capped at `max`.
+pub fn cell_pixels(font: FontSize, cells: (u16, u16), max: (u32, u32)) -> (u32, u32) {
     let w = u32::from(cells.0)
         .saturating_mul(u32::from(font.0))
-        .min(IMAGE_MAX.0);
+        .min(max.0);
     let h = u32::from(cells.1)
         .saturating_mul(u32::from(font.1))
-        .min(IMAGE_MAX.1);
+        .min(max.1);
     (w, h)
 }
 
@@ -408,8 +492,10 @@ pub fn fit_to_cells_zoom(
     font: FontSize,
     cells: (u16, u16),
     zoom: f32,
+    max: (u32, u32),
+    filter: Filter,
 ) -> DynamicImage {
-    let (cw, ch) = cell_pixels(font, cells);
+    let (cw, ch) = cell_pixels(font, cells, max);
     if cw == 0 || ch == 0 {
         return img.clone();
     }
@@ -424,7 +510,7 @@ pub fn fit_to_cells_zoom(
         let fitted = if nw == iw && nh == ih {
             img.clone()
         } else {
-            scale_to(img, nw, nh)
+            scale_to(img, nw, nh, filter)
         };
         if nw == cw && nh == ch {
             return fitted;
@@ -449,7 +535,7 @@ pub fn fit_to_cells_zoom(
     let sw = ((vw as f32 / scale).round() as u32).max(1).min(iw - sx);
     let sh = ((vh as f32 / scale).round() as u32).max(1).min(ih - sy);
     let cropped = img.crop_imm(sx, sy, sw, sh);
-    let fitted = scale_to(&cropped, vw, vh);
+    let fitted = scale_to(&cropped, vw, vh, filter);
     imageops::overlay(
         &mut canvas,
         &fitted,
@@ -462,8 +548,13 @@ pub fn fit_to_cells_zoom(
 /// Fit `img` (aspect preserved) into `cells` worth of pixels and pad the
 /// remainder with transparency so the transmitted canvas is exactly cell-sized.
 #[cfg(test)]
-pub fn fit_to_cells(img: &DynamicImage, font: FontSize, cells: (u16, u16)) -> DynamicImage {
-    fit_to_cells_zoom(img, font, cells, 1.0)
+pub fn fit_to_cells(
+    img: &DynamicImage,
+    font: FontSize,
+    cells: (u16, u16),
+    filter: Filter,
+) -> DynamicImage {
+    fit_to_cells_zoom(img, font, cells, 1.0, IMAGE_MAX, filter)
 }
 
 /// Encode an image as kitty APC chunks. Each returned string is a complete,
@@ -577,6 +668,7 @@ pub struct KittyState {
     font: FontSize,
     is_tmux: bool,
     shm: bool,
+    settings: Settings,
     img: Arc<DynamicImage>,
     cells: Option<((u16, u16), u32)>,
     zoom: u32,
@@ -585,12 +677,20 @@ pub struct KittyState {
 }
 
 impl KittyState {
-    pub fn new(id: u32, font: FontSize, is_tmux: bool, shm: bool, img: DynamicImage) -> Self {
+    pub fn new(
+        id: u32,
+        font: FontSize,
+        is_tmux: bool,
+        shm: bool,
+        settings: Settings,
+        img: DynamicImage,
+    ) -> Self {
         Self {
             id,
             font,
             is_tmux,
             shm,
+            settings,
             img: Arc::new(img),
             cells: None,
             zoom: 100,
@@ -648,11 +748,13 @@ impl KittyState {
             let shm = self.shm;
             let font = self.font;
             let zoom = self.zoom as f32 / 100.0;
+            let settings = self.settings;
             let _ = thread::Builder::new()
                 .name("kitty-stream".into())
                 .spawn(move || {
                     let start = std::time::Instant::now();
-                    let fitted = fit_to_cells_zoom(&img, font, dims, zoom);
+                    let fitted =
+                        fit_to_cells_zoom(&img, font, dims, zoom, settings.max, settings.filter);
                     let fit = start.elapsed();
                     let debug = std::env::var_os("RNN_DEBUG").is_some();
                     if shm {
@@ -1124,7 +1226,14 @@ mod tests {
     #[test]
     fn placeholder_marks_on_every_cell() {
         let id = 0x00AB_CDEF;
-        let mut st = KittyState::new(id, (8, 16), false, false, make_img(2, 2));
+        let mut st = KittyState::new(
+            id,
+            (8, 16),
+            false,
+            false,
+            Settings::default(),
+            make_img(2, 2),
+        );
         st.transmit_gen.store(1, Ordering::SeqCst);
         st.transmitted_gen.store(1, Ordering::SeqCst);
         st.cells = Some(((3, 2), 100));
@@ -1159,26 +1268,65 @@ mod tests {
         assert_eq!(bytes, expected);
     }
 
+    /// Orientation 6 (rotate 90° CW) must be applied on source decode so a
+    /// portrait phone photo is not shown sideways. Cache entries are written
+    /// upright, so `decode` intentionally skips this.
+    #[test]
+    fn decode_source_applies_exif_orientation() {
+        let base = std::env::temp_dir().join(format!("rnn-exif-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let path = base.join("rotated.jpg");
+
+        // 40x20 landscape; orientation 6 makes the displayed image 20x40.
+        make_img(40, 20).save(&path).unwrap();
+        let jpeg = fs::read(&path).unwrap();
+        assert_eq!(&jpeg[..2], [0xFF, 0xD8]);
+
+        // Minimal big-endian TIFF header with one IFD entry: Orientation=6.
+        let tiff: &[u8] = &[
+            0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08, // TIFF header
+            0x00, 0x01, // one entry
+            0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x06, 0x00,
+            0x00, // tag 0x0112, SHORT, count 1, value 6
+            0x00, 0x00, 0x00, 0x00, // no next IFD
+        ];
+        let mut app1 = vec![0xFF, 0xE1];
+        app1.extend_from_slice(&((tiff.len() + 6 + 2) as u16).to_be_bytes());
+        app1.extend_from_slice(b"Exif\0\0");
+        app1.extend_from_slice(tiff);
+
+        let mut with_exif = Vec::new();
+        with_exif.extend_from_slice(&jpeg[..2]);
+        with_exif.extend_from_slice(&app1);
+        with_exif.extend_from_slice(&jpeg[2..]);
+        fs::write(&path, &with_exif).unwrap();
+
+        let img = decode_source(&path).unwrap();
+        assert_eq!((img.width(), img.height()), (20, 40));
+        let _ = fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn cap_preserves_aspect() {
         let img = make_img(400, 200);
-        let capped = cap_size(&img, (200, 100));
+        let capped = cap_size(&img, (200, 100), Filter::Box);
         assert_eq!((capped.width(), capped.height()), (200, 100));
-        let capped = cap_size(&img, (100, 50));
+        let capped = cap_size(&img, (100, 50), Filter::Box);
         assert_eq!((capped.width(), capped.height()), (100, 50));
     }
 
     #[test]
     fn fit_pads_to_canvas() {
         let img = make_img(64, 32);
-        let fitted = fit_to_cells(&img, (16, 40), (10, 5));
+        let fitted = fit_to_cells(&img, (16, 40), (10, 5), Filter::Box);
         assert_eq!((fitted.width(), fitted.height()), (160, 200));
     }
 
     #[test]
     fn zoom_scales_and_crops_around_centre() {
         let img = make_img(64, 32);
-        let fitted = fit_to_cells_zoom(&img, (16, 40), (10, 5), 2.0);
+        let fitted = fit_to_cells_zoom(&img, (16, 40), (10, 5), 2.0, IMAGE_MAX, Filter::Box);
         assert_eq!((fitted.width(), fitted.height()), (160, 200));
         let px = fitted.to_rgba8();
         assert_eq!(px.get_pixel(80, 100)[3], 255);
@@ -1188,7 +1336,7 @@ mod tests {
     #[test]
     fn zoom_crops_overflow_without_panicking() {
         let img = make_img(64, 32);
-        let fitted = fit_to_cells_zoom(&img, (16, 40), (10, 5), 4.0);
+        let fitted = fit_to_cells_zoom(&img, (16, 40), (10, 5), 4.0, IMAGE_MAX, Filter::Box);
         assert_eq!((fitted.width(), fitted.height()), (160, 200));
         let px = fitted.to_rgba8();
         assert_eq!(px.get_pixel(80, 100)[3], 255);
@@ -1244,7 +1392,7 @@ mod tests {
         fs::create_dir_all(&base).unwrap();
         make_img(80, 40).save(&src).unwrap();
 
-        let a = load_from(&cache, &src, None, 123).unwrap();
+        let a = load_from(&cache, &src, None, 123, &Settings::default()).unwrap();
         assert_eq!((a.width(), a.height()), (80, 40));
         let cached = wait_for(|| {
             fs::read_dir(&cache)
@@ -1257,7 +1405,7 @@ mod tests {
         assert!(cached, "expected a cached copy");
 
         // Second load must hit the cached file (same dimensions, no re-decode).
-        let b = load_from(&cache, &src, None, 123).unwrap();
+        let b = load_from(&cache, &src, None, 123, &Settings::default()).unwrap();
         assert_eq!((b.width(), b.height()), (80, 40));
 
         let _ = fs::remove_dir_all(&base);
@@ -1272,7 +1420,7 @@ mod tests {
         fs::create_dir_all(&cache).unwrap();
         make_img(80, 40).save(&src).unwrap();
 
-        let a = load_shared(&cache, &src).unwrap();
+        let a = load_shared(&cache, &src, &Settings::default()).unwrap();
         assert_eq!((a.width(), a.height()), (80, 40));
 
         let entry = yazi::target(&cache, &src).unwrap();
@@ -1316,8 +1464,8 @@ mod tests {
         );
 
         let t = Instant::now();
-        let capped = cap_size(&src, IMAGE_MAX);
-        println!("cap_size (resize Triangle): {:?}", t.elapsed());
+        let capped = cap_size(&src, IMAGE_MAX, Filter::Box);
+        println!("cap_size (resize Box): {:?}", t.elapsed());
 
         let t = Instant::now();
         let thumb = image::imageops::thumbnail(&src.to_rgba8(), IMAGE_MAX.0, IMAGE_MAX.1);
@@ -1328,7 +1476,7 @@ mod tests {
         );
 
         let t = Instant::now();
-        let (_, buf) = encode(&capped).unwrap();
+        let (_, buf) = encode(&capped, 90).unwrap();
         println!("encode cache jpeg: {:?} ({} bytes)", t.elapsed(), buf.len());
 
         let tmp = std::env::temp_dir().join("rnn-bench-cache.jpg");
@@ -1356,7 +1504,7 @@ mod tests {
 
         for cells in [(80u16, 40u16), (120, 50), (160, 60)] {
             let t = Instant::now();
-            let fitted = fit_to_cells_zoom(&capped, (8, 16), cells, 1.0);
+            let fitted = fit_to_cells_zoom(&capped, (8, 16), cells, 1.0, IMAGE_MAX, Filter::Box);
             println!("fit_to_cells {cells:?}: {:?}", t.elapsed());
 
             let t = Instant::now();
@@ -1389,7 +1537,7 @@ mod tests {
             let _ = rgba;
         }
 
-        let fitted = fit_to_cells_zoom(&capped, (8, 16), (120, 50), 1.0);
+        let fitted = fit_to_cells_zoom(&capped, (8, 16), (120, 50), 1.0, IMAGE_MAX, Filter::Box);
         let t = Instant::now();
         let bytes = crate::preview::sixel::encode(&fitted, false);
         println!(

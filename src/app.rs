@@ -42,7 +42,7 @@ use crate::{
     openwith,
     preview::{
         detect::{self, Kind},
-        ImageProtocol, Key as PreviewKey, Preview,
+        kitty, ImageProtocol, Key as PreviewKey, Preview,
     },
     util::human,
 };
@@ -2200,6 +2200,13 @@ impl App {
         // `time` refuses to read the local offset once the process is
         // multi-threaded, so capture it now (main is still single-threaded).
         let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+        let preview_cfg = config.preview;
+        let preview_settings = kitty::Settings {
+            max: (preview_cfg.max_width, preview_cfg.max_height),
+            filter: preview_cfg.image_filter,
+            quality: preview_cfg.image_quality,
+        };
+        let image_delay = std::time::Duration::from_millis(u64::from(preview_cfg.image_delay));
         let mut app = App {
             config,
             cwd: cwd.clone(),
@@ -2251,7 +2258,7 @@ impl App {
             chooser_null,
             chooser_stdout: None,
             local_offset,
-            preview: Preview::new(),
+            preview: Preview::new(preview_settings, image_delay),
             list: List::new(Vec::<ListItem>::new()),
             list_dirty: true,
             list_width: 0,

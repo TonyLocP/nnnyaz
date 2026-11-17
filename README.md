@@ -114,7 +114,8 @@ Decoded images are cached on disk (shared with Yazi when its cache is
 available), and image/video/PDF neighbours are preloaded in the background, so
 navigating back over a folder is instant. The first view of a very large photo
 is decoded and downscaled once; writing it to the cache happens in the
-background rather than delaying the image.
+background rather than delaying the image. EXIF orientation is applied, so
+photos from phones and cameras are shown upright.
 
 ## Configuration
 
@@ -152,6 +153,11 @@ mouse_events = ["click", "scroll", "drag"]  # click | scroll | touch | move | dr
 
 [preview]
 cache_size = 16
+max_width = 1920        # cap on decoded preview width, in pixels
+max_height = 1080       # cap on decoded preview height, in pixels
+image_filter = "box"    # box | nearest | triangle | catmull-rom | gaussian | lanczos3
+image_quality = 90      # JPEG quality for cached previews (1-100)
+image_delay = 30        # ms to wait before decoding a newly selected image
 
 [tasks]
 show_progress = true

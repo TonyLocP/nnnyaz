@@ -28,7 +28,10 @@ use ratatui::{
 };
 
 use crate::{
-    preview::{kitty::KittyState, sixel::SixelState},
+    preview::{
+        kitty::{KittyState, Settings},
+        sixel::SixelState,
+    },
     util::{human, sanitize},
 };
 
@@ -76,6 +79,8 @@ struct Request {
 pub struct Preview {
     tx: Sender<Request>,
     preload_tx: Sender<Request>,
+    /// Decode/resize settings, resolved from `[preview]` at startup.
+    settings: Settings,
     /// Bumped whenever the visible target changes. The preload worker uses it
     /// to stay out of the way during fast navigation.
     activity: Arc<AtomicU64>,
@@ -113,7 +118,7 @@ const DIR_LIST_MAX: usize = 5000;
 const ZOOM_LEVELS: [u32; 5] = [100, 150, 200, 300, 400];
 
 impl Preview {
-    pub fn new() -> Self {
+    pub fn new(settings: Settings, image_delay: Duration) -> Self {
         let (tx, req_rx) = mpsc::channel::<Request>();
         let (preload_tx, preload_rx) = mpsc::channel::<Request>();
         let (res_tx, rx) = mpsc::channel::<(Key, usize, Artifact)>();
@@ -123,16 +128,25 @@ impl Preview {
         let worker_tx = res_tx.clone();
         let _ = thread::Builder::new()
             .name("preview-worker".into())
-            .spawn(move || worker(req_rx, worker_tx));
+            .spawn(move || worker(req_rx, worker_tx, settings, image_delay));
         let preload_activity = Arc::clone(&activity);
         let preload_showing = Arc::clone(&showing);
         let _ = thread::Builder::new()
             .name("preview-preload".into())
-            .spawn(move || preload_worker(preload_rx, res_tx, preload_activity, preload_showing));
+            .spawn(move || {
+                preload_worker(
+                    preload_rx,
+                    res_tx,
+                    preload_activity,
+                    preload_showing,
+                    settings,
+                )
+            });
 
         Self {
             tx,
             preload_tx,
+            settings,
             activity,
             showing,
             rx,
@@ -556,6 +570,7 @@ impl Preview {
                         self.font,
                         self.is_tmux,
                         self.shm,
+                        self.settings,
                         img.clone(),
                     );
                     st.set_zoom(ZOOM_LEVELS[self.zoom_idx]);
@@ -563,7 +578,8 @@ impl Preview {
                     self.last_streamed = 0;
                 }
                 ImageProtocol::Sixel => {
-                    let mut st = SixelState::new(self.font, self.is_tmux, img.clone());
+                    let mut st =
+                        SixelState::new(self.font, self.is_tmux, self.settings, img.clone());
                     st.set_zoom(ZOOM_LEVELS[self.zoom_idx]);
                     self.image_state = Some(ImgState::Sixel(st));
                     self.last_sixel_gen = 0;
@@ -610,11 +626,6 @@ impl Preview {
     }
 }
 
-/// Matches yazi's `preview.image_delay`: hold a display request for a frame
-/// so a fast j/k burst collapses to the file the user actually stops on
-/// instead of decoding every intermediate image.
-const IMAGE_DELAY: Duration = Duration::from_millis(30);
-
 /// How long the preload worker waits for the user to stop moving before it
 /// starts decoding neighbours. A j/k burst keeps bumping the activity
 /// counter, so speculative work never competes with the visible image.
@@ -633,19 +644,24 @@ pub(crate) fn debug_stamp() -> u128 {
 
 /// The display worker: only ever renders what the user is looking at, and
 /// always collapses a burst to the newest request.
-fn worker(rx: Receiver<Request>, tx: Sender<(Key, usize, Artifact)>) {
+fn worker(
+    rx: Receiver<Request>,
+    tx: Sender<(Key, usize, Artifact)>,
+    settings: Settings,
+    image_delay: Duration,
+) {
     while let Ok(mut req) = rx.recv() {
         // Debounce like yazi's `image_delay`: a newer target resets the wait,
         // so holding j only decodes the image where the cursor lands.
         loop {
-            match rx.recv_timeout(IMAGE_DELAY) {
+            match rx.recv_timeout(image_delay) {
                 Ok(r) => req = r,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
         }
         let start = std::time::Instant::now();
-        let art = generate(&req.key, req.page);
+        let art = generate(&req.key, req.page, &settings);
         if std::env::var_os("RNN_DEBUG").is_some() {
             eprintln!(
                 "preview: show {} in {:?} (t={}ms)",
@@ -669,6 +685,7 @@ fn preload_worker(
     tx: Sender<(Key, usize, Artifact)>,
     activity: Arc<AtomicU64>,
     showing: Arc<Mutex<Option<Key>>>,
+    settings: Settings,
 ) {
     loop {
         let Ok(first) = rx.recv() else { return };
@@ -702,7 +719,7 @@ fn preload_worker(
                 continue;
             }
             let start = std::time::Instant::now();
-            let art = generate(&req.key, req.page);
+            let art = generate(&req.key, req.page, &settings);
             if std::env::var_os("RNN_DEBUG").is_some() {
                 eprintln!(
                     "preview: preload {} in {:?} (t={}ms)",
@@ -718,7 +735,7 @@ fn preload_worker(
     }
 }
 
-fn generate(key: &Key, page: usize) -> Artifact {
+fn generate(key: &Key, page: usize, settings: &Settings) -> Artifact {
     let path = &key.0;
     let err = |msg: String| Artifact {
         kind: "error",
@@ -769,7 +786,7 @@ fn generate(key: &Key, page: usize) -> Artifact {
         // Videos are turned into a still frame with ffmpeg and PDFs into a
         // rendered page with pdftoppm, then rendered through the same image
         // path. `J`/`K` switch PDF pages.
-        detect::Kind::Image => match kitty::load_image(path, key.1, key.2) {
+        detect::Kind::Image => match kitty::load_image(path, key.1, key.2, settings) {
             Ok(img) => Artifact {
                 kind: "image",
                 data: Vec::new(),
@@ -778,7 +795,7 @@ fn generate(key: &Key, page: usize) -> Artifact {
             },
             Err(_) => binary_preview(path),
         },
-        detect::Kind::Video => match kitty::load_video_thumbnail(path, key.1, key.2) {
+        detect::Kind::Video => match kitty::load_video_thumbnail(path, key.1, key.2, settings) {
             Ok(img) => Artifact {
                 kind: "video",
                 data: Vec::new(),
@@ -787,7 +804,7 @@ fn generate(key: &Key, page: usize) -> Artifact {
             },
             Err(_) => binary_preview(path),
         },
-        detect::Kind::Pdf => match kitty::load_pdf_page(path, page, key.1, key.2) {
+        detect::Kind::Pdf => match kitty::load_pdf_page(path, page, key.1, key.2, settings) {
             Ok(img) => Artifact {
                 kind: "pdf",
                 data: Vec::new(),

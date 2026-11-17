@@ -51,6 +51,13 @@ are candidates, roughly in priority order.
       requests are debounced 30 ms like Yazi's `preview.image_delay`, PDFs are
       preloaded alongside image/video neighbours, and the sixel encoder maps
       pixels through a 32³ palette lookup table instead of a per-pixel search.
+- [x] **EXIF orientation and configurable preview** — source images apply their
+      EXIF orientation, so phone and camera photos are shown upright (cache
+      entries are written already rotated). `[preview]` now accepts Yazi's
+      `max_width`, `max_height`, `image_filter`, `image_quality`, and
+      `image_delay` in addition to `cache_size`; invalid values warn and keep
+      the default. rnn keeps its faster defaults (1920×1080, box filter,
+      quality 90) rather than Yazi's 600×900/triangle/75.
 
 ## Next
 

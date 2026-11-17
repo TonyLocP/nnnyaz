@@ -18,6 +18,7 @@ use serde::Deserialize;
 use crate::{
     action::{parse_linemode, parse_sort},
     app::{Linemode, Sort},
+    preview::kitty::Filter,
 };
 
 use self::{keymap::Keymap, theme::Theme};
@@ -92,11 +93,29 @@ impl Default for MgrConfig {
 #[derive(Clone, Copy, Debug)]
 pub struct PreviewConfig {
     pub cache_size: usize,
+    /// Cap on the decoded preview image, in pixels. Larger values keep more
+    /// detail when zooming in but cost more to decode, cache, and transmit.
+    pub max_width: u32,
+    pub max_height: u32,
+    /// Resize filter for downscaling. `Box` is the fast default; the named
+    /// filters match Yazi's `preview.image_filter` values.
+    pub image_filter: Filter,
+    /// JPEG quality used for cached previews (1–100).
+    pub image_quality: u8,
+    /// Debounce before decoding a newly selected image, in milliseconds.
+    pub image_delay: u8,
 }
 
 impl Default for PreviewConfig {
     fn default() -> Self {
-        PreviewConfig { cache_size: 16 }
+        PreviewConfig {
+            cache_size: 16,
+            max_width: 1920,
+            max_height: 1080,
+            image_filter: Filter::Box,
+            image_quality: 90,
+            image_delay: 30,
+        }
     }
 }
 
@@ -289,6 +308,43 @@ impl Config {
                 self.preview.cache_size = v;
             }
         }
+        if let Some(v) = p.preview.max_width {
+            if v == 0 {
+                warnings.push("config.toml: preview.max_width must be at least 1".into());
+            } else {
+                self.preview.max_width = v;
+            }
+        }
+        if let Some(v) = p.preview.max_height {
+            if v == 0 {
+                warnings.push("config.toml: preview.max_height must be at least 1".into());
+            } else {
+                self.preview.max_height = v;
+            }
+        }
+        if let Some(v) = &p.preview.image_filter {
+            match Filter::from_name(v) {
+                Some(filter) => self.preview.image_filter = filter,
+                None => warnings.push(format!(
+                    "config.toml: preview.image_filter '{v}' is not one of \
+                     box, nearest, triangle, catmull-rom, gaussian, lanczos3"
+                )),
+            }
+        }
+        if let Some(v) = p.preview.image_quality {
+            if !(1..=100).contains(&v) {
+                warnings.push("config.toml: preview.image_quality must be 1-100".into());
+            } else {
+                self.preview.image_quality = v as u8;
+            }
+        }
+        if let Some(v) = p.preview.image_delay {
+            if v > u32::from(u8::MAX) {
+                warnings.push("config.toml: preview.image_delay must be 0-255".into());
+            } else {
+                self.preview.image_delay = v as u8;
+            }
+        }
 
         if let Some(v) = p.tasks.show_progress {
             self.tasks.show_progress = v;
@@ -341,6 +397,11 @@ struct PartialMgr {
 #[serde(default)]
 struct PartialPreview {
     cache_size: Option<usize>,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    image_filter: Option<String>,
+    image_quality: Option<u32>,
+    image_delay: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -377,7 +438,19 @@ fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
                 ],
                 warnings,
             ),
-            "preview" => warn_keys(value, "preview", &["cache_size"], warnings),
+            "preview" => warn_keys(
+                value,
+                "preview",
+                &[
+                    "cache_size",
+                    "max_width",
+                    "max_height",
+                    "image_filter",
+                    "image_quality",
+                    "image_delay",
+                ],
+                warnings,
+            ),
             "tasks" => warn_keys(value, "tasks", &["show_progress"], warnings),
             "confirm" => warn_keys(value, "confirm", &["quit_with_tasks"], warnings),
             // openers are validated by openwith.rs.
@@ -544,6 +617,71 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.contains("mouse_events") && w.contains("wheel")));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn config_toml_preview_settings() {
+        let dir = temp_dir("preview");
+        fs::write(
+            dir.join("config.toml"),
+            r#"
+            [preview]
+            cache_size = 4
+            max_width = 1280
+            max_height = 720
+            image_filter = "lanczos3"
+            image_quality = 75
+            image_delay = 50
+            "#,
+        )
+        .unwrap();
+        let loaded = load_from(&dir);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        let p = loaded.config.preview;
+        assert_eq!(p.cache_size, 4);
+        assert_eq!((p.max_width, p.max_height), (1280, 720));
+        assert_eq!(p.image_filter, Filter::Lanczos3);
+        assert_eq!(p.image_quality, 75);
+        assert_eq!(p.image_delay, 50);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bad_preview_settings_warn_and_keep_defaults() {
+        let dir = temp_dir("bad-preview");
+        fs::write(
+            dir.join("config.toml"),
+            r#"
+            [preview]
+            max_width = 0
+            max_height = 0
+            image_filter = "mitchell"
+            image_quality = 0
+            image_delay = 999
+            "#,
+        )
+        .unwrap();
+        let loaded = load_from(&dir);
+        let p = loaded.config.preview;
+        let d = PreviewConfig::default();
+        assert_eq!((p.max_width, p.max_height), (d.max_width, d.max_height));
+        assert_eq!(p.image_filter, d.image_filter);
+        assert_eq!(p.image_quality, d.image_quality);
+        assert_eq!(p.image_delay, d.image_delay);
+        for key in [
+            "max_width",
+            "max_height",
+            "image_filter",
+            "image_quality",
+            "image_delay",
+        ] {
+            assert!(
+                loaded.warnings.iter().any(|w| w.contains(key)),
+                "missing warning for {key}: {:?}",
+                loaded.warnings
+            );
+        }
         let _ = fs::remove_dir_all(dir);
     }
 

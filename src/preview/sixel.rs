@@ -20,7 +20,7 @@ use std::{
 use image::DynamicImage;
 use ratatui::layout::Rect;
 
-use super::kitty::{self, FontSize};
+use super::kitty::{self, FontSize, Settings};
 
 /// Shared slot holding the latest encoded generation.
 type Encoded = Arc<Mutex<Option<(u64, Arc<Vec<u8>>)>>>;
@@ -29,6 +29,7 @@ type Encoded = Arc<Mutex<Option<(u64, Arc<Vec<u8>>)>>>;
 pub struct SixelState {
     font: FontSize,
     is_tmux: bool,
+    settings: Settings,
     img: Arc<DynamicImage>,
     cells: Option<((u16, u16), u32)>,
     zoom: u32,
@@ -41,10 +42,11 @@ pub struct SixelState {
 }
 
 impl SixelState {
-    pub fn new(font: FontSize, is_tmux: bool, img: DynamicImage) -> Self {
+    pub fn new(font: FontSize, is_tmux: bool, settings: Settings, img: DynamicImage) -> Self {
         Self {
             font,
             is_tmux,
+            settings,
             img: Arc::new(img),
             cells: None,
             zoom: 100,
@@ -91,12 +93,20 @@ impl SixelState {
             let font = self.font;
             let is_tmux = self.is_tmux;
             let zoom = self.zoom as f32 / 100.0;
+            let settings = self.settings;
             let data = Arc::clone(&self.data);
             let encoded_gen = Arc::clone(&self.encoded_gen);
             let _ = thread::Builder::new()
                 .name("sixel-encode".into())
                 .spawn(move || {
-                    let fitted = kitty::fit_to_cells_zoom(&img, font, dims, zoom);
+                    let fitted = kitty::fit_to_cells_zoom(
+                        &img,
+                        font,
+                        dims,
+                        zoom,
+                        settings.max,
+                        settings.filter,
+                    );
                     let bytes = encode(&fitted, is_tmux);
                     if std::env::var_os("RNN_DEBUG").is_some() {
                         eprintln!(
