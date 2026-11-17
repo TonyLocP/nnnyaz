@@ -42,6 +42,15 @@ are candidates, roughly in priority order.
       turn pages, the title and info panel show the page number, and page
       images are cached per page in rnn's own cache (Yazi's PDF cache holds
       only the last page, so it cannot be shared safely).
+- [x] **Snappier image preview** — large photos downscale with the box filter
+      (several times faster than Triangle) and the disk-cache write now happens
+      on a background thread, so showing a first view never waits on the
+      re-encode. Preloads run on their own worker, start only after a 150 ms
+      idle pause, and drop their batch if the target moves again, so even a
+      25 MB JPEG (~700 ms decode) cannot delay the visible image. Display
+      requests are debounced 30 ms like Yazi's `preview.image_delay`, PDFs are
+      preloaded alongside image/video neighbours, and the sixel encoder maps
+      pixels through a 32³ palette lookup table instead of a per-pixel search.
 
 ## Next
 

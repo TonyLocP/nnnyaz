@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
-        Arc, OnceLock,
+        mpsc, Arc, OnceLock,
     },
     thread,
     time::SystemTime,
@@ -81,13 +81,7 @@ fn load_shared(dir: &Path, path: &Path) -> io::Result<DynamicImage> {
     let img = decode_source(path)?;
     let capped = cap_size(&img, IMAGE_MAX);
     if let Some(target) = &target {
-        let written = encode(&capped).and_then(|(_, buf)| yazi::write_entry(target, &buf));
-        if std::env::var_os("RNN_DEBUG").is_some() {
-            match &written {
-                Ok(()) => eprintln!("cache: yazi store {}", target.display()),
-                Err(err) => eprintln!("cache: yazi store failed for {}: {err}", target.display()),
-            }
-        }
+        schedule_shared(target, &capped);
     }
     Ok(capped)
 }
@@ -126,18 +120,7 @@ fn load_video_shared(dir: &Path, path: &Path) -> io::Result<DynamicImage> {
     let _ = fs::remove_file(&tmp);
     let capped = cap_size(&img?, IMAGE_MAX);
     if let Some(target) = &target {
-        let written = encode(&capped).and_then(|(_, buf)| yazi::write_entry(target, &buf));
-        if std::env::var_os("RNN_DEBUG").is_some() {
-            match &written {
-                Ok(()) => eprintln!("cache: yazi video store {}", target.display()),
-                Err(err) => {
-                    eprintln!(
-                        "cache: yazi video store failed for {}: {err}",
-                        target.display()
-                    )
-                }
-            }
-        }
+        schedule_shared(target, &capped);
     }
     Ok(capped)
 }
@@ -161,7 +144,7 @@ fn load_video_from(
     let img = media::extract_video_frame(path, &tmp).and_then(|_| decode_source(&tmp));
     let _ = fs::remove_file(&tmp);
     let capped = cap_size(&img?, IMAGE_MAX);
-    let _ = write_cache(dir, &stem, &capped);
+    schedule_cache(dir, &stem, &capped);
     Ok(capped)
 }
 
@@ -192,7 +175,7 @@ pub fn load_pdf_page(
     let img = decode_source(&rendered);
     let _ = fs::remove_file(&rendered);
     let capped = cap_size(&img?, IMAGE_MAX);
-    let _ = write_cache(&dir, &stem, &capped);
+    schedule_cache(&dir, &stem, &capped);
     Ok(capped)
 }
 
@@ -245,7 +228,7 @@ fn load_from(
 
     let img = decode_source(path)?;
     let capped = cap_size(&img, IMAGE_MAX);
-    let _ = write_cache(dir, &stem, &capped);
+    schedule_cache(dir, &stem, &capped);
     Ok(capped)
 }
 
@@ -266,6 +249,70 @@ fn encode(img: &DynamicImage) -> io::Result<(&'static str, Vec<u8>)> {
             .map_err(io::Error::other)?;
     }
     Ok((ext, buf))
+}
+
+/// A deferred cache write. The first view of a file must not wait on
+/// re-encoding it for a later view, so cache fills happen on a dedicated
+/// writer thread instead of the preview worker.
+enum CacheJob {
+    Own {
+        dir: PathBuf,
+        stem: String,
+        img: DynamicImage,
+    },
+    Shared {
+        target: PathBuf,
+        img: DynamicImage,
+    },
+}
+
+fn cache_tx() -> &'static mpsc::Sender<CacheJob> {
+    static TX: OnceLock<mpsc::Sender<CacheJob>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<CacheJob>();
+        let _ = thread::Builder::new()
+            .name("preview-cache".into())
+            .spawn(move || {
+                for job in rx {
+                    match job {
+                        CacheJob::Own { dir, stem, img } => {
+                            let _ = write_cache(&dir, &stem, &img);
+                        }
+                        CacheJob::Shared { target, img } => {
+                            let written =
+                                encode(&img).and_then(|(_, buf)| yazi::write_entry(&target, &buf));
+                            if std::env::var_os("RNN_DEBUG").is_some() {
+                                match &written {
+                                    Ok(()) => eprintln!("cache: yazi store {}", target.display()),
+                                    Err(err) => eprintln!(
+                                        "cache: yazi store failed for {}: {err}",
+                                        target.display()
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        tx
+    })
+}
+
+/// Queue a fallback-cache write; the caller keeps the in-memory image.
+fn schedule_cache(dir: &Path, stem: &str, img: &DynamicImage) {
+    let _ = cache_tx().send(CacheJob::Own {
+        dir: dir.to_path_buf(),
+        stem: stem.to_string(),
+        img: img.clone(),
+    });
+}
+
+/// Queue a shared (yazi) cache write; the caller keeps the in-memory image.
+fn schedule_shared(target: &Path, img: &DynamicImage) {
+    let _ = cache_tx().send(CacheJob::Shared {
+        target: target.to_path_buf(),
+        img: img.clone(),
+    });
 }
 
 /// Write a preview into rnn's fallback cache. The encoded bytes go to a unique
@@ -311,6 +358,10 @@ fn prune(dir: &Path) {
 }
 
 /// Scale down to fit within `max`, never upscaling.
+///
+/// Uses the box filter (`thumbnail`) rather than a triangle resize: for the
+/// large reductions typical of camera images it is several times faster and
+/// looks at least as good, which keeps the first view of a big photo snappy.
 pub fn cap_size(img: &DynamicImage, max: (u32, u32)) -> DynamicImage {
     let (iw, ih) = (img.width(), img.height());
     let scale = (max.0 as f32 / iw as f32)
@@ -323,7 +374,18 @@ pub fn cap_size(img: &DynamicImage, max: (u32, u32)) -> DynamicImage {
         (iw as f32 * scale).max(1.0) as u32,
         (ih as f32 * scale).max(1.0) as u32,
     );
-    img.resize(nw, nh, FilterType::Triangle)
+    img.thumbnail(nw, nh)
+}
+
+/// Downscale with the fast box filter, falling back to a triangle resize when
+/// the target is larger than the source (zoomed-in previews), where a box
+/// filter would look blocky.
+fn scale_to(img: &DynamicImage, w: u32, h: u32) -> DynamicImage {
+    if w < img.width() && h < img.height() {
+        img.thumbnail(w, h)
+    } else {
+        img.resize_exact(w, h, FilterType::Triangle)
+    }
 }
 
 /// Pixel dimensions of an area of `cells` cells, capped at [`IMAGE_MAX`].
@@ -362,7 +424,7 @@ pub fn fit_to_cells_zoom(
         let fitted = if nw == iw && nh == ih {
             img.clone()
         } else {
-            img.resize_exact(nw, nh, FilterType::Triangle)
+            scale_to(img, nw, nh)
         };
         if nw == cw && nh == ch {
             return fitted;
@@ -387,7 +449,7 @@ pub fn fit_to_cells_zoom(
     let sw = ((vw as f32 / scale).round() as u32).max(1).min(iw - sx);
     let sh = ((vh as f32 / scale).round() as u32).max(1).min(ih - sy);
     let cropped = img.crop_imm(sx, sy, sw, sh);
-    let fitted = cropped.resize_exact(vw, vh, FilterType::Triangle);
+    let fitted = scale_to(&cropped, vw, vh);
     imageops::overlay(
         &mut canvas,
         &fitted,
@@ -572,7 +634,11 @@ impl KittyState {
             let gen = self.transmit_gen.load(Ordering::SeqCst) + 1;
             self.transmit_gen.store(gen, Ordering::SeqCst);
             if std::env::var_os("RNN_DEBUG").is_some() {
-                eprintln!("kitty: spawn gen={gen} dims={dims:?} zoom={}", self.zoom);
+                eprintln!(
+                    "kitty: spawn gen={gen} dims={dims:?} zoom={} (t={}ms)",
+                    self.zoom,
+                    super::debug_stamp()
+                );
             }
             stream_delete(self.id, self.is_tmux);
             let img = Arc::clone(&self.img);
@@ -585,11 +651,21 @@ impl KittyState {
             let _ = thread::Builder::new()
                 .name("kitty-stream".into())
                 .spawn(move || {
+                    let start = std::time::Instant::now();
                     let fitted = fit_to_cells_zoom(&img, font, dims, zoom);
+                    let fit = start.elapsed();
+                    let debug = std::env::var_os("RNN_DEBUG").is_some();
                     if shm {
                         if let Some(seq) = encode_shm(&fitted, id, is_tmux) {
                             stream_seq(&seq);
                             target.fetch_max(gen, Ordering::SeqCst);
+                            if debug {
+                                eprintln!(
+                                    "kitty: stream gen={gen} fit={fit:?} total={:?} (shm, t={}ms)",
+                                    start.elapsed(),
+                                    super::debug_stamp()
+                                );
+                            }
                             return;
                         }
                         // shared memory unavailable at runtime: fall back
@@ -597,6 +673,13 @@ impl KittyState {
                     let chunks = encode_chunks(&fitted, id, is_tmux);
                     stream_chunks(&chunks);
                     target.fetch_max(gen, Ordering::SeqCst);
+                    if debug {
+                        eprintln!(
+                            "kitty: stream gen={gen} fit={fit:?} total={:?} (chunks, t={}ms)",
+                            start.elapsed(),
+                            super::debug_stamp()
+                        );
+                    }
                 });
         }
 
@@ -1140,6 +1223,18 @@ mod tests {
         );
     }
 
+    /// Cache fills are asynchronous, so tests poll instead of assuming the
+    /// writer thread has finished by the time `load_*` returns.
+    fn wait_for(cond: impl Fn() -> bool) -> bool {
+        for _ in 0..200 {
+            if cond() {
+                return true;
+            }
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
+
     #[test]
     fn disk_cache_roundtrip() {
         let base = std::env::temp_dir().join(format!("rnn-cache-test-{}", std::process::id()));
@@ -1151,8 +1246,15 @@ mod tests {
 
         let a = load_from(&cache, &src, None, 123).unwrap();
         assert_eq!((a.width(), a.height()), (80, 40));
-        let cached_files = fs::read_dir(&cache).unwrap().count();
-        assert!(cached_files >= 1, "expected a cached copy");
+        let cached = wait_for(|| {
+            fs::read_dir(&cache)
+                .map(|rd| {
+                    rd.flatten()
+                        .any(|e| e.path().extension().and_then(|x| x.to_str()) != Some("tmp"))
+                })
+                .unwrap_or(false)
+        });
+        assert!(cached, "expected a cached copy");
 
         // Second load must hit the cached file (same dimensions, no re-decode).
         let b = load_from(&cache, &src, None, 123).unwrap();
@@ -1180,7 +1282,7 @@ mod tests {
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
         assert!(
-            entry.is_file(),
+            wait_for(|| entry.is_file()),
             "expected an extensionless yazi cache entry"
         );
         assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
@@ -1189,5 +1291,141 @@ mod tests {
         assert_eq!((b.width(), b.height()), (80, 40));
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Micro-benchmark for the preview hot path. Run with:
+    /// `cargo test --release bench_preview -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_preview() {
+        use std::time::Instant;
+
+        let home = std::env::var("HOME").unwrap();
+        let path = PathBuf::from(format!("{home}/Pictures/seiabeach.jpg"));
+        if !path.exists() {
+            eprintln!("skip: {} not found", path.display());
+            return;
+        }
+
+        let t = Instant::now();
+        let src = decode_source(&path).unwrap();
+        println!(
+            "decode source {:?}: {:?}",
+            (src.width(), src.height()),
+            t.elapsed()
+        );
+
+        let t = Instant::now();
+        let capped = cap_size(&src, IMAGE_MAX);
+        println!("cap_size (resize Triangle): {:?}", t.elapsed());
+
+        let t = Instant::now();
+        let thumb = image::imageops::thumbnail(&src.to_rgba8(), IMAGE_MAX.0, IMAGE_MAX.1);
+        println!(
+            "thumbnail (box): {:?} {:?}",
+            t.elapsed(),
+            thumb.dimensions()
+        );
+
+        let t = Instant::now();
+        let (_, buf) = encode(&capped).unwrap();
+        println!("encode cache jpeg: {:?} ({} bytes)", t.elapsed(), buf.len());
+
+        let tmp = std::env::temp_dir().join("rnn-bench-cache.jpg");
+        fs::write(&tmp, &buf).unwrap();
+        let t = Instant::now();
+        let cached = decode_source(&tmp).unwrap();
+        println!(
+            "decode cached jpeg {:?}: {:?}",
+            (cached.width(), cached.height()),
+            t.elapsed()
+        );
+        let _ = fs::remove_file(&tmp);
+
+        // Box-filter resize (imageops::thumbnail) vs Triangle for the fit path.
+        let rgba = capped.to_rgba8();
+        for (nw, nh) in [(960u32, 800u32), (1280, 800)] {
+            let t = Instant::now();
+            let a = image::imageops::resize(&rgba, nw, nh, FilterType::Triangle);
+            println!("resize Triangle -> {nw}x{nh}: {:?}", t.elapsed());
+            let t = Instant::now();
+            let b = image::imageops::thumbnail(&rgba, nw, nh);
+            println!("thumbnail box   -> {nw}x{nh}: {:?}", t.elapsed());
+            assert_eq!(a.dimensions(), b.dimensions());
+        }
+
+        for cells in [(80u16, 40u16), (120, 50), (160, 60)] {
+            let t = Instant::now();
+            let fitted = fit_to_cells_zoom(&capped, (8, 16), cells, 1.0);
+            println!("fit_to_cells {cells:?}: {:?}", t.elapsed());
+
+            let t = Instant::now();
+            let rgba = fitted.to_rgba8();
+            println!("  to_rgba8: {:?}", t.elapsed());
+
+            let t = Instant::now();
+            let chunks = encode_chunks(&fitted, 1, false);
+            println!(
+                "  encode_chunks: {:?} ({} chunks, {} bytes)",
+                t.elapsed(),
+                chunks.len(),
+                chunks.iter().map(|c| c.len()).sum::<usize>()
+            );
+
+            let t = Instant::now();
+            if let Some(seq) = encode_shm(&fitted, 1, false) {
+                println!("  encode_shm: {:?}", t.elapsed());
+                let name = seq
+                    .rsplit(';')
+                    .next()
+                    .unwrap()
+                    .trim_end_matches(['\u{1b}', '\\']);
+                if let Ok(bytes) = base64_simd::STANDARD.decode_to_vec(name) {
+                    if let Ok(name) = String::from_utf8(bytes) {
+                        let _ = crate::preview::shm::remove(&name);
+                    }
+                }
+            }
+            let _ = rgba;
+        }
+
+        let fitted = fit_to_cells_zoom(&capped, (8, 16), (120, 50), 1.0);
+        let t = Instant::now();
+        let bytes = crate::preview::sixel::encode(&fitted, false);
+        println!(
+            "sixel encode {}x{}: {:?} ({} bytes)",
+            fitted.width(),
+            fitted.height(),
+            t.elapsed(),
+            bytes.len()
+        );
+
+        // Break down the sixel encode.
+        let rgba = fitted.to_rgba8();
+        let t = Instant::now();
+        let has_alpha = rgba.pixels().any(|p| p[3] == 0);
+        println!("  sixel has_alpha scan: {:?}", t.elapsed());
+        let t = Instant::now();
+        let mut sample = Vec::with_capacity(rgba.len());
+        for p in rgba.pixels() {
+            if p[3] != 0 {
+                sample.extend_from_slice(&[p[0], p[1], p[2], 255]);
+            }
+        }
+        println!("  sixel sample build: {:?}", t.elapsed());
+        let t = Instant::now();
+        let quant = color_quant::NeuQuant::new(20, 256, &sample);
+        println!("  sixel neuquant: {:?}", t.elapsed());
+        let t = Instant::now();
+        let mut sum = 0usize;
+        for p in rgba.pixels() {
+            if p[3] != 0 {
+                sum += quant.index_of(&[p[0], p[1], p[2], 255]);
+            }
+        }
+        println!(
+            "  sixel index_of loop: {:?} (sum {sum}, alpha {has_alpha})",
+            t.elapsed()
+        );
     }
 }

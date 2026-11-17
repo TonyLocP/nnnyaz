@@ -2432,9 +2432,9 @@ impl App {
         self.state.selected().and_then(|i| self.entries.get(i))
     }
 
-    /// Preload up to two image neighbours on each side (into the preview's
-    /// disk + memory caches) so navigating to them is instant, like yazi's
-    /// image previewer does.
+    /// Preload up to two image/video/PDF neighbours on each side (into the
+    /// preview's disk + memory caches) so navigating to them is instant, like
+    /// yazi's previewer does. PDFs preload their first page.
     fn preload_neighbours(&mut self) {
         if !self.preview.kitty_enabled() {
             return;
@@ -2450,7 +2450,12 @@ impl App {
             let Some(e) = self.entries.get(j) else {
                 continue;
             };
-            if e.is_dir || !matches!(detect::detect(&e.path), Kind::Image | Kind::Video) {
+            if e.is_dir
+                || !matches!(
+                    detect::detect(&e.path),
+                    Kind::Image | Kind::Video | Kind::Pdf
+                )
+            {
                 continue;
             }
             self.preview.preload((e.path.clone(), e.modified, e.size));

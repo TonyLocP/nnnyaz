@@ -144,6 +144,34 @@ impl SixelState {
     }
 }
 
+/// 32×32×32 nearest-palette lookup (5 bits per channel).
+fn palette_lut(palette: &[u8], colors: usize) -> Vec<u8> {
+    let mut lut = vec![0u8; 32 * 32 * 32];
+    for r in 0..32usize {
+        let rv = (r * 8 + 4) as i32;
+        for g in 0..32usize {
+            let gv = (g * 8 + 4) as i32;
+            for b in 0..32usize {
+                let bv = (b * 8 + 4) as i32;
+                let mut best = 0usize;
+                let mut bestd = i32::MAX;
+                for i in 0..colors {
+                    let dr = rv - i32::from(palette[i * 3]);
+                    let dg = gv - i32::from(palette[i * 3 + 1]);
+                    let db = bv - i32::from(palette[i * 3 + 2]);
+                    let d = dr * dr + dg * dg + db * db;
+                    if d < bestd {
+                        bestd = d;
+                        best = i;
+                    }
+                }
+                lut[(r << 10) | (g << 5) | b] = best as u8;
+            }
+        }
+    }
+    lut
+}
+
 /// Encode an RGBA image as a sixel sequence. Transparent pixels are emitted as
 /// `?` runs, which advance the sixel cursor without painting anything.
 pub fn encode(img: &DynamicImage, is_tmux: bool) -> Vec<u8> {
@@ -170,6 +198,11 @@ pub fn encode(img: &DynamicImage, is_tmux: bool) -> Vec<u8> {
     let quant = color_quant::NeuQuant::new(samplefac, colors, &sample);
     let palette = quant.color_map_rgb();
     let offset = u8::from(has_alpha);
+    // Nearest-palette lookup for every 5-bit-per-channel colour. Building the
+    // 32³ table costs a few milliseconds once; mapping each pixel through
+    // `NeuQuant::index_of` (a search over the palette) for a full preview can
+    // take tens of milliseconds, so the table pays for itself immediately.
+    let lut = palette_lut(&palette, colors);
 
     let mut out = String::with_capacity(1024 + (w as usize * h as usize) / 2);
     let _ = write!(out, "\x1bP9;1q\"1;1;{w};{h}");
@@ -192,7 +225,10 @@ pub fn encode(img: &DynamicImage, is_tmux: bool) -> Vec<u8> {
             *slot = if p[3] == 0 {
                 None
             } else {
-                Some(quant.index_of(&[p[0], p[1], p[2], 255]) as u8 + offset)
+                let key = (usize::from(p[0]) >> 3) << 10
+                    | (usize::from(p[1]) >> 3) << 5
+                    | usize::from(p[2]) >> 3;
+                Some(lut[key] + offset)
             };
         }
 
@@ -294,6 +330,18 @@ mod tests {
         assert!(text.contains('-'));
         assert!(text.contains('?'));
         assert!(text.ends_with("\x1b\\"));
+    }
+
+    #[test]
+    fn lut_maps_colours_to_nearest_palette_entry() {
+        let palette = vec![0, 0, 0, 255, 255, 255, 255, 0, 0];
+        let lut = palette_lut(&palette, 3);
+        let idx = |r: u8, g: u8, b: u8| {
+            lut[(usize::from(r) >> 3) << 10 | (usize::from(g) >> 3) << 5 | usize::from(b) >> 3]
+        };
+        assert_eq!(idx(250, 2, 2), 2);
+        assert_eq!(idx(2, 2, 2), 0);
+        assert_eq!(idx(250, 250, 250), 1);
     }
 
     #[test]

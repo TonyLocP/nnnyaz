@@ -110,6 +110,12 @@ time with `pdftoppm` (poppler), and `J`/`K` or scrolling over the preview
 switches pages. Page counts come from `pdfinfo` when it is installed.
 Archives are listed with `7z`, and JSON is pretty-printed with `jq`.
 
+Decoded images are cached on disk (shared with Yazi when its cache is
+available), and image/video/PDF neighbours are preloaded in the background, so
+navigating back over a folder is instant. The first view of a very large photo
+is decoded and downscaled once; writing it to the cache happens in the
+background rather than delaying the image.
+
 ## Configuration
 
 rnn reads configuration from the first of:
