@@ -58,12 +58,18 @@ are candidates, roughly in priority order.
       `image_delay` in addition to `cache_size`; invalid values warn and keep
       the default. rnn keeps its faster defaults (1920×1080, box filter,
       quality 90) rather than Yazi's 600×900/triangle/75.
+- [x] **Font and archive previews** — font files (`ttf`, `otf`, `ttc`, `woff`,
+      …) render a glyph sheet through ImageMagick (`magick`/`convert`) and go
+      through the same image cache and preload path as photos. Archive listings
+      now parse `7z l -slt` and show an indented tree with human-readable sizes,
+      synthesizing parent directories and skipping `__MACOSX` metadata.
 
 ## Next
 
-- [ ] Review the remaining Yazi/nnn differences after PDF preview. Candidates:
-      picker `--chooser-file` edge cases, open-with rules, and previewer
-      coverage (fonts and archive details).
+- [ ] Marks and bookmarks: Yazi-style `m`/`'` marks and nnn-style bookmarks
+      for fast navigation between directories.
+- [ ] Audit the remaining picker `--chooser-file` edge cases and open-with
+      rules against Yazi.
 
 ## Local setup (outside this repo)
 

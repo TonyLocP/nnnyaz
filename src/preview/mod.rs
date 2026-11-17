@@ -813,6 +813,15 @@ fn generate(key: &Key, page: usize, settings: &Settings) -> Artifact {
             },
             Err(e) => err(format!("{}: {e}", path.display())),
         },
+        detect::Kind::Font => match kitty::load_font_preview(path, key.1, key.2, settings) {
+            Ok(img) => Artifact {
+                kind: "font",
+                data: Vec::new(),
+                img: Some(img),
+                pages: None,
+            },
+            Err(_) => binary_preview(path),
+        },
         detect::Kind::Archive => match media::archive_listing(path) {
             Ok(s) => Artifact {
                 kind: "archive",

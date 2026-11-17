@@ -2439,7 +2439,7 @@ impl App {
         self.state.selected().and_then(|i| self.entries.get(i))
     }
 
-    /// Preload up to two image/video/PDF neighbours on each side (into the
+    /// Preload up to two image/video/PDF/font neighbours on each side (into the
     /// preview's disk + memory caches) so navigating to them is instant, like
     /// yazi's previewer does. PDFs preload their first page.
     fn preload_neighbours(&mut self) {
@@ -2460,7 +2460,7 @@ impl App {
             if e.is_dir
                 || !matches!(
                     detect::detect(&e.path),
-                    Kind::Image | Kind::Video | Kind::Pdf
+                    Kind::Image | Kind::Video | Kind::Pdf | Kind::Font
                 )
             {
                 continue;
@@ -4163,6 +4163,7 @@ impl App {
                 Kind::Image => "image",
                 Kind::Video => "video",
                 Kind::Pdf => "pdf",
+                Kind::Font => "font",
                 Kind::Archive => "archive",
                 Kind::Binary => "binary",
             }

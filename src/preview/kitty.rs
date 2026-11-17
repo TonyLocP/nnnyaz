@@ -245,6 +245,73 @@ pub fn load_pdf_page(
     Ok(capped)
 }
 
+/// Render a font's glyph sheet to an image, sharing Yazi's cache when present.
+pub fn load_font_preview(
+    path: &Path,
+    mtime: Option<SystemTime>,
+    size: u64,
+    settings: &Settings,
+) -> io::Result<DynamicImage> {
+    if let Some(dir) = yazi::cache_dir() {
+        return load_font_shared(&dir, path, settings);
+    }
+    load_font_from(&cache_dir(), path, mtime, size, settings)
+}
+
+fn load_font_shared(dir: &Path, path: &Path, settings: &Settings) -> io::Result<DynamicImage> {
+    let target = yazi::target(dir, path);
+    if let Some(target) = &target {
+        if let Some(img) = decode(target) {
+            if std::env::var_os("RNN_DEBUG").is_some() {
+                eprintln!("cache: yazi font hit {}", target.display());
+            }
+            return Ok(img);
+        }
+    }
+
+    fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(
+        ".rnn-font-{}-{}.jpg",
+        std::process::id(),
+        next_id()
+    ));
+    let img = media::render_font_preview(path, &tmp).and_then(|_| decode_source(&tmp));
+    let _ = fs::remove_file(&tmp);
+    let capped = cap_size(&img?, settings.max, settings.filter);
+    if let Some(target) = &target {
+        schedule_shared(target, &capped, settings.quality);
+    }
+    Ok(capped)
+}
+
+fn load_font_from(
+    dir: &Path,
+    path: &Path,
+    mtime: Option<SystemTime>,
+    size: u64,
+    settings: &Settings,
+) -> io::Result<DynamicImage> {
+    let stem = cache_stem(path, mtime, size);
+    if let Some(img) = ["png", "jpg"]
+        .iter()
+        .find_map(|ext| decode(&dir.join(format!("{stem}.{ext}"))))
+    {
+        return Ok(img);
+    }
+
+    fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(
+        ".{stem}.{}.{}.font.jpg",
+        std::process::id(),
+        next_id()
+    ));
+    let img = media::render_font_preview(path, &tmp).and_then(|_| decode_source(&tmp));
+    let _ = fs::remove_file(&tmp);
+    let capped = cap_size(&img?, settings.max, settings.filter);
+    schedule_cache(dir, &stem, &capped, settings.quality);
+    Ok(capped)
+}
+
 /// On-disk preview cache root. `RNN_CACHE_DIR` overrides it (tests, config);
 /// otherwise a dir under the system temp dir, like yazi's default.
 fn cache_dir() -> PathBuf {

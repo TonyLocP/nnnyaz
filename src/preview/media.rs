@@ -1,8 +1,11 @@
 use std::{
+    collections::HashSet,
     io::{self, Read},
     path::Path,
     process::{Command, Stdio},
 };
+
+use crate::util::human;
 
 const TEXT_CAP: u64 = 1024 * 1024;
 
@@ -26,12 +29,165 @@ fn capture(cmd: &mut Command, cap: u64) -> io::Result<(Vec<u8>, bool)> {
     Ok((out, truncated))
 }
 
-/// List an archive's contents with 7z.
+/// List an archive's contents with 7z, formatted as a tree with sizes.
+///
+/// Uses `-slt` (one `Key = Value` block per entry) rather than the fixed-width
+/// bare listing so paths containing spaces parse correctly. Compressed tarballs
+/// that 7z reports as a single inner `.tar` are listed as that one entry; Yazi
+/// goes one level further by piping through `7z x -so`.
 pub fn archive_listing(path: &Path) -> io::Result<String> {
-    let mut c = Command::new("7z");
-    c.args(["l", "-ba"]).arg(path);
-    let (data, _) = capture(&mut c, TEXT_CAP)?;
-    Ok(String::from_utf8_lossy(&data).into_owned())
+    let mut last: Option<io::Error> = None;
+    for prog in ["7zz", "7z"] {
+        let mut c = Command::new(prog);
+        c.args(["l", "-ba", "-slt", "-sccUTF-8", "-xr!__MACOSX"])
+            .arg(path);
+        match capture(&mut c, TEXT_CAP) {
+            Ok((data, _)) => {
+                let text = String::from_utf8_lossy(&data);
+                return Ok(format_archive(&parse_7z_slt(&text)));
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("7z: not found")))
+}
+
+#[derive(Debug, PartialEq)]
+struct ArchiveEntry {
+    path: String,
+    size: u64,
+    is_dir: bool,
+}
+
+/// Parse the blank-line-separated blocks produced by `7z l -ba -slt`.
+fn parse_7z_slt(text: &str) -> Vec<ArchiveEntry> {
+    fn flush(path: &mut Option<String>, size: u64, is_dir: bool, out: &mut Vec<ArchiveEntry>) {
+        if let Some(p) = path.take() {
+            if !p.is_empty() {
+                out.push(ArchiveEntry {
+                    path: p,
+                    size,
+                    is_dir,
+                });
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut path: Option<String> = None;
+    let mut size = 0;
+    let mut is_dir = false;
+    for raw in text.lines() {
+        let line = raw.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            flush(&mut path, size, is_dir, &mut out);
+            size = 0;
+            is_dir = false;
+        } else if let Some(v) = line.strip_prefix("Path = ") {
+            path = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("Size = ") {
+            size = v.trim().parse().unwrap_or(0);
+        } else if let Some(v) = line.strip_prefix("Folder = ") {
+            is_dir = v.trim() == "+";
+        } else if let Some(v) = line.strip_prefix("Attributes = ") {
+            // Older 7z builds omit `Folder`; the first attribute is `D` for
+            // directories.
+            if v.trim_start().starts_with('D') {
+                is_dir = true;
+            }
+        }
+    }
+    flush(&mut path, size, is_dir, &mut out);
+    out
+}
+
+/// Render entries as an indented tree, synthesizing parent directories that the
+/// archive does not store explicitly (Yazi does the same).
+fn format_archive(entries: &[ArchiveEntry]) -> String {
+    let mut out = String::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for e in entries {
+        let path = e.path.replace('\\', "/");
+        let path = path.trim_start_matches("./").trim_end_matches('/');
+        if path.is_empty() || path == "__MACOSX" || path.starts_with("__MACOSX/") {
+            continue;
+        }
+        let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        for i in 1..parts.len() {
+            let dir = parts[..i].join("/");
+            if seen.insert(dir) {
+                push_archive_line(&mut out, i - 1, parts[i - 1], 0, true);
+            }
+        }
+        let depth = parts.len() - 1;
+        let name = parts[depth];
+        if e.is_dir {
+            if seen.insert(path.to_string()) {
+                push_archive_line(&mut out, depth, name, e.size, true);
+            }
+        } else {
+            push_archive_line(&mut out, depth, name, e.size, false);
+        }
+    }
+    out
+}
+
+fn push_archive_line(out: &mut String, depth: usize, name: &str, size: u64, is_dir: bool) {
+    for _ in 0..depth {
+        out.push_str("  ");
+    }
+    out.push_str(name);
+    if is_dir {
+        out.push('/');
+    } else if size > 0 {
+        out.push_str("  ");
+        out.push_str(&human(size));
+    }
+    out.push('\n');
+}
+
+/// Glyph sample used by Yazi's font previewer.
+const FONT_SAMPLE: &str =
+    "ABCDEFGHIJKLM\nNOPQRSTUVWXYZ\nabcdefghijklm\nnopqrstuvwxyz\n1234567890\n!$&*()[]{}";
+
+/// Render a font's glyphs to a JPEG with ImageMagick, mirroring Yazi's font
+/// previewer. Tries `magick` (ImageMagick 7) then `convert` (ImageMagick 6).
+pub fn render_font_preview(path: &Path, dst: &Path) -> io::Result<()> {
+    let mut last: Option<io::Error> = None;
+    for prog in ["magick", "convert"] {
+        let mut c = Command::new(prog);
+        c.args(["-size", "800x560", "-gravity", "center", "-font"])
+            .arg(path)
+            .args([
+                "-pointsize",
+                "64",
+                "xc:white",
+                "-fill",
+                "black",
+                "-annotate",
+                "+0+0",
+                FONT_SAMPLE,
+            ])
+            .arg(format!("JPG:{}", dst.display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        match c.output() {
+            Ok(out) if out.status.success() => return Ok(()),
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                last = Some(io::Error::other(format!(
+                    "{prog}: {}",
+                    err.lines().next().unwrap_or("failed")
+                )));
+            }
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("magick: not found")))
 }
 
 /// Pretty-print JSON with jq (later syntax-highlighted as JSON).
@@ -117,7 +273,7 @@ pub fn extract_video_frame(path: &Path, dst: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_pdf_pages;
+    use super::{format_archive, parse_7z_slt, parse_pdf_pages};
 
     #[test]
     fn parses_pdfinfo_page_count() {
@@ -126,5 +282,84 @@ mod tests {
         assert_eq!(parse_pdf_pages("Pages: 1\n"), Some(1));
         assert_eq!(parse_pdf_pages("Title: no pages here\n"), None);
         assert_eq!(parse_pdf_pages("Pages: many\n"), None);
+    }
+
+    #[test]
+    fn archive_slt_parses_blocks() {
+        let text = "Path = a.txt\r\nSize = 6\r\nAttributes =  -rw-r--r--\r\n\r\n\
+                    Path = sub\r\nFolder = +\r\nSize = 0\r\n\r\n\
+                    Path = sub/b.txt\r\nSize = 1\r\nAttributes =  -rw-r--r--\r\n";
+        let entries = parse_7z_slt(text);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].path, "a.txt");
+        assert_eq!(entries[0].size, 6);
+        assert!(!entries[0].is_dir);
+        assert_eq!(entries[1].path, "sub");
+        assert!(entries[1].is_dir);
+        assert_eq!(entries[2].path, "sub/b.txt");
+    }
+
+    #[test]
+    fn archive_attributes_mark_directories() {
+        // Some 7z builds omit `Folder`; the leading D in Attributes still
+        // identifies a directory.
+        let text = "Path = dir\nSize = 0\nAttributes = D drwxr-xr-x\n";
+        let entries = parse_7z_slt(text);
+        assert!(entries[0].is_dir);
+    }
+
+    #[test]
+    fn archive_formats_as_tree_with_sizes() {
+        let text = "Path = a.txt\nSize = 6\n\nPath = sub\nFolder = +\nSize = 0\n\n\
+                    Path = sub/b.txt\nSize = 1024\n\nPath = __MACOSX/junk\nSize = 2\n";
+        let out = format_archive(&parse_7z_slt(text));
+        assert_eq!(out, "a.txt  6B\nsub/\n  b.txt  1.0K\n");
+    }
+
+    #[test]
+    fn archive_synthesizes_missing_parents() {
+        let text = "Path = x/y/z.txt\nSize = 3\n";
+        let out = format_archive(&parse_7z_slt(text));
+        assert_eq!(out, "x/\n  y/\n    z.txt  3B\n");
+    }
+
+    #[test]
+    fn archive_listing_formats_a_real_archive() {
+        use std::process::Command;
+
+        let dir = std::env::temp_dir().join(format!(
+            "rnn-archive-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"hello\n").unwrap();
+        std::fs::write(dir.join("sub/b.txt"), b"x").unwrap();
+
+        let zip = dir.join("test.zip");
+        let created = Command::new("7z")
+            .args(["a", "-bd"])
+            .arg(&zip)
+            .arg("a.txt")
+            .arg("sub")
+            .current_dir(&dir)
+            .output();
+        let Ok(created) = created else {
+            let _ = std::fs::remove_dir_all(&dir);
+            return; // 7z not installed; unit tests cover the parser
+        };
+        if !created.status.success() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let text = super::archive_listing(&zip).unwrap();
+        assert!(text.contains("a.txt  6B"), "{text}");
+        assert!(text.contains("sub/"), "{text}");
+        assert!(text.contains("  b.txt  1B"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
