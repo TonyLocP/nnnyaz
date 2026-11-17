@@ -68,9 +68,10 @@ rnn() {
 
 rnn can act as a file picker, like nnn's `-p` or Yazi's `--chooser-file`.
 Pass a file with `--chooser-file <path>`, `-p <path>`, or set
-`RNN_CHOOSER_FILE`. Select entries with `Space`; press `Enter` on a file to
-pick the selection (or the hovered file) and quit. Quitting normally with `q`
-or `Q` also writes an existing selection.
+`RNN_CHOOSER_FILE`. Select entries with `Space`; press `Enter` on any entry
+(files and directories alike) to pick the selection, or the hovered entry when
+nothing is selected, and quit. Quitting normally with `q` or `Q` also writes an
+existing selection.
 
 `-p -` writes the paths to stdout instead of a file, which is useful in
 command substitution. `-0` (or `--null`) separates paths with NUL instead of a
@@ -181,11 +182,21 @@ rules = [
 If `[opener]` or `[open]` is omitted, rnn falls back to your Yazi config and
 then to built-in defaults.
 
-`Enter` (and the built-in `open` opener) uses the system handler for the file's
-MIME type, but browser-associated files follow the browser you selected with
+`Enter`/`o` open the whole selection when there is one, or the hovered entry
+otherwise; `l`/`→` enter the hovered directory (or act on the hovered file).
+`O` (or `<S-Enter>`) lists the openers that apply to the selection. The built-in
+`open` opener uses the system handler for the file's MIME type, but
+browser-associated files follow the browser you selected with
 `xdg-settings set default-web-browser`. For example, if PDFs are registered to
 Brave while Zen is your default browser, rnn opens the PDF in Zen. Set `OPENER`
 to override this and use your own launcher for everything.
+
+Opener commands support Yazi's placeholders: `%s`/`%S` expand to the target
+files, `%d`/`%D` to their parent directories, a 1-based suffix picks one target
+(`%s1`, `%d2`), and `%%` is a literal `%`. A command with an unnumbered `%s` or
+`%S` runs once with every target (Yazi's `spread`); otherwise it runs once per
+file. Hovered, yanked, and tab placeholders expand to empty in an opener's
+context, matching Yazi.
 
 ### `keymap.toml`
 

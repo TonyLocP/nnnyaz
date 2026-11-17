@@ -27,6 +27,7 @@ pub enum Action {
     Bottom,
     Parent,
     Open,
+    Enter,
     OpenWith,
     History(i8),
     Follow,
@@ -197,6 +198,7 @@ impl Action {
             Action::Bottom => "bottom",
             Action::Parent => "parent",
             Action::Open => "open",
+            Action::Enter => "enter",
             Action::OpenWith => "open_with",
             Action::History(_) => "history",
             Action::Follow => "follow",
@@ -319,13 +321,14 @@ impl Action {
             "top" => Action::Top,
             "bottom" => Action::Bottom,
             "parent" | "leave" => Action::Parent,
-            "open" | "enter" => {
+            "open" => {
                 if interactive {
                     Action::OpenWith
                 } else {
                     Action::Open
                 }
             }
+            "enter" => Action::Enter,
             "open_with" => Action::OpenWith,
             "history" => Action::History(num(0)? as i8),
             "back" => Action::History(-1),
@@ -540,6 +543,8 @@ mod tests {
         assert_eq!(parse("forward").unwrap(), Action::History(1));
 
         assert_eq!(parse("open --interactive").unwrap(), Action::OpenWith);
+        assert_eq!(parse("open").unwrap(), Action::Open);
+        assert_eq!(parse("enter").unwrap(), Action::Enter);
         assert_eq!(parse("yank --cut").unwrap(), Action::Cut);
         assert_eq!(parse("remove").unwrap(), Action::Trash);
         assert_eq!(parse("remove --permanently").unwrap(), Action::Delete);

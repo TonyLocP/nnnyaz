@@ -663,9 +663,33 @@ struct Info {
 
 /// The modal open-with menu (`O`).
 struct OpenWith {
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     options: Vec<openwith::Opener>,
     index: usize,
+}
+
+/// What `open` should do for the current selection or hovered entry.
+#[derive(Debug, PartialEq)]
+enum OpenAction {
+    Nothing,
+    Pick,
+    EnterDirectory(PathBuf),
+    External(Vec<PathBuf>),
+}
+
+/// Picker mode wins over normal opening (even for directories). Otherwise a
+/// lone directory is entered and everything else is opened externally. Like
+/// yazi, opening acts on the whole selection when there is one.
+fn open_action(chooser: bool, targets: Vec<PathBuf>) -> OpenAction {
+    if targets.is_empty() {
+        OpenAction::Nothing
+    } else if chooser {
+        OpenAction::Pick
+    } else if targets.len() == 1 && targets[0].is_dir() {
+        OpenAction::EnterDirectory(targets[0].clone())
+    } else {
+        OpenAction::External(targets)
+    }
 }
 
 pub struct App {
@@ -3076,15 +3100,37 @@ impl App {
     }
 
     fn open(&mut self, term: &mut DefaultTerminal) {
+        let _ = term;
+        match open_action(self.chooser_file.is_some(), self.targets()) {
+            OpenAction::Nothing => {}
+            OpenAction::Pick => {
+                // Picker mode: Enter/o picks the selection (or the hovered
+                // entry) and exits — including when the hovered entry is a
+                // directory. Yazi's chooser check runs before its normal open
+                // handling, so directories are picked rather than entered;
+                // `l` still navigates.
+                self.write_chooser(true);
+                self.quit = true;
+            }
+            OpenAction::EnterDirectory(path) => self.cd(path, None),
+            OpenAction::External(paths) => {
+                for path in &paths {
+                    self.open_external(path);
+                }
+            }
+        }
+    }
+
+    /// `l`/`<Right>`: enter a directory, or open the hovered file. Unlike
+    /// `open`, this ignores the selection so it always acts on the cursor. In
+    /// picker mode a hovered file is picked instead of launched.
+    fn enter(&mut self) {
         let Some(e) = self.current().cloned() else {
             return;
         };
-        let _ = term;
         if e.is_dir {
             self.cd(e.path, None);
         } else if self.chooser_file.is_some() {
-            // Picker mode: opening a file picks it (and any selection) and
-            // exits, like nnn's `-p` and Yazi's `--chooser-file`.
             self.write_chooser(true);
             self.quit = true;
         } else {
@@ -3094,9 +3140,10 @@ impl App {
 
     /// `O`: build the open-with menu from the user's Yazi config.
     fn start_open_with(&mut self) {
-        let Some(e) = self.current().cloned() else {
+        let paths = self.targets();
+        if paths.is_empty() {
             return;
-        };
+        }
         let mut options = Vec::new();
         if self.is_trash_view() {
             options.push(openwith::Opener {
@@ -3112,13 +3159,13 @@ impl App {
                 block: false,
             });
         }
-        options.extend(openwith::options(&e.path, self.config.open.as_ref()));
+        options.extend(openwith::options_for(&paths, self.config.open.as_ref()));
         if options.is_empty() {
             self.status = "open with: no openers configured".into();
             return;
         }
         self.open_with = Some(OpenWith {
-            path: e.path,
+            paths,
             options,
             index: 0,
         });
@@ -3188,38 +3235,64 @@ impl App {
             return;
         }
         if op.command == "rnn:open" {
-            self.open_external(&state.path);
+            for path in &state.paths {
+                self.open_external(path);
+            }
             return;
         }
-        let cmd = op.command_for(&state.path);
+
+        // Yazi runs the opener once over all targets when the command has an
+        // unnumbered `%s`; otherwise it runs once per file.
+        let chunks: Vec<&[PathBuf]> = if op.spread() {
+            vec![state.paths.as_slice()]
+        } else {
+            state.paths.iter().map(std::slice::from_ref).collect()
+        };
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let opened = |name: &str| {
+            if state.paths.len() > 1 {
+                format!("opened {} item(s) with {name}", state.paths.len())
+            } else {
+                format!("opened with {name}")
+            }
+        };
+
         if op.block {
             self.restore_terminal();
-            let r = Command::new(&shell)
-                .arg("-c")
-                .arg(&cmd)
-                .current_dir(&self.cwd)
-                .status();
-            *term = self.init_terminal();
-            match r {
-                Ok(s) if !s.success() => self.status = format!("{}: {s}", op.name),
-                Err(e) => self.status = format!("{}: {e}", op.name),
-                _ => self.status = format!("opened with {}", op.name),
+            let mut failure: Option<String> = None;
+            for chunk in &chunks {
+                let cmd = op.command_for(chunk);
+                match Command::new(&shell)
+                    .arg("-c")
+                    .arg(&cmd)
+                    .current_dir(&self.cwd)
+                    .status()
+                {
+                    Ok(s) if !s.success() => failure = Some(format!("{}: {s}", op.name)),
+                    Err(e) => failure = Some(format!("{}: {e}", op.name)),
+                    _ => {}
+                }
             }
+            *term = self.init_terminal();
+            self.status = failure.unwrap_or_else(|| opened(&op.name));
             self.reload();
         } else {
-            let r = Command::new(&shell)
-                .arg("-c")
-                .arg(&cmd)
-                .current_dir(&self.cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-            match r {
-                Ok(_) => self.status = format!("opened with {}", op.name),
-                Err(e) => self.status = format!("{}: {e}", op.name),
+            let mut failure: Option<String> = None;
+            for chunk in &chunks {
+                let cmd = op.command_for(chunk);
+                let r = Command::new(&shell)
+                    .arg("-c")
+                    .arg(&cmd)
+                    .current_dir(&self.cwd)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+                if let Err(e) = r {
+                    failure = Some(format!("{}: {e}", op.name));
+                }
             }
+            self.status = failure.unwrap_or_else(|| opened(&op.name));
         }
     }
 
@@ -4647,6 +4720,7 @@ impl App {
             },
             Action::Parent => self.go_parent(),
             Action::Open => self.open(term),
+            Action::Enter => self.enter(),
             Action::OpenWith => self.start_open_with(),
             Action::History(n) => {
                 if n < 0 {
@@ -5633,7 +5707,7 @@ impl App {
             .take(visible)
             .map(|(i, op)| {
                 let marker = if i == state.index { "▸ " } else { "  " };
-                let desc = op.desc.as_deref().unwrap_or("");
+                let desc = op.label();
                 let text = if desc.is_empty() {
                     format!("{marker}{}. {}", i + 1, op.name)
                 } else {
@@ -6318,6 +6392,29 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn picker_precedes_directory_entering() {
+        let dir = tmp_dir("picker-dir");
+        let file = dir.join("file.txt");
+        fs::write(&file, b"x").unwrap();
+
+        assert_eq!(
+            open_action(true, vec![dir.clone()]),
+            OpenAction::Pick,
+            "picker mode must pick a hovered directory, not enter it"
+        );
+        assert_eq!(
+            open_action(false, vec![dir.clone()]),
+            OpenAction::EnterDirectory(dir.clone())
+        );
+        assert_eq!(
+            open_action(false, vec![dir.clone(), file.clone()]),
+            OpenAction::External(vec![dir, file])
+        );
+        assert_eq!(open_action(false, Vec::new()), OpenAction::Nothing);
+        assert_eq!(open_action(true, Vec::new()), OpenAction::Nothing);
     }
 
     #[test]

@@ -63,13 +63,20 @@ are candidates, roughly in priority order.
       through the same image cache and preload path as photos. Archive listings
       now parse `7z l -slt` and show an indented tree with human-readable sizes,
       synthesizing parent directories and skipping `__MACOSX` metadata.
+- [x] **Selection-aware open and Yazi opener placeholders** — `Enter`/`o` open
+      the whole selection (or the hovered entry), while `l`/`→` keep entering
+      the hovered directory. `O` intersects the `[open]` rules across every
+      target. Opener commands expand `%s`/`%S`, `%d`/`%D`, `%%`, and 1-based
+      numbered forms; commands with an unnumbered `%s`/`%S` run once with all
+      targets (Yazi's `spread`), and the rest run once per file. Hovered,
+      yanked, and tab placeholders expand to empty in an opener's context, as
+      in Yazi. Picker `Enter` now picks directories instead of entering them.
 
 ## Next
 
 - [ ] Marks and bookmarks: Yazi-style `m`/`'` marks and nnn-style bookmarks
       for fast navigation between directories.
-- [ ] Audit the remaining picker `--chooser-file` edge cases and open-with
-      rules against Yazi.
+- [ ] Audit the remaining picker `--chooser-file` edge cases against Yazi.
 
 ## Local setup (outside this repo)
 
@@ -81,5 +88,7 @@ are candidates, roughly in priority order.
 
 - `Q` quits and writes the cwd file (Yazi uses `Q` for `quit --no-cwd-file`);
   this is intentional so the fish wrapper can `cd` on quit.
+- `l`/`→` also open a hovered file; Yazi's `enter` only enters directories.
+  `Enter`/`o` follow Yazi's selection-aware `open`.
 - Yazi `pick` context is not supported; picker behavior is configured with
   `--chooser-file`/`-p` instead.

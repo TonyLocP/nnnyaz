@@ -8,9 +8,11 @@
 use std::{
     collections::HashMap,
     env,
+    iter::Peekable,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    str::Chars,
 };
 
 /// One entry in the open-with menu.
@@ -23,25 +25,203 @@ pub struct Opener {
 }
 
 impl Opener {
-    /// Expand yazi's `%s` / `%s1` / `%d` / `%d1` placeholders for `path`.
-    pub fn command_for(&self, path: &Path) -> String {
-        let file = shell_quote(&path.to_string_lossy());
-        let dir = shell_quote(&path.parent().unwrap_or(Path::new(".")).to_string_lossy());
-        let mut cmd = self.command.clone();
-        // Numbered forms first so `%s1` isn't consumed by `%s`.
-        for (from, to) in [("%s1", &file), ("%s", &file), ("%d1", &dir), ("%d", &dir)] {
-            cmd = cmd.replace(from, to);
+    /// Whether the command wants every target at once (an unnumbered `%s` or
+    /// `%S`), mirroring yazi's `Splatter::spread`. Otherwise yazi runs the
+    /// opener once per file.
+    pub fn spread(&self) -> bool {
+        command_spreads(&self.command)
+    }
+
+    /// Expand yazi's opener placeholders for `files`.
+    ///
+    /// Yazi splats an opener over just its target files: `%s`/`%S` are the
+    /// targets and `%d`/`%D` their parent directories. Hovered, yanked, and
+    /// tab placeholders expand to empty because an opener has no such context.
+    pub fn command_for(&self, files: &[PathBuf]) -> String {
+        let mut out = String::new();
+        let mut it = self.command.chars().peekable();
+        expand_all(&mut it, files, &mut out);
+        out
+    }
+
+    /// Label for the interactive menu. Falls back to the first word of the
+    /// command, like yazi's `OpenerRule::desc`.
+    pub fn label(&self) -> String {
+        match self.desc.as_deref() {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => self
+                .command
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string(),
         }
-        cmd
     }
 }
 
-/// Build the open-with list for `path`.
+/// Walk the command and expand every `%` placeholder.
+fn expand_all(it: &mut Peekable<Chars<'_>>, files: &[PathBuf], out: &mut String) {
+    while let Some(c) = it.next() {
+        if c == '%' {
+            if it.peek().is_some() {
+                expand_one(it, files, out);
+            } else {
+                out.push('%');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+}
+
+/// Expand the placeholder immediately after a `%`.
+fn expand_one(it: &mut Peekable<Chars<'_>>, files: &[PathBuf], out: &mut String) {
+    let Some(c) = it.next() else {
+        out.push('%');
+        return;
+    };
+    match c {
+        's' | 'S' => expand_selected(it, files, out, false),
+        'd' | 'D' => expand_selected(it, files, out, true),
+        // An opener has no hovered file, so yazi emits an empty argument.
+        'h' | 'H' => out.push_str("''"),
+        // Likewise there is no yank register in an opener's context. A
+        // numbered form still becomes an empty argument.
+        'y' | 'Y' => {
+            if consume_digits(it).is_some() {
+                out.push_str("''");
+            }
+        }
+        // `%t`/`%T` look the next placeholder up in a neighbouring tab. An
+        // opener has no tab context, so that tab is empty.
+        't' | 'T' => {
+            if it.peek().is_some() {
+                expand_one(it, &[], out);
+            } else {
+                out.push('%');
+            }
+        }
+        '%' => out.push('%'),
+        other => {
+            out.push('%');
+            out.push(other);
+        }
+    }
+}
+
+/// Expand `%s`/`%S` (files) or `%d`/`%D` (their directories). A trailing
+/// number is 1-based; an out-of-range index becomes an empty argument, while
+/// `0` behaves like the unnumbered form.
+fn expand_selected(
+    it: &mut Peekable<Chars<'_>>,
+    files: &[PathBuf],
+    out: &mut String,
+    dirname: bool,
+) {
+    let idx = consume_digits(it);
+    let push = |out: &mut String, p: &Path| out.push_str(&shell_quote(&p.to_string_lossy()));
+    match idx {
+        Some(0) if files.is_empty() => out.push_str("''"),
+        Some(0) => {
+            for (i, f) in files.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                push(out, path_for(f, dirname));
+            }
+        }
+        Some(n) => match files.get(n - 1) {
+            Some(f) => push(out, path_for(f, dirname)),
+            None => out.push_str("''"),
+        },
+        None => {
+            for (i, f) in files.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                push(out, path_for(f, dirname));
+            }
+        }
+    }
+}
+
+/// The file itself, or its parent directory for `%d`/`%D`.
+fn path_for(f: &Path, dirname: bool) -> &Path {
+    if dirname {
+        f.parent().unwrap_or(Path::new(""))
+    } else {
+        f
+    }
+}
+
+/// Consume a run of ASCII digits after a placeholder letter. Returns `None`
+/// when there are no digits (or the number overflows), matching yazi.
+fn consume_digits(it: &mut Peekable<Chars<'_>>) -> Option<usize> {
+    let mut value: Option<usize> = None;
+    while let Some(c) = it.peek().copied() {
+        let Some(d) = c.to_digit(10) else {
+            break;
+        };
+        it.next();
+        value = Some(
+            value
+                .unwrap_or(0)
+                .checked_mul(10)?
+                .checked_add(d as usize)?,
+        );
+    }
+    value
+}
+
+/// True when the command contains an unnumbered `%s`/`%S` (including after a
+/// `%t`/`%T` tab prefix), i.e. yazi would run it once with all targets.
+fn command_spreads(command: &str) -> bool {
+    let mut it = command.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '%' {
+            continue;
+        }
+        let Some(p) = it.next() else {
+            break;
+        };
+        if scan_placeholder(&mut it, p) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Inspect one placeholder letter (already consumed). Returns true when it is
+/// an unnumbered `%s`/`%S`, possibly reached through a tab prefix.
+fn scan_placeholder(it: &mut Peekable<Chars<'_>>, p: char) -> bool {
+    match p {
+        's' | 'S' => {
+            if !it.peek().is_some_and(|c| c.is_ascii_digit()) {
+                return true;
+            }
+            let _ = consume_digits(it);
+        }
+        'd' | 'D' | 'y' | 'Y' => {
+            let _ = consume_digits(it);
+        }
+        't' | 'T' => {
+            if let Some(next) = it.next() {
+                return scan_placeholder(it, next);
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+/// Build the open-with list for a group of targets.
 ///
 /// `doc` is the `[opener]`/`[open]` part of rnn's `config.toml` (if any). It
 /// replaces the matching section from the user's Yazi config; missing sections
-/// still fall back to Yazi's config and then to built-in defaults.
-pub fn options(path: &Path, doc: Option<&toml::Value>) -> Vec<Opener> {
+/// still fall back to Yazi's config and then to built-in defaults. Like yazi's
+/// `Open::match_common`, only openers offered by every target's `[open]` rule
+/// are listed, in the first rule's order.
+pub fn options_for(paths: &[PathBuf], doc: Option<&toml::Value>) -> Vec<Opener> {
     let mut merged = load_config().unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
     if let Some(over) = doc.and_then(|d| d.as_table()) {
         if let Some(base) = merged.as_table_mut() {
@@ -62,9 +242,28 @@ pub fn options(path: &Path, doc: Option<&toml::Value>) -> Vec<Opener> {
         }
     }
 
-    let uses = matching_uses(doc, path);
+    let rules = build_rules(doc);
+    let mut uses: Option<Vec<String>> = None;
+    for path in paths {
+        let path_uses = matching_uses(&rules, path);
+        if path_uses.is_empty() {
+            uses = Some(Vec::new());
+            break;
+        }
+        uses = Some(match uses {
+            None => path_uses,
+            Some(common) => common
+                .into_iter()
+                .filter(|name| path_uses.contains(name))
+                .collect(),
+        });
+        if uses.as_ref().is_some_and(Vec::is_empty) {
+            break;
+        }
+    }
+
     let mut out = Vec::new();
-    for name in uses {
+    for name in uses.unwrap_or_default() {
         if let Some(op) = openers.get(&name) {
             if !out.iter().any(|o: &Opener| o.name == op.name) {
                 out.push(op.clone());
@@ -229,17 +428,17 @@ rules = [
 "#;
 
 /// A single `[open]` rule.
-struct Rule<'a> {
-    mime: Option<&'a str>,
-    url: Option<&'a str>,
+struct Rule {
+    mime: Option<String>,
+    url: Option<String>,
     uses: Vec<String>,
 }
 
-impl<'a> Rule<'a> {
+impl Rule {
     fn matches(&self, mime: Option<&str>, name: &str) -> bool {
-        if let Some(pat) = self.mime {
+        if let Some(pat) = &self.mime {
             mime.is_some_and(|m| mime_matches(pat, m))
-        } else if let Some(pat) = self.url {
+        } else if let Some(pat) = &self.url {
             url_matches(pat, name)
         } else {
             false
@@ -247,7 +446,7 @@ impl<'a> Rule<'a> {
     }
 }
 
-fn rules_from(value: &toml::Value) -> Vec<Rule<'_>> {
+fn rules_from(value: &toml::Value) -> Vec<Rule> {
     let Some(array) = value.as_array() else {
         return Vec::new();
     };
@@ -256,29 +455,25 @@ fn rules_from(value: &toml::Value) -> Vec<Rule<'_>> {
         .filter_map(|rule| {
             let table = rule.as_table()?;
             Some(Rule {
-                mime: table.get("mime").and_then(|v| v.as_str()),
-                url: table.get("url").and_then(|v| v.as_str()),
+                mime: table
+                    .get("mime")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                url: table
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
                 uses: use_list(table),
             })
         })
         .collect()
 }
 
-/// First `[open]` rule that matches `path`, returning its `use` list.
+/// Assemble the `[open]` rule list once for a group of targets.
 ///
 /// Order mirrors yazi: `prepend_rules`, then the base rules (the user's
 /// `rules` when present, otherwise yazi's preset), then `append_rules`.
-fn matching_uses(doc: &toml::Value, path: &Path) -> Vec<String> {
-    let mime = if path.is_dir() {
-        Some("folder/local".to_string())
-    } else {
-        file_mime(path)
-    };
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-
+fn build_rules(doc: &toml::Value) -> Vec<Rule> {
     let defaults: toml::Value = toml::from_str(DEFAULT_RULES).expect("valid default rules");
     let mut rules: Vec<Rule> = Vec::new();
     if let Some(open) = doc.get("open").and_then(|v| v.as_table()) {
@@ -296,10 +491,24 @@ fn matching_uses(doc: &toml::Value, path: &Path) -> Vec<String> {
     } else if let Some(v) = defaults.get("rules") {
         rules.extend(rules_from(v));
     }
+    rules
+}
+
+/// First `[open]` rule that matches `path`, returning its `use` list.
+fn matching_uses(rules: &[Rule], path: &Path) -> Vec<String> {
+    let mime = if path.is_dir() {
+        Some("folder/local".to_string())
+    } else {
+        file_mime(path)
+    };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
 
     for rule in rules {
         if rule.matches(mime.as_deref(), &name) {
-            return rule.uses;
+            return rule.uses.clone();
         }
     }
     Vec::new()
@@ -620,21 +829,73 @@ mod tests {
     }
 
     #[test]
-    fn expands_placeholders() {
-        let op = Opener {
+    fn expands_placeholders_like_yazi() {
+        let files = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b c")];
+        let cases = [
+            ("prog %s", "prog /tmp/a '/tmp/b c'"),
+            ("prog %s1 %s2 %s3", "prog /tmp/a '/tmp/b c' ''"),
+            (
+                "prog %s %s2 %s",
+                "prog /tmp/a '/tmp/b c' '/tmp/b c' /tmp/a '/tmp/b c'",
+            ),
+            ("prog %d", "prog /tmp /tmp"),
+            ("prog %d1 %d3 %d2", "prog /tmp '' /tmp"),
+            ("prog %S", "prog /tmp/a '/tmp/b c'"),
+            ("prog %s0", "prog /tmp/a '/tmp/b c'"),
+            ("prog %% %s2 %x", "prog % '/tmp/b c' %x"),
+            ("prog %", "prog %"),
+        ];
+        for (command, expected) in cases {
+            assert_eq!(op(command).command_for(&files), expected, "{command}");
+        }
+        assert_eq!(op("prog %s").command_for(&[]), "prog ");
+        assert_eq!(op("prog %s1").command_for(&[]), "prog ''");
+    }
+
+    #[test]
+    fn opener_context_has_no_hovered_or_yanked_files() {
+        // Yazi splats an opener over just its targets, so these placeholders
+        // expand to empty (or an empty argument) rather than the manager state.
+        assert_eq!(op("prog %h %H").command_for(&[]), "prog '' ''");
+        assert_eq!(op("prog %y %Y").command_for(&[]), "prog  ");
+        assert_eq!(op("prog %y1").command_for(&[]), "prog ''");
+        assert_eq!(op("prog %ts").command_for(&[]), "prog ");
+        assert_eq!(op("prog %ts1").command_for(&[]), "prog ''");
+    }
+
+    #[test]
+    fn spread_matches_yazi() {
+        assert!(op("%s").spread());
+        assert!(op("%S").spread());
+        assert!(!op("%s1").spread());
+        assert!(!op("%%s").spread());
+        assert!(op("%ts").spread());
+        assert!(!op("%Ts1").spread());
+        assert!(!op("prog").spread());
+        assert!(op("%d %s").spread());
+    }
+
+    #[test]
+    fn opener_label_falls_back_to_the_command() {
+        assert_eq!(op("mpv %s").label(), "mpv");
+        let mut with_desc = op("mpv %s");
+        with_desc.desc = Some("Play".into());
+        assert_eq!(with_desc.label(), "Play");
+    }
+
+    fn op(command: &str) -> Opener {
+        Opener {
             name: "x".into(),
             desc: None,
-            command: "prog %s1 %s %d1".into(),
+            command: command.into(),
             block: false,
-        };
-        let cmd = op.command_for(Path::new("/tmp/a b.txt"));
-        assert_eq!(cmd, "prog '/tmp/a b.txt' '/tmp/a b.txt' /tmp");
+        }
     }
 
     #[test]
     fn folders_use_yazi_default_rule() {
         let doc: toml::Value = toml::from_str("").unwrap();
-        let uses = matching_uses(&doc, Path::new("/tmp"));
+        let uses = matching_uses(&build_rules(&doc), Path::new("/tmp"));
         assert_eq!(uses, vec!["edit", "open", "reveal"]);
     }
 
@@ -648,7 +909,10 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(matching_uses(&doc, Path::new("/tmp")), vec!["first"]);
+        assert_eq!(
+            matching_uses(&build_rules(&doc), Path::new("/tmp")),
+            vec!["first"]
+        );
 
         let doc: toml::Value = toml::from_str(
             r#"
@@ -657,7 +921,53 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(matching_uses(&doc, Path::new("/tmp")), vec!["custom"]);
+        assert_eq!(
+            matching_uses(&build_rules(&doc), Path::new("/tmp")),
+            vec!["custom"]
+        );
+    }
+
+    #[test]
+    fn options_for_intersects_rules_across_targets() {
+        let doc: toml::Value = toml::from_str(
+            r#"
+            [opener]
+            a = { run = "a %s" }
+            b = { run = "b %s" }
+            c = { run = "c %s" }
+
+            [open]
+            rules = [
+                { url = "*.txt", use = ["a", "b"] },
+                { url = "*",     use = ["b", "c"] },
+            ]
+            "#,
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "rnn-openwith-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let txt = dir.join("notes.txt");
+        let bin = dir.join("blob.bin");
+        std::fs::create_dir_all(&txt).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+
+        let names = |paths: &[PathBuf]| -> Vec<String> {
+            options_for(paths, Some(&doc))
+                .into_iter()
+                .map(|o| o.name)
+                .collect()
+        };
+        assert_eq!(names(std::slice::from_ref(&txt)), vec!["a", "b"]);
+        assert_eq!(names(&[txt.clone(), bin.clone()]), vec!["b"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
