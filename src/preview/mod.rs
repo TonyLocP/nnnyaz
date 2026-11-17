@@ -36,6 +36,8 @@ pub struct Artifact {
     pub kind: &'static str,
     pub data: Vec<Line<'static>>,
     img: Option<DynamicImage>,
+    /// Page count for PDF previews (zero for everything else).
+    pages: Option<usize>,
 }
 
 /// Which graphics protocol the terminal speaks.
@@ -64,17 +66,20 @@ enum ImgState {
 
 struct Request {
     key: Key,
+    page: usize,
     preload: bool,
 }
 
 pub struct Preview {
     tx: Sender<Request>,
-    rx: Receiver<(Key, Artifact)>,
-    pending: Option<Key>,
+    rx: Receiver<(Key, usize, Artifact)>,
+    pending: Option<(Key, usize)>,
     wanted: Option<Key>,
-    active: Option<(Key, Artifact)>,
-    cache: HashMap<Key, Artifact>,
-    order: VecDeque<Key>,
+    /// Page of the current target (PDF only; always zero elsewhere).
+    wanted_page: usize,
+    active: Option<((Key, usize), Artifact)>,
+    cache: HashMap<(Key, usize), Artifact>,
+    order: VecDeque<(Key, usize)>,
     changed: bool,
     dead: bool,
     preview_seek: usize,
@@ -100,7 +105,7 @@ const ZOOM_LEVELS: [u32; 5] = [100, 150, 200, 300, 400];
 impl Preview {
     pub fn new() -> Self {
         let (tx, req_rx) = mpsc::channel::<Request>();
-        let (res_tx, rx) = mpsc::channel::<(Key, Artifact)>();
+        let (res_tx, rx) = mpsc::channel::<(Key, usize, Artifact)>();
         let _ = thread::Builder::new()
             .name("preview-worker".into())
             .spawn(move || worker(req_rx, res_tx));
@@ -109,6 +114,7 @@ impl Preview {
             rx,
             pending: None,
             wanted: None,
+            wanted_page: 0,
             active: None,
             cache: HashMap::new(),
             order: VecDeque::new(),
@@ -171,10 +177,14 @@ impl Preview {
     /// later is instant. A preload never changes `pending`, so it does not
     /// affect the loading indicator.
     pub fn preload(&mut self, key: Key) {
-        if self.cache.contains_key(&key) {
+        if self.cache.contains_key(&(key.clone(), 0)) {
             return;
         }
-        let _ = self.tx.send(Request { key, preload: true });
+        let _ = self.tx.send(Request {
+            key,
+            page: 0,
+            preload: true,
+        });
     }
 
     fn clear_image(&mut self) {
@@ -306,6 +316,43 @@ impl Preview {
         self.preview_seek = s;
     }
 
+    /// Zero-based page of the current target. Only meaningful for PDFs; other
+    /// previews stay on page zero.
+    pub fn page(&self) -> usize {
+        self.wanted_page
+    }
+
+    /// Switch the current PDF preview to another page. The next
+    /// [`Self::set_target`] call picks it up.
+    pub fn set_page(&mut self, page: usize) {
+        if self.wanted_page != page {
+            self.wanted_page = page;
+            self.changed = true;
+        }
+    }
+
+    /// True when the current target is a PDF (even before its first page has
+    /// finished rendering).
+    pub fn is_pdf(&self) -> bool {
+        if self
+            .active
+            .as_ref()
+            .map(|(_, a)| a.kind == "pdf")
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        self.wanted
+            .as_ref()
+            .map(|k| detect::detect(&k.0) == detect::Kind::Pdf)
+            .unwrap_or(false)
+    }
+
+    /// Page count of the active PDF, when `pdfinfo` could determine it.
+    pub fn pdf_pages(&self) -> Option<usize> {
+        self.active.as_ref().and_then(|(_, a)| a.pages)
+    }
+
     /// Current zoom factor, when an image is actually being displayed.
     pub fn zoom(&self) -> Option<f32> {
         self.image_state
@@ -397,26 +444,36 @@ impl Preview {
         }
     }
 
-    /// Point the preview at a new entry. Returns true when the target changed
-    /// (callers use that to reset preview seek). Results arriving from the
-    /// worker are drained and cached here.
+    /// Point the preview at a new entry. Returns true when the entry changed
+    /// (callers use that to reset preview seek). Page changes do not count as
+    /// an entry change. Results arriving from the worker are drained and
+    /// cached here.
     pub fn set_target(&mut self, key: Option<&Key>) -> bool {
         let target_changed = self.wanted.as_ref() != key;
-        self.wanted = key.cloned();
+        if target_changed {
+            self.wanted = key.cloned();
+            self.wanted_page = 0;
+        }
         if key.is_none() {
             self.clear_image();
         }
         self.drain();
 
         if let Some(k) = key {
-            let active_is_target = self.active.as_ref().map(|(ak, _)| ak == k).unwrap_or(false);
+            let want = (k.clone(), self.wanted_page);
+            let active_is_target = self
+                .active
+                .as_ref()
+                .map(|(ak, _)| *ak == want)
+                .unwrap_or(false);
             if !active_is_target {
-                if self.cache.contains_key(k) {
-                    self.activate(k.clone());
-                } else if !self.dead && self.pending.as_ref() != Some(k) {
-                    self.pending = Some(k.clone());
+                if self.cache.contains_key(&want) {
+                    self.activate(want);
+                } else if !self.dead && self.pending.as_ref() != Some(&want) {
+                    self.pending = Some(want.clone());
                     let req = Request {
                         key: k.clone(),
+                        page: want.1,
                         preload: false,
                     };
                     if self.tx.send(req).is_err() {
@@ -432,13 +489,14 @@ impl Preview {
     fn drain(&mut self) {
         loop {
             match self.rx.try_recv() {
-                Ok((k, art)) => {
-                    if self.pending.as_ref() == Some(&k) {
+                Ok((k, page, art)) => {
+                    let want = (k.clone(), page);
+                    if self.pending.as_ref() == Some(&want) {
                         self.pending = None;
                     }
-                    self.cache_put(k.clone(), art);
-                    if self.wanted.as_ref() == Some(&k) {
-                        self.activate(k);
+                    self.cache_put(want.clone(), art);
+                    if self.wanted.as_ref() == Some(&k) && self.wanted_page == page {
+                        self.activate(want);
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -450,7 +508,7 @@ impl Preview {
         }
     }
 
-    fn activate(&mut self, k: Key) {
+    fn activate(&mut self, k: (Key, usize)) {
         if self
             .active
             .as_ref()
@@ -491,7 +549,7 @@ impl Preview {
         self.changed = true;
     }
 
-    fn cache_put(&mut self, k: Key, art: Artifact) {
+    fn cache_put(&mut self, k: (Key, usize), art: Artifact) {
         if self.cache.insert(k.clone(), art).is_some() {
             if let Some(p) = self.order.iter().position(|x| *x == k) {
                 self.order.remove(p);
@@ -504,7 +562,9 @@ impl Preview {
             for _ in 0..n {
                 match self.order.pop_front() {
                     Some(front) => {
-                        if Some(&front) == self.wanted.as_ref() || front == k {
+                        let keep_wanted =
+                            self.wanted.as_ref().map(|w| front.0 == *w).unwrap_or(false);
+                        if keep_wanted || front == k {
                             self.order.push_back(front);
                         } else {
                             evict = Some(front);
@@ -524,7 +584,7 @@ impl Preview {
     }
 }
 
-fn worker(rx: Receiver<Request>, tx: Sender<(Key, Artifact)>) {
+fn worker(rx: Receiver<Request>, tx: Sender<(Key, usize, Artifact)>) {
     while let Ok(first) = rx.recv() {
         // Batch a few pending requests; the newest display request supersedes
         // older ones, but all preload requests still run.
@@ -540,20 +600,21 @@ fn worker(rx: Receiver<Request>, tx: Sender<(Key, Artifact)>) {
             if !req.preload && Some(i) != last_display {
                 continue; // superseded by a newer display request
             }
-            let art = generate(&req.key);
-            if tx.send((req.key, art)).is_err() {
+            let art = generate(&req.key, req.page);
+            if tx.send((req.key, req.page, art)).is_err() {
                 return;
             }
         }
     }
 }
 
-fn generate(key: &Key) -> Artifact {
+fn generate(key: &Key, page: usize) -> Artifact {
     let path = &key.0;
     let err = |msg: String| Artifact {
         kind: "error",
         data: vec![Line::styled(msg, Style::new().fg(Color::Red))],
         img: None,
+        pages: None,
     };
 
     if path.is_dir() {
@@ -561,6 +622,7 @@ fn generate(key: &Key) -> Artifact {
             kind: "dir",
             data: dir_listing(path),
             img: None,
+            pages: None,
         };
     }
 
@@ -570,6 +632,7 @@ fn generate(key: &Key) -> Artifact {
                 kind: "text",
                 data: lines,
                 img: None,
+                pages: None,
             },
             Err(e) => err(format!("{}: {e}", path.display())),
         },
@@ -578,12 +641,14 @@ fn generate(key: &Key) -> Artifact {
                 kind: "json",
                 data: text::highlight(&s, "json", ""),
                 img: None,
+                pages: None,
             },
             Err(_) => match text::preview(path) {
                 Ok(lines) => Artifact {
                     kind: "json",
                     data: lines,
                     img: None,
+                    pages: None,
                 },
                 Err(e) => err(format!("{}: {e}", path.display())),
             },
@@ -591,13 +656,15 @@ fn generate(key: &Key) -> Artifact {
         // Images are decoded off-thread and cached both in memory (this
         // `cache`) and on disk (a downscaled copy in the temp cache dir), so
         // revisiting — or restarting rnn — never re-decodes a large source.
-        // Videos are turned into a still frame with ffmpeg and then rendered
-        // through the same image path. PDFs still show as binary.
+        // Videos are turned into a still frame with ffmpeg and PDFs into a
+        // rendered page with pdftoppm, then rendered through the same image
+        // path. `J`/`K` switch PDF pages.
         detect::Kind::Image => match kitty::load_image(path, key.1, key.2) {
             Ok(img) => Artifact {
                 kind: "image",
                 data: Vec::new(),
                 img: Some(img),
+                pages: None,
             },
             Err(_) => binary_preview(path),
         },
@@ -606,15 +673,25 @@ fn generate(key: &Key) -> Artifact {
                 kind: "video",
                 data: Vec::new(),
                 img: Some(img),
+                pages: None,
             },
             Err(_) => binary_preview(path),
         },
-        detect::Kind::Pdf => binary_preview(path),
+        detect::Kind::Pdf => match kitty::load_pdf_page(path, page, key.1, key.2) {
+            Ok(img) => Artifact {
+                kind: "pdf",
+                data: Vec::new(),
+                img: Some(img),
+                pages: media::pdf_pages(path),
+            },
+            Err(e) => err(format!("{}: {e}", path.display())),
+        },
         detect::Kind::Archive => match media::archive_listing(path) {
             Ok(s) => Artifact {
                 kind: "archive",
                 data: s.lines().map(|l| Line::raw(sanitize(l))).collect(),
                 img: None,
+                pages: None,
             },
             Err(e) => err(format!("{e}")),
         },
@@ -628,6 +705,7 @@ fn binary_preview(path: &Path) -> Artifact {
             kind: "binary",
             data: lines,
             img: None,
+            pages: None,
         },
         Err(e) => Artifact {
             kind: "error",
@@ -636,6 +714,7 @@ fn binary_preview(path: &Path) -> Artifact {
                 Style::new().fg(Color::Red),
             )],
             img: None,
+            pages: None,
         },
     }
 }

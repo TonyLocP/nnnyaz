@@ -37,12 +37,17 @@ are candidates, roughly in priority order.
       rnn asks tmux for modifyOtherKeys and other terminals for kitty's
       keyboard protocol so Ctrl+Shift+letter is distinguishable from
       Ctrl+letter.
+- [x] **PDF preview** — PDFs render as images through `pdftoppm`, the same
+      backend Yazi uses, instead of a hex dump. `J`/`K` and preview scrolling
+      turn pages, the title and info panel show the page number, and page
+      images are cached per page in rnn's own cache (Yazi's PDF cache holds
+      only the last page, so it cannot be shared safely).
 
 ## Next
 
-- [ ] Review the remaining Yazi/nnn differences after bulk rename and shell
-      parity. Candidates: picker `--chooser-file` edge cases, open-with rules,
-      and previewer coverage.
+- [ ] Review the remaining Yazi/nnn differences after PDF preview. Candidates:
+      picker `--chooser-file` edge cases, open-with rules, and previewer
+      coverage (fonts and archive details).
 
 ## Local setup (outside this repo)
 

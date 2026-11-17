@@ -4263,6 +4263,12 @@ impl App {
             lines.push(InfoLine::Section("Preview"));
             lines.push(InfoLine::Field("Kind", pkind.to_string()));
             lines.push(InfoLine::Field("Lines", n.to_string()));
+            if let Some(pages) = self.preview.pdf_pages() {
+                lines.push(InfoLine::Field(
+                    "Page",
+                    format!("{} / {pages}", self.preview.page() + 1),
+                ));
+            }
         }
         self.info = Some(Info { lines });
         self.info_cursor = 0;
@@ -5871,6 +5877,11 @@ impl App {
         let mut title = format!(" {name} ");
         if let Some((kind, total)) = meta {
             title = format!(" {name} · {kind} ");
+            if kind == "pdf" {
+                if let Some(pages) = self.preview.pdf_pages() {
+                    title.push_str(&format!("[{}/{}] ", self.preview.page() + 1, pages));
+                }
+            }
             let h = inner.height as usize;
             if total > h {
                 let max_seek = total.saturating_sub(h);
@@ -5898,7 +5909,7 @@ impl App {
             }
         }
         let is_image = meta
-            .map(|(k, _)| k == "image" || k == "video")
+            .map(|(k, _)| k == "image" || k == "video" || k == "pdf")
             .unwrap_or(false);
         if is_image {
             match self.preview.protocol() {
@@ -6134,6 +6145,18 @@ impl App {
     }
 
     fn seek_preview(&mut self, delta: isize) {
+        // PDFs page through the document; everything else scrolls text.
+        if self.preview.is_pdf() {
+            let current = self.preview.page();
+            let next = if delta >= 0 {
+                let max = self.preview.pdf_pages().map(|n| n.saturating_sub(1));
+                max.map(|m| (current + 1).min(m)).unwrap_or(current + 1)
+            } else {
+                current.saturating_sub(1)
+            };
+            self.preview.set_page(next);
+            return;
+        }
         let current = self.preview.preview_seek();
         let seek = if delta >= 0 {
             current.saturating_add(delta as usize)

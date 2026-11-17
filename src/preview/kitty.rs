@@ -165,6 +165,37 @@ fn load_video_from(
     Ok(capped)
 }
 
+/// Render a PDF page to an image, caching per page in rnn's own cache.
+///
+/// Yazi's shared cache holds whichever page its PDF previewer last rendered,
+/// so it cannot be reused safely here; rnn keys its copy by page as well as by
+/// the source file's path/mtime/size.
+pub fn load_pdf_page(
+    path: &Path,
+    page: usize,
+    mtime: Option<SystemTime>,
+    size: u64,
+) -> io::Result<DynamicImage> {
+    let dir = cache_dir();
+    let stem = format!("{}-p{}", cache_stem(path, mtime, size), page);
+    if let Some(img) = ["png", "jpg"]
+        .iter()
+        .find_map(|ext| decode(&dir.join(format!("{stem}.{ext}"))))
+    {
+        return Ok(img);
+    }
+
+    fs::create_dir_all(&dir)?;
+    let prefix = dir.join(format!(".{stem}.{}", std::process::id()));
+    media::render_pdf_page(path, page, &prefix)?;
+    let rendered = PathBuf::from(format!("{}.jpg", prefix.to_string_lossy()));
+    let img = decode_source(&rendered);
+    let _ = fs::remove_file(&rendered);
+    let capped = cap_size(&img?, IMAGE_MAX);
+    let _ = write_cache(&dir, &stem, &capped);
+    Ok(capped)
+}
+
 /// On-disk preview cache root. `RNN_CACHE_DIR` overrides it (tests, config);
 /// otherwise a dir under the system temp dir, like yazi's default.
 fn cache_dir() -> PathBuf {

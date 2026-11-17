@@ -105,7 +105,10 @@ Inside tmux, enable graphics passthrough:
 set -g allow-passthrough on
 ```
 
-Video thumbnails are generated with `ffmpeg`.
+Video thumbnails are generated with `ffmpeg`. PDFs are rendered a page at a
+time with `pdftoppm` (poppler), and `J`/`K` or scrolling over the preview
+switches pages. Page counts come from `pdfinfo` when it is installed.
+Archives are listed with `7z`, and JSON is pretty-printed with `jq`.
 
 ## Configuration
 
@@ -233,7 +236,7 @@ Mouse support mirrors Yazi and is controlled by `mgr.mouse_events` (default
 - Left click a file to select it; right click selects and opens it.
 - Scroll over the list to move the cursor by one row.
 - Left click the preview to open the current entry; scroll over the preview to
-  seek text/image previews by one row.
+  seek text previews by one row or turn PDF pages.
 - Click a tab in the tab bar to switch to it.
 - Mouse input is ignored in prompts and overlays, matching Yazi's `mgr` layer.
 
