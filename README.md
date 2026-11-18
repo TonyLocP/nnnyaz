@@ -30,7 +30,9 @@ how many lines the mouse wheel moves, and `-i` appends the hovered file's
 `-d` starts in the detail linemode (time, permissions, owner, size), `-U`
 starts with the owner linemode, and `-J` keeps the cursor on an entry after
 toggling its selection. `-b <key>` starts in a bookmark (an `NNN_BMS` key or a
-name in nnn's bookmarks directory); a path argument takes precedence.
+name in nnn's bookmarks directory); a path argument takes precedence. `-Q`
+skips the warning about running tasks on quit, and `-o` makes `l`/`→` open
+only directories, so files open with Enter alone.
 
 ## Quitting and the current directory
 

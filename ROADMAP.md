@@ -154,10 +154,14 @@ are candidates, roughly in priority order.
       The two-element arrays pick by mode (file vs. directory, next vs.
       previous, background vs. blocking shell); `*_origin`, `*_offset`, and
       `cursor_blink` are accepted but do not apply to status-line prompts.
+- [x] **nnn's `-Q` and `-o`** — `-Q` skips the running-task quit warning, and
+      `-o` stops `l`/`→` from opening files, so only Enter opens them (in
+      picker mode, only Enter picks too).
 
 ## Next
 
-- [ ] Consider nnn's `-Q` to skip the running-task quit warning.
+- [ ] Consider Yazi's `[confirm]` titles (`trash_title`, `delete_title`) with
+      `{n}`/`{s}` placeholders.
 
 ## Local setup (outside this repo)
 

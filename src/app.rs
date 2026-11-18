@@ -772,6 +772,10 @@ pub struct App {
     task_cursor: usize,
     pending_delete: Option<DeleteMode>,
     quit_warned: bool,
+    /// `-Q`: quit without the running-task warning.
+    confirm_quit: bool,
+    /// `-o`: `Action::Enter` only descends into directories.
+    open_on_enter_only: bool,
     /// Set when picker mode chooses an entry; the run loop exits at the next
     /// opportunity.
     quit: bool,
@@ -2187,6 +2191,10 @@ struct Cli {
     no_auto_advance: bool,
     /// `-b key`: start in a bookmark (ignored when a path is given).
     bookmark: Option<String>,
+    /// `-Q`: skip the running-task quit warning.
+    no_confirm_quit: bool,
+    /// `-o`: only Enter opens files; `l`/`→` just enter directories.
+    open_on_enter_only: bool,
 }
 
 /// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
@@ -2247,6 +2255,8 @@ Options:
   -U, --owner                Start with the owner linemode
   -J, --no-auto-advance      Keep the cursor after toggling a selection
   -b <KEY>, --bookmark <KEY> Start in a bookmark (ignored if PATH is given)
+  -Q, --no-confirm-quit      Quit without warning about running tasks
+  -o, --open-on-enter        Only Enter opens files (l/→ just enter directories)
   -T <KEY>, --sort <KEY>     Sort order: a/d/s size, e extension, t time,
                              v natural; an uppercase key reverses
   -l <N>, --scroll <N>       Lines moved per mouse-wheel scroll [default: 1]
@@ -2292,6 +2302,10 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
                 return Err("-b requires a bookmark key".into());
             }
             cli.bookmark = Some(value);
+        } else if text == "-Q" || text == "--no-confirm-quit" {
+            cli.no_confirm_quit = true;
+        } else if text == "-o" || text == "--open-on-enter" {
+            cli.open_on_enter_only = true;
         } else if let Some(value) = text.strip_prefix("--bookmark=") {
             if value.is_empty() {
                 return Err("-b requires a bookmark key".into());
@@ -2648,6 +2662,8 @@ impl App {
             task_cursor: 0,
             pending_delete: None,
             quit_warned: false,
+            confirm_quit: !cli.no_confirm_quit,
+            open_on_enter_only: cli.open_on_enter_only,
             quit: false,
             cwd_file,
             chooser_file,
@@ -3693,11 +3709,13 @@ impl App {
         };
         if e.is_dir {
             self.cd(e.path, None);
-        } else if self.chooser_file.is_some() {
-            self.write_chooser(true);
-            self.quit = true;
-        } else {
-            self.open_external(&e.path);
+        } else if !self.open_on_enter_only {
+            if self.chooser_file.is_some() {
+                self.write_chooser(true);
+                self.quit = true;
+            } else {
+                self.open_external(&e.path);
+            }
         }
     }
 
@@ -4490,7 +4508,11 @@ impl App {
     /// Whether quitting is allowed now. With unfinished tasks running, warn
     /// once and return false; `retry` is the key named in the warning.
     fn quit_allowed(&mut self, retry: &str) -> bool {
-        if self.config.confirm.quit_with_tasks && self.tasks_running() && !self.quit_warned {
+        if self.confirm_quit
+            && self.config.confirm.quit_with_tasks
+            && self.tasks_running()
+            && !self.quit_warned
+        {
             self.quit_warned = true;
             self.status = format!("unfinished tasks — press {retry} again to quit");
             false
@@ -5211,7 +5233,8 @@ impl App {
                 Mode::Normal => {
                     if self.tabs.len() > 1 {
                         self.close_tab();
-                    } else if self.config.confirm.quit_with_tasks
+                    } else if self.confirm_quit
+                        && self.config.confirm.quit_with_tasks
                         && self.tasks_running()
                         && !self.quit_warned
                     {
@@ -7781,6 +7804,18 @@ mod tests {
         );
         assert!(parse_cli(args(&["-b"])).is_err());
         assert!(parse_cli(args(&["--bookmark="])).is_err());
+        assert!(parse_cli(args(&["-Q"])).unwrap().no_confirm_quit);
+        assert!(
+            parse_cli(args(&["--no-confirm-quit"]))
+                .unwrap()
+                .no_confirm_quit
+        );
+        assert!(parse_cli(args(&["-o"])).unwrap().open_on_enter_only);
+        assert!(
+            parse_cli(args(&["--open-on-enter"]))
+                .unwrap()
+                .open_on_enter_only
+        );
         assert_eq!(
             parse_cli(args(&["-T", "e"])).unwrap().sort,
             Some((Sort::Extension, false))
