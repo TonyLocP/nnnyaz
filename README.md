@@ -525,3 +525,9 @@ follows). It is built with [ratatui](https://github.com/ratatui/ratatui),
 [image](https://github.com/image-rs/image), and the other crates listed in
 `Cargo.toml`.
 
+## License
+
+nnnyaz is released under the [MIT license](LICENSE). The transliteration
+table in `src/translit.rs` is derived from Yazi and carries Yazi's MIT notice;
+see [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md).
+

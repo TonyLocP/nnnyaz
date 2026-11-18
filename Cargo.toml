@@ -3,6 +3,8 @@ name = "nnnyaz"
 version = "0.1.0"
 edition = "2021"
 description = "A small nnn/Yazi-style terminal file manager with a native preview pane"
+license = "MIT"
+repository = "https://github.com/TonyLocP/nnnyaz"
 
 [dependencies]
 ratatui = "0.29"
