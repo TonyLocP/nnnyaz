@@ -710,6 +710,10 @@ pub struct App {
     filter: String,
     show_hidden: bool,
     show_preview: bool,
+    /// `-i`: append `file -b`'s description to the status line.
+    show_file_info: bool,
+    /// Cached `file -b` output, keyed by path and mtime.
+    file_info_cache: Option<(PathBuf, Option<SystemTime>, String)>,
     sort: Sort,
     sort_reverse: bool,
     selected: BTreeSet<PathBuf>,
@@ -2147,6 +2151,8 @@ struct Cli {
     sort: Option<(Sort, bool)>,
     /// `-l n`: lines moved per mouse-wheel scroll.
     scroll_lines: Option<usize>,
+    /// `-i`: show `file -b` output for the hovered entry in the status line.
+    show_file_info: bool,
 }
 
 /// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
@@ -2202,6 +2208,7 @@ Options:
   -p <PATH>                  Alias for --chooser-file (- writes to stdout)
   -0, --null                 Separate picker paths with NUL instead of newline
   -H, --hidden               Show hidden files at startup
+  -i, --file-info            Show the hovered file's type in the status line
   -T <KEY>, --sort <KEY>     Sort order: a/d/s size, e extension, t time,
                              v natural; an uppercase key reverses
   -l <N>, --scroll <N>       Lines moved per mouse-wheel scroll [default: 1]
@@ -2230,6 +2237,8 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.version = true;
         } else if text == "-H" || text == "--hidden" {
             cli.show_hidden = true;
+        } else if text == "-i" || text == "--file-info" {
+            cli.show_file_info = true;
         } else if text == "-T" || text == "--sort" {
             let value = args
                 .next()
@@ -2441,6 +2450,8 @@ impl App {
             filter: String::new(),
             show_hidden,
             show_preview: mgr.show_preview,
+            show_file_info: cli.show_file_info,
+            file_info_cache: None,
             sort,
             sort_reverse,
             selected: BTreeSet::new(),
@@ -4821,6 +4832,24 @@ impl App {
         self.clipboard_set(text, "text/plain", "copied path".into());
     }
 
+    /// `file -b`'s description of the hovered entry, cached by path and mtime.
+    /// Mirrors nnn's `-i`, which runs `file -b` for the info bar.
+    fn file_description(&mut self, path: &Path, mtime: Option<SystemTime>) -> String {
+        if let Some((cached_path, cached_mtime, desc)) = &self.file_info_cache {
+            if cached_path == path && *cached_mtime == mtime {
+                return desc.clone();
+            }
+        }
+        let desc = match Command::new("file").arg("-b").arg("--").arg(path).output() {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            }
+            _ => String::new(),
+        };
+        self.file_info_cache = Some((path.to_path_buf(), mtime, desc.clone()));
+        desc
+    }
+
     fn info_copy_cell(&mut self) {
         let Some(info) = &self.info else {
             return;
@@ -5796,6 +5825,16 @@ impl App {
                 s
             }
         };
+        if self.show_file_info && self.mode == Mode::Normal {
+            let current = self.current().map(|e| (e.path.clone(), e.modified));
+            if let Some((path, mtime)) = current {
+                let desc = self.file_description(&path, mtime);
+                if !desc.is_empty() {
+                    text.push_str(" | ");
+                    text.push_str(&desc);
+                }
+            }
+        }
         if !self.pending.is_empty() {
             let keys: Vec<String> = self.pending.iter().map(|c| c.label()).collect();
             text.push_str(&format!(" | {}…", keys.join(" ")));
@@ -7500,6 +7539,8 @@ mod tests {
 
         assert!(parse_cli(args(&["-H"])).unwrap().show_hidden);
         assert!(parse_cli(args(&["--hidden"])).unwrap().show_hidden);
+        assert!(parse_cli(args(&["-i"])).unwrap().show_file_info);
+        assert!(parse_cli(args(&["--file-info"])).unwrap().show_file_info);
         assert_eq!(
             parse_cli(args(&["-T", "e"])).unwrap().sort,
             Some((Sort::Extension, false))

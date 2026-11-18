@@ -123,12 +123,17 @@ are candidates, roughly in priority order.
       bind `spot` now open this view (Yazi's `<Tab>`), while rnn's `<Tab>`
       keeps opening the metadata info overlay. The spot reuses the preview
       worker, so images, video thumbnails, PDFs, and text all work.
+- [x] **nnn's `-i` info bar** — `-i`/`--file-info` appends `file -b`'s
+      description of the hovered entry to the status line, cached by path and
+      mtime so moving around a directory does not spawn a process per redraw.
 
 ## Next
 
-- [ ] Consider nnn's `-i` (info panel). rnn's info view is a full-screen
-      overlay rather than nnn's info bar, so `-i` needs a decision before it is
-      worth adding.
+- [ ] Support more Yazi `mgr` keys: `sort_sensitive`, `sort_dir_first`, and
+      `show_symlink` (rnn always sorts case-insensitively and shows symlink
+      targets in the status line).
+- [ ] Support `preview.cache_dir` (rnn currently uses `RNN_CACHE_DIR` and
+      Yazi's cache when found).
 
 ## Local setup (outside this repo)
 

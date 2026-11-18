@@ -24,8 +24,9 @@ rnn [path]
 version. The main options are `--cwd-file` (see below) and the picker flags
 `--chooser-file` / `-p` and `-0` / `--null`. nnn's startup overrides also work:
 `-H` shows hidden files, `-T <key>` sets the sort order (`a`/`d`/`s` size,
-`e` extension, `t` time, `v` natural; uppercase reverses), and `-l <n>` sets
-how many lines the mouse wheel moves.
+`e` extension, `t` time, `v` natural; uppercase reverses), `-l <n>` sets
+how many lines the mouse wheel moves, and `-i` appends the hovered file's
+`file -b` description to the status line.
 
 ## Quitting and the current directory
 
