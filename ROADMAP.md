@@ -187,10 +187,16 @@ are candidates, roughly in priority order.
 - [x] **nnn's `-f` history file** — `-f` loads and saves the last 16 shell
       commands at `<config>/.history`, and Up/Down in the `;`/`:` prompt
       recall them with nnn's wrap-around behavior.
+- [x] **nnn's `-K` keymap check** — `-K` walks the loaded keymap and prints
+      `key collision! [...]` for bindings that can never fire: an action
+      shadowed by a longer sequence, or sibling chords that match the same
+      key. It exits 0 like nnn.
 
 ## Next
 
-- [ ] Consider nnn's `-K` (report keymap collisions and exit).
+- [ ] Consider the remaining nnn flags: `-c` (use `NNN_OPENER` as a
+      CLI-only opener), `-E` (single rename in `$EDITOR`), and `-t <secs>`
+      (lock after inactivity).
 
 ## Local setup (outside this repo)
 

@@ -2489,6 +2489,8 @@ struct Cli {
     editor_text: bool,
     /// `-f`: keep a persistent shell command history.
     history: bool,
+    /// `-K`: print keymap collisions and exit.
+    key_collisions: bool,
 }
 
 /// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
@@ -2557,6 +2559,7 @@ Options:
   -z, --fuzzy                Use fuzzy filters
   -e, --editor               Open text files in $VISUAL/$EDITOR/vi
   -f, --history              Keep a persistent shell command history
+  -K, --key-collisions       Report keymap collisions and exit
   -u, --use-selection        Accepted for nnn compatibility (rnn always uses the selection)
   -R, --no-rollover          Accepted for nnn compatibility (rnn never rolls over)
   -s <NAME>, --session <NAME> Load a session (@ is the last session)
@@ -2622,6 +2625,8 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.editor_text = true;
         } else if text == "-f" || text == "--history" {
             cli.history = true;
+        } else if text == "-K" || text == "--key-collisions" {
+            cli.key_collisions = true;
         } else if text == "-u" || text == "--use-selection" {
             // rnn already acts on the selection without prompting, so nnn's
             // `-u` is accepted as a compatibility no-op.
@@ -2916,6 +2921,16 @@ impl App {
                 .map(PathBuf::from)
         });
         let chooser_null = cli.chooser_null;
+        let config::Loaded { config, warnings } = loaded;
+        if cli.key_collisions {
+            for warning in &warnings {
+                eprintln!("rnn: {warning}");
+            }
+            for collision in config.keymap.collisions() {
+                println!("key collision! [{collision}]");
+            }
+            std::process::exit(0);
+        }
         let start = match (cli.path, &cli.bookmark) {
             (Some(path), _) => path,
             (None, Some(key)) => {
@@ -2936,7 +2951,6 @@ impl App {
             (None, None) => env::current_dir()?,
         };
         let cwd = fs::canonicalize(start)?;
-        let config::Loaded { config, warnings } = loaded;
         let status = warnings.join(" · ");
         let mgr = config.mgr;
         let show_hidden = mgr.show_hidden || cli.show_hidden;
@@ -8803,6 +8817,12 @@ mod tests {
         assert!(parse_cli(args(&["--editor"])).unwrap().editor_text);
         assert!(parse_cli(args(&["-f"])).unwrap().history);
         assert!(parse_cli(args(&["--history"])).unwrap().history);
+        assert!(parse_cli(args(&["-K"])).unwrap().key_collisions);
+        assert!(
+            parse_cli(args(&["--key-collisions"]))
+                .unwrap()
+                .key_collisions
+        );
         assert!(parse_cli(args(&["-u"])).is_ok());
         assert!(parse_cli(args(&["--use-selection"])).is_ok());
         assert!(parse_cli(args(&["-R"])).is_ok());

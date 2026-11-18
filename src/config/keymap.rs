@@ -299,6 +299,57 @@ impl Node {
     pub fn clear(&mut self) {
         *self = Node::default();
     }
+
+    /// Two chords collide when a single key event can match both. Character
+    /// matching ignores Shift (terminals report `G` for `Shift+g`), while
+    /// special keys compare it.
+    fn chords_collide(a: &KeyChord, b: &KeyChord) -> bool {
+        if a.mods.ctrl != b.mods.ctrl || a.mods.alt != b.mods.alt {
+            return false;
+        }
+        match (a.code, b.code) {
+            (ChordCode::Char(x), ChordCode::Char(y)) => x == y,
+            (x, y) => x == y && a.mods.shift == b.mods.shift,
+        }
+    }
+
+    fn seq_label(seq: &[KeyChord]) -> String {
+        seq.iter()
+            .map(KeyChord::label)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Walk the trie and report bindings that can never fire: a chord that
+    /// matches the same key as a sibling, or an action hidden behind a longer
+    /// sequence. `nop` prefixes and `mark_set` (which has a fallback) are
+    /// intentional and not reported.
+    fn collect_collisions(&self, path: &mut Vec<KeyChord>, out: &mut Vec<String>) {
+        if !self.has_children() {
+            return;
+        }
+        if let Some(action) = self.action() {
+            if !matches!(action, Action::Nop | Action::MarkSet) {
+                out.push(Self::seq_label(path));
+            }
+        }
+        for i in 0..self.children.len() {
+            for j in i + 1..self.children.len() {
+                let (a, _) = &self.children[i];
+                let (b, _) = &self.children[j];
+                if Self::chords_collide(a, b) {
+                    let mut seq = path.clone();
+                    seq.push(*b);
+                    out.push(Self::seq_label(&seq));
+                }
+            }
+        }
+        for (chord, child) in &self.children {
+            path.push(*chord);
+            child.collect_collisions(path, out);
+            path.pop();
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -334,6 +385,16 @@ impl Keymap {
         };
         self.node_mut(ctx)
             .insert(&seq, action, desc.map(str::to_string));
+    }
+
+    /// Report bindings that can never fire, one label per conflict. Used by
+    /// nnn's `-K`.
+    pub fn collisions(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for node in [&self.mgr, &self.tasks, &self.info] {
+            node.collect_collisions(&mut Vec::new(), &mut out);
+        }
+        out
     }
 
     /// Insert a binding from a programmatic source (`init.lua`), reporting
@@ -888,6 +949,31 @@ mod tests {
             .walk(&parse_seq("m").unwrap())
             .unwrap()
             .has_children());
+    }
+
+    #[test]
+    fn default_keymap_has_no_collisions() {
+        assert!(Keymap::default().collisions().is_empty());
+    }
+
+    #[test]
+    fn reports_actions_hidden_behind_longer_sequences() {
+        let mut km = Keymap::default();
+        km.insert(Context::Mgr, "g", "quit", None);
+        assert_eq!(km.collisions(), vec!["g"]);
+    }
+
+    #[test]
+    fn reports_sibling_chords_that_match_the_same_key() {
+        let mut node = Node::default();
+        let plain = parse_seq("a").unwrap();
+        node.insert(&plain, Action::Quit, None);
+        let mut shifted = plain.clone();
+        shifted[0].mods.shift = true;
+        node.insert(&shifted, Action::Nop, None);
+        let mut out = Vec::new();
+        node.collect_collisions(&mut Vec::new(), &mut out);
+        assert_eq!(out, vec!["<S-a>"]);
     }
 
     #[test]
