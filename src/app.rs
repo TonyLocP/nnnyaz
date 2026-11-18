@@ -1319,7 +1319,13 @@ fn entry_for(path: PathBuf, name: String) -> Option<Entry> {
     } else {
         None
     };
-    let md = fs::metadata(&path).ok().or(lmd)?;
+    // Non-symlinks can reuse the lstat result; only symlinks need a second
+    // call to stat the target. This halves the syscalls in a big directory.
+    let md = if is_symlink {
+        fs::metadata(&path).ok().or(lmd)?
+    } else {
+        lmd?
+    };
     Some(Entry {
         name,
         path,
@@ -3729,6 +3735,7 @@ impl App {
     }
 
     fn reload(&mut self) {
+        let started = std::time::Instant::now();
         self.visual = None;
         let keep = self
             .focus
@@ -3897,6 +3904,13 @@ impl App {
             self.state.select(Some(idx));
         }
         self.list_dirty = true;
+        if std::env::var_os("NNNYAZ_DEBUG").is_some() {
+            eprintln!(
+                "reload: {} entries in {:?}",
+                self.entries.len(),
+                started.elapsed()
+            );
+        }
     }
 
     /// Stop any running search job without clearing the search view.
