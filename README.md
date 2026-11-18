@@ -47,9 +47,10 @@ and `-S` saves the current tabs on exit, defaulting to `@`. Loading a named
 session first stores the previous state in `@`. Sessions live under
 `<config>/sessions`. Inside rnn, `t S` opens nnn's session menu (`s` save,
 `l` load, `r` restore `@`); `l` lists the saved sessions and filters them as
-you type, with `j`/`k` or `↑`/`↓` to move and Enter to load. `Ctrl+d` in the
-list deletes the highlighted session after a `y/N` confirmation. Once you
-type in the filter, `j`/`k` edit the text again.
+you type, with `j`/`k` or `↑`/`↓` to move and Enter to load. Once you type in
+the filter, `j`/`k` edit the text again, so use `J`/`K` or `Ctrl+j`/`Ctrl+k`
+to keep moving. `Ctrl+d` in the list deletes the highlighted session after a
+`y/N` confirmation.
 
 ## Quitting and the current directory
 

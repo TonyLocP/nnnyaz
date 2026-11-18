@@ -169,7 +169,8 @@ are candidates, roughly in priority order.
 - [x] **Session manager** — `t S` opens nnn's `'s'ave/'l'oad/'r'estore?`
       prompt; `r` reloads `@` without saving the current state over it. `l`
       lists the saved sessions immediately and narrows the list as you type;
-      `j`/`k` or `↑`/`↓` moves (while the input is empty) and Enter loads. An
+      `j`/`k` or `↑`/`↓` moves while the input is empty, and `J`/`K` or
+      `Ctrl+j`/`Ctrl+k` keeps moving once you start typing. Enter loads, and an
       exact typed name still wins. `Ctrl+d` deletes the highlighted session
       after a `y/N` confirmation.
 - [x] **nnn's `-n`, `-A`, and `-R`** — `-n` starts in type-to-nav (persistent
