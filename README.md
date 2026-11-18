@@ -26,7 +26,10 @@ version. The main options are `--cwd-file` (see below) and the picker flags
 `-H` shows hidden files, `-T <key>` sets the sort order (`a`/`d`/`s` size,
 `e` extension, `t` time, `v` natural; uppercase reverses), `-l <n>` sets
 how many lines the mouse wheel moves, and `-i` appends the hovered file's
-`file -b` description to the status line.
+`file -b` description to the status line. nnn's display flags also work:
+`-d` starts in the detail linemode (time, permissions, owner, size), `-U`
+starts with the owner linemode, and `-J` keeps the cursor on an entry after
+toggling its selection.
 
 ## Quitting and the current directory
 
@@ -192,7 +195,7 @@ sort_sensitive = false  # compare names case-sensitively
 sort_dir_first = true   # keep directories above files
 sort_fallback = "alphabetical"  # tie-break: alphabetical | natural
 show_symlink = true     # append " -> target" to symlinks in the list
-linemode = "size"       # size | permissions | btime | mtime | owner | none
+linemode = "size"       # size | permissions | btime | mtime | owner | detail | none
 scrolloff = 5           # rows of context kept above/below the cursor (0 disables)
 mouse_events = ["click", "scroll", "drag"]  # click | scroll | touch | move | drag; [] disables
 

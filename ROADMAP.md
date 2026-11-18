@@ -135,6 +135,11 @@ are candidates, roughly in priority order.
 - [x] **`mgr.sort_fallback`** — equal size/time/extension keys now break ties
       with an alphabetical or natural name comparison, matching Yazi (the
       fallback is case-sensitive, unlike `sort_sensitive`).
+- [x] **nnn display startup flags** — `-d` starts in a new detail linemode
+      (time, permissions, owner:group, size), `-U` starts with the owner
+      linemode, and `-J` keeps the cursor on an entry after toggling its
+      selection (nnn's "no auto-advance"). `detail` is also accepted by
+      `mgr.linemode` and `linemode detail`.
 
 ## Next
 

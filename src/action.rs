@@ -514,6 +514,7 @@ pub fn parse_linemode(name: &str) -> Result<Linemode, String> {
         "btime" | "created" => Linemode::Btime,
         "mtime" | "modified" | "time" => Linemode::Mtime,
         "owner" => Linemode::Owner,
+        "detail" => Linemode::Detail,
         "none" => Linemode::None,
         other => return Err(format!("linemode: unknown mode '{other}'")),
     })

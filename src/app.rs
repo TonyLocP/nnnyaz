@@ -482,6 +482,8 @@ pub(crate) enum Linemode {
     Btime,
     Mtime,
     Owner,
+    /// nnn's detail line: time, permissions, owner:group, and size.
+    Detail,
     None,
 }
 
@@ -754,6 +756,8 @@ pub struct App {
     page: usize,
     /// Lines moved per mouse-wheel tick (`-l`).
     scroll_lines: usize,
+    /// Move to the next entry after toggling a selection (`-J` disables it).
+    auto_advance: bool,
     tabs: Vec<TabSnapshot>,
     tab_index: usize,
     tab_name: Option<String>,
@@ -2174,6 +2178,12 @@ struct Cli {
     scroll_lines: Option<usize>,
     /// `-i`: show `file -b` output for the hovered entry in the status line.
     show_file_info: bool,
+    /// `-d`: start in nnn's detail linemode.
+    detail: bool,
+    /// `-U`: start with the owner linemode.
+    show_owner: bool,
+    /// `-J`: keep the cursor on an entry after toggling its selection.
+    no_auto_advance: bool,
 }
 
 /// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
@@ -2230,6 +2240,9 @@ Options:
   -0, --null                 Separate picker paths with NUL instead of newline
   -H, --hidden               Show hidden files at startup
   -i, --file-info            Show the hovered file's type in the status line
+  -d, --detail               Start with the detail linemode
+  -U, --owner                Start with the owner linemode
+  -J, --no-auto-advance      Keep the cursor after toggling a selection
   -T <KEY>, --sort <KEY>     Sort order: a/d/s size, e extension, t time,
                              v natural; an uppercase key reverses
   -l <N>, --scroll <N>       Lines moved per mouse-wheel scroll [default: 1]
@@ -2260,6 +2273,12 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.show_hidden = true;
         } else if text == "-i" || text == "--file-info" {
             cli.show_file_info = true;
+        } else if text == "-d" || text == "--detail" {
+            cli.detail = true;
+        } else if text == "-U" || text == "--owner" {
+            cli.show_owner = true;
+        } else if text == "-J" || text == "--no-auto-advance" {
+            cli.no_auto_advance = true;
         } else if text == "-T" || text == "--sort" {
             let value = args
                 .next()
@@ -2490,7 +2509,13 @@ impl App {
             find_forward: true,
             find_origin: None,
             last_find: None,
-            linemode: mgr.linemode,
+            linemode: if cli.detail {
+                Linemode::Detail
+            } else if cli.show_owner {
+                Linemode::Owner
+            } else {
+                mgr.linemode
+            },
             history: vec![cwd],
             history_pos: 0,
             marks,
@@ -2502,6 +2527,7 @@ impl App {
             focus: None,
             page: 10,
             scroll_lines: cli.scroll_lines.unwrap_or(1),
+            auto_advance: !cli.no_auto_advance,
             tabs: Vec::new(),
             tab_index: 0,
             tab_name: None,
@@ -5334,7 +5360,9 @@ impl App {
                         self.selected.insert(p);
                     }
                     self.list_dirty = true;
-                    self.move_by(1);
+                    if self.auto_advance {
+                        self.move_by(1);
+                    }
                 }
             }
             Action::SelectAll => self.select_all(),
@@ -5602,7 +5630,6 @@ impl App {
                     }
                 }
                 let right = match linemode {
-                    Linemode::None => String::new(),
                     Linemode::Size => {
                         if e.is_dir {
                             String::new()
@@ -5614,6 +5641,24 @@ impl App {
                     Linemode::Btime => format_age(e.created),
                     Linemode::Mtime => format_age(e.modified),
                     Linemode::Owner => format!("{}:{}", e.uid, e.gid),
+                    Linemode::Detail => {
+                        let size = if e.is_dir {
+                            String::new()
+                        } else {
+                            human(e.size)
+                        };
+                        format!(
+                            "{} {} {}:{} {}",
+                            format_age(e.modified),
+                            permissions(e.mode),
+                            e.uid,
+                            e.gid,
+                            size
+                        )
+                        .trim_end()
+                        .to_string()
+                    }
+                    Linemode::None => String::new(),
                 };
                 let used = left.chars().count() + right.chars().count();
                 let pad = inner.saturating_sub(used).max(1);
@@ -5862,6 +5907,7 @@ impl App {
                         Linemode::Btime => "btime",
                         Linemode::Mtime => "mtime",
                         Linemode::Owner => "owner",
+                        Linemode::Detail => "detail",
                         Linemode::None => "none",
                     };
                     s.push_str(&format!(" | lm:{lm}"));
@@ -7612,6 +7658,16 @@ mod tests {
         assert!(parse_cli(args(&["--hidden"])).unwrap().show_hidden);
         assert!(parse_cli(args(&["-i"])).unwrap().show_file_info);
         assert!(parse_cli(args(&["--file-info"])).unwrap().show_file_info);
+        assert!(parse_cli(args(&["-d"])).unwrap().detail);
+        assert!(parse_cli(args(&["--detail"])).unwrap().detail);
+        assert!(parse_cli(args(&["-U"])).unwrap().show_owner);
+        assert!(parse_cli(args(&["--owner"])).unwrap().show_owner);
+        assert!(parse_cli(args(&["-J"])).unwrap().no_auto_advance);
+        assert!(
+            parse_cli(args(&["--no-auto-advance"]))
+                .unwrap()
+                .no_auto_advance
+        );
         assert_eq!(
             parse_cli(args(&["-T", "e"])).unwrap().sort,
             Some((Sort::Extension, false))
