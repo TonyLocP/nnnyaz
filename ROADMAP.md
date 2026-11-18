@@ -79,10 +79,20 @@ are candidates, roughly in priority order.
       `NNN_BMS` keys and symlinked bookmark names, with an empty prompt opening
       nnn's bookmarks directory; `B` creates a symlink bookmark under
       `${XDG_CONFIG_HOME:-~/.config}/nnn/bookmarks`, shared with nnn.
+- [x] **Picker edge cases** — chooser output now places the newline/NUL only
+      between paths, with no trailing separator, matching Yazi and nnn. Empty
+      `--chooser-file`/`-p` values are rejected up front instead of failing at
+      exit. Picker `Enter`/`o` still writes the selection (or hovered entry)
+      and quits, `O` still opens the interactive menu, and a plain quit writes
+      an existing selection like nnn while leaving the file untouched when
+      nothing is selected.
 
 ## Next
 
-- [ ] Audit the remaining picker `--chooser-file` edge cases against Yazi.
+- [ ] ICC color management for image previews (currently only EXIF orientation
+      is applied).
+- [ ] List the contents of compressed tarballs (for example `.tar.gz`) in the
+      archive preview instead of treating the archive as a single entry.
 
 ## Local setup (outside this repo)
 

@@ -94,8 +94,9 @@ existing selection.
 
 `-p -` writes the paths to stdout instead of a file, which is useful in
 command substitution. `-0` (or `--null`) separates paths with NUL instead of a
-newline. If nothing is selected on a plain quit, the chooser file is left
-untouched.
+newline; like Yazi and nnn, rnn puts separators only between paths and does
+not append a trailing one. If nothing is selected on a plain quit, the chooser
+file is left untouched.
 
 ```fish
 # Pick files and print them one per line.

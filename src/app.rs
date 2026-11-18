@@ -2160,6 +2160,9 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             let value = args
                 .next()
                 .ok_or_else(|| "--chooser-file requires a path".to_string())?;
+            if value.is_empty() {
+                return Err("--chooser-file requires a path".into());
+            }
             cli.chooser_file = Some(PathBuf::from(value));
         } else if let Some(value) = text.strip_prefix("--chooser-file=") {
             if value.is_empty() {
@@ -2170,6 +2173,9 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             let value = args
                 .next()
                 .ok_or_else(|| "-p requires a path".to_string())?;
+            if value.is_empty() {
+                return Err("-p requires a path".into());
+            }
             cli.chooser_file = Some(PathBuf::from(value));
         } else if let Some(value) = text.strip_prefix("-p") {
             if value.is_empty() {
@@ -2196,13 +2202,17 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
     Ok(cli)
 }
 
-/// Serialize picker paths: one per line, or NUL-separated with `-0`.
+/// Serialize picker paths: separated by newlines, or by NULs with `-0`.
+/// Like Yazi and nnn, the separator goes *between* paths, with no trailing
+/// separator.
 fn chooser_bytes(paths: &[PathBuf], null: bool) -> Vec<u8> {
     let sep = if null { b'\0' } else { b'\n' };
     let mut out = Vec::new();
-    for path in paths {
+    for (i, path) in paths.iter().enumerate() {
+        if i > 0 {
+            out.push(sep);
+        }
         out.extend_from_slice(path.as_os_str().as_bytes());
-        out.push(sep);
     }
     out
 }
@@ -7324,14 +7334,18 @@ mod tests {
         );
         assert!(parse_cli(args(&["--chooser-file"])).is_err());
         assert!(parse_cli(args(&["--chooser-file="])).is_err());
+        assert!(parse_cli(args(&["--chooser-file", ""])).is_err());
         assert!(parse_cli(args(&["-p"])).is_err());
+        assert!(parse_cli(args(&["-p", ""])).is_err());
     }
 
     #[test]
     fn chooser_bytes_uses_the_requested_separator() {
         let paths = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b c")];
-        assert_eq!(chooser_bytes(&paths, false), b"/tmp/a\n/tmp/b c\n");
-        assert_eq!(chooser_bytes(&paths, true), b"/tmp/a\0/tmp/b c\0");
+        assert_eq!(chooser_bytes(&paths, false), b"/tmp/a\n/tmp/b c");
+        assert_eq!(chooser_bytes(&paths, true), b"/tmp/a\0/tmp/b c");
+        assert_eq!(chooser_bytes(&[], false), b"");
+        assert_eq!(chooser_bytes(&[PathBuf::from("/tmp/a")], false), b"/tmp/a");
     }
 
     #[test]
