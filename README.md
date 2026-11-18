@@ -46,7 +46,10 @@ already acts on the selection without prompting, and `-f` keeps a persistent
 shell-command history at `<config>/.history` (Up/Down in the `;`/`:` prompt
 recall the last 16 commands). `-K` reports keymap collisions and exits: a
 binding that can never fire because another binding claims the same key or
-because a longer sequence (such as `g g`) shadows it. Sessions work like nnn's: `-s <name>` loads a saved session (`@` is the last session)
+because a longer sequence (such as `g g`) shadows it. `-E` uses `$EDITOR`
+rather than `$VISUAL` for internal undetached edits (bulk rename/create), and
+`r` on a single entry edits its name in that editor instead of the inline
+prompt. Sessions work like nnn's: `-s <name>` loads a saved session (`@` is the last session)
 and `-S` saves the current tabs on exit, defaulting to `@`. Loading a named
 session first stores the previous state in `@`. Sessions live under
 `<config>/sessions`. Inside nnnyaz, `t S` opens nnn's session menu (`s` save,

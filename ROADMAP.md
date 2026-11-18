@@ -199,12 +199,15 @@ are candidates, roughly in priority order.
       directory (`~/.config/nnnyaz`), cache paths, and environment variables
       (`NNNYAZ_*`) all use the new name. The earlier `rnn` and `yannni`
       names are gone with no fallbacks.
+- [x] **nnn's `-E` internal editor** — `-E` uses `$EDITOR` (instead of
+      `$VISUAL`, then `$EDITOR`, then `vi`) for internal undetached edits such
+      as bulk rename and bulk create. As an extension, `r` on a single entry
+      edits its name in that editor rather than opening the inline prompt.
 
 ## Next
 
 - [ ] Consider the remaining nnn flags: `-c` (use `NNN_OPENER` as a
-      CLI-only opener), `-E` (single rename in `$EDITOR`), and `-t <secs>`
-      (lock after inactivity).
+      CLI-only opener) and `-t <secs>` (lock after inactivity).
 
 ## Local setup (outside this repo)
 
@@ -226,3 +229,5 @@ are candidates, roughly in priority order.
 - The default filter is smart-case (Yazi-style) rather than nnn's always
   case-insensitive substring match; `:` in the filter prompt cycles to the
   explicit `ic`/`noic` modes.
+- `-E` also makes `r` on a single entry edit its name in `$EDITOR`. nnn's
+  `-E` only changes the editor used for internal edits (bulk rename/create).

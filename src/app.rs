@@ -1011,6 +1011,8 @@ pub struct App {
     type_to_nav_autoenter: bool,
     /// `-e`: open text files in the editor instead of the external opener.
     open_text_in_editor: bool,
+    /// `-E`: use `$EDITOR` (not `$VISUAL`) for internal undetached edits.
+    internal_editor: bool,
     /// Set when picker mode chooses an entry; the run loop exits at the next
     /// opportunity.
     quit: bool,
@@ -1117,6 +1119,18 @@ fn bulk_rename_plan(
         .zip(destinations)
         .filter(|(src, dst)| src != dst)
         .collect())
+}
+
+/// Pick the editor for internal edits. `-E` prefers `$EDITOR`; otherwise
+/// `$VISUAL` wins, then `$EDITOR`, then `vi` (nnn's order).
+fn pick_internal_editor(internal: bool, visual: Option<&str>, editor: Option<&str>) -> String {
+    let pick = |value: Option<&str>| value.filter(|v| !v.trim().is_empty()).map(str::to_string);
+    if internal {
+        pick(editor)
+    } else {
+        pick(visual).or_else(|| pick(editor))
+    }
+    .unwrap_or_else(|| "vi".into())
 }
 
 /// Apply a bulk rename through temporary names, so swaps like `a ↔ b` work.
@@ -2497,6 +2511,8 @@ struct Cli {
     fuzzy_filter: bool,
     /// `-e`: open text files in `$VISUAL`/`$EDITOR`/`vi`.
     editor_text: bool,
+    /// `-E`: use `$EDITOR` (not `$VISUAL`) for internal undetached edits.
+    internal_editor: bool,
     /// `-f`: keep a persistent shell command history.
     history: bool,
     /// `-K`: print keymap collisions and exit.
@@ -2568,6 +2584,7 @@ Options:
   -g, --regex                Use regex filters (default: smart substring)
   -z, --fuzzy                Use fuzzy filters
   -e, --editor               Open text files in $VISUAL/$EDITOR/vi
+  -E, --internal-editor      Use $EDITOR (not $VISUAL) for internal edits
   -f, --history              Keep a persistent shell command history
   -K, --key-collisions       Report keymap collisions and exit
   -u, --use-selection        Accepted for nnn compatibility (nnnyaz always uses the selection)
@@ -2633,6 +2650,8 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.fuzzy_filter = true;
         } else if text == "-e" || text == "--editor" {
             cli.editor_text = true;
+        } else if text == "-E" || text == "--internal-editor" {
+            cli.internal_editor = true;
         } else if text == "-f" || text == "--history" {
             cli.history = true;
         } else if text == "-K" || text == "--key-collisions" {
@@ -3202,6 +3221,7 @@ impl App {
             type_to_nav: cli.type_to_nav,
             type_to_nav_autoenter: !cli.no_autoenter,
             open_text_in_editor: cli.editor_text,
+            internal_editor: cli.internal_editor,
             quit: false,
             cwd_file,
             chooser_file,
@@ -4349,6 +4369,17 @@ impl App {
         }
     }
 
+    /// Editor for internal undetached edits (bulk rename/create, `-E` renames).
+    /// nnn uses `$VISUAL` by default and `$EDITOR` when `-E` is passed, because
+    /// a GUI `$VISUAL` returns immediately and cannot edit a temp file.
+    fn internal_editor_cmd(&self) -> String {
+        pick_internal_editor(
+            self.internal_editor,
+            env::var("VISUAL").ok().as_deref(),
+            env::var("EDITOR").ok().as_deref(),
+        )
+    }
+
     fn external(&mut self, term: &mut DefaultTerminal, prog: &str, path: &Path) {
         let mut parts = prog.split_whitespace();
         let Some(p) = parts.next() else { return };
@@ -4362,9 +4393,7 @@ impl App {
 
     /// `A`: edit a temporary file and create every non-empty line in it.
     fn bulk_create(&mut self, term: &mut DefaultTerminal) {
-        let editor = env::var("VISUAL")
-            .or_else(|_| env::var("EDITOR"))
-            .unwrap_or_else(|_| "vi".into());
+        let editor = self.internal_editor_cmd();
         let tmp = env::temp_dir().join(format!("nnnyaz-bulk-create-{}.txt", std::process::id()));
         if let Err(e) = fs::write(&tmp, "") {
             self.status = format!("bulk create: {e}");
@@ -4413,9 +4442,7 @@ impl App {
         if sources.len() < 2 {
             return;
         }
-        let editor = env::var("VISUAL")
-            .or_else(|_| env::var("EDITOR"))
-            .unwrap_or_else(|_| "vi".into());
+        let editor = self.internal_editor_cmd();
         let tmp = env::temp_dir().join(format!("nnnyaz-bulk-rename-{}.txt", std::process::id()));
         let mut content = String::new();
         for src in &sources {
@@ -4466,6 +4493,45 @@ impl App {
                 self.status = format!("renamed {n} item(s)");
             }
             Err(e) => self.status = format!("bulk rename: {e}"),
+        }
+    }
+
+    /// `-E`: rename the hovered entry by editing its name in `$EDITOR`.
+    fn rename_in_editor(&mut self, term: &mut DefaultTerminal) {
+        let Some(entry) = self.current().cloned() else {
+            return;
+        };
+        let editor = self.internal_editor_cmd();
+        let tmp = env::temp_dir().join(format!("nnnyaz-rename-{}.txt", std::process::id()));
+        if let Err(e) = fs::write(&tmp, &entry.name) {
+            self.status = format!("rename: {e}");
+            return;
+        }
+        self.external(term, &editor, &tmp);
+        let content = fs::read_to_string(&tmp).unwrap_or_default();
+        let _ = fs::remove_file(&tmp);
+
+        let name = content.trim();
+        if name.is_empty() || name == entry.name {
+            self.status = "rename: no change".into();
+            return;
+        }
+        if name == "." || name == ".." || name.contains('/') || name.contains('\0') {
+            self.status = format!("rename: invalid name '{name}'");
+            return;
+        }
+        let dest = self.cwd.join(name);
+        if dest != entry.path && fs::symlink_metadata(&dest).is_ok() {
+            self.status = format!("rename: '{name}' already exists");
+            return;
+        }
+        match fs::rename(&entry.path, &dest) {
+            Ok(()) => {
+                self.focus = Some(name.to_string());
+                self.reload();
+                self.status = format!("renamed to {name}");
+            }
+            Err(e) => self.status = format!("rename: {e}"),
         }
     }
 
@@ -6651,6 +6717,8 @@ impl App {
                 self.visual = None;
                 if self.targets().len() > 1 {
                     self.bulk_rename(term);
+                } else if self.internal_editor {
+                    self.rename_in_editor(term);
                 } else if let Some(e) = self.current() {
                     self.input = Input::rename(&e.name);
                     self.mode = Mode::Prompt(Prompt::Rename);
@@ -8415,6 +8483,16 @@ mod tests {
     }
 
     #[test]
+    fn internal_editor_prefers_visual_unless_dash_e() {
+        assert_eq!(pick_internal_editor(false, Some("vis"), Some("ed")), "vis");
+        assert_eq!(pick_internal_editor(true, Some("vis"), Some("ed")), "ed");
+        assert_eq!(pick_internal_editor(false, None, Some("ed")), "ed");
+        assert_eq!(pick_internal_editor(true, Some("vis"), None), "vi");
+        assert_eq!(pick_internal_editor(false, Some("  "), None), "vi");
+        assert_eq!(pick_internal_editor(false, None, None), "vi");
+    }
+
+    #[test]
     fn help_search_matches_keys_and_descriptions() {
         let matches = help_match_indices("zoom");
         assert!(matches.contains(
@@ -9131,6 +9209,12 @@ mod tests {
         assert!(parse_cli(args(&["-g", "-z"])).is_err());
         assert!(parse_cli(args(&["-e"])).unwrap().editor_text);
         assert!(parse_cli(args(&["--editor"])).unwrap().editor_text);
+        assert!(parse_cli(args(&["-E"])).unwrap().internal_editor);
+        assert!(
+            parse_cli(args(&["--internal-editor"]))
+                .unwrap()
+                .internal_editor
+        );
         assert!(parse_cli(args(&["-f"])).unwrap().history);
         assert!(parse_cli(args(&["--history"])).unwrap().history);
         assert!(parse_cli(args(&["-K"])).unwrap().key_collisions);
