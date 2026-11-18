@@ -157,11 +157,15 @@ are candidates, roughly in priority order.
 - [x] **nnn's `-Q` and `-o`** — `-Q` skips the running-task quit warning, and
       `-o` stops `l`/`→` from opening files, so only Enter opens them (in
       picker mode, only Enter picks too).
+- [x] **Yazi `[confirm]` titles** — `trash_title` and `delete_title` customize
+      the delete prompts, with `{n}` replaced by the count and `{s}` by `"s"`
+      for plural targets (an empty string for one). `overwrite_title` is
+      accepted but unused because rnn has no overwrite prompt.
 
 ## Next
 
-- [ ] Consider Yazi's `[confirm]` titles (`trash_title`, `delete_title`) with
-      `{n}`/`{s}` placeholders.
+- [ ] Consider nnn sessions (`-s <name>`, `-S`) to restore directories and
+      selections between runs.
 
 ## Local setup (outside this repo)
 

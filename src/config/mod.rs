@@ -193,15 +193,21 @@ impl Default for InputConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ConfirmConfig {
     pub quit_with_tasks: bool,
+    /// Yazi's `confirm.trash_title`; `{n}` and `{s}` are expanded.
+    pub trash_title: String,
+    /// Yazi's `confirm.delete_title`; `{n}` and `{s}` are expanded.
+    pub delete_title: String,
 }
 
 impl Default for ConfirmConfig {
     fn default() -> Self {
         ConfirmConfig {
             quit_with_tasks: true,
+            trash_title: "Trash {n} selected file{s}?".into(),
+            delete_title: "Permanently delete {n} selected file{s}?".into(),
         }
     }
 }
@@ -485,6 +491,12 @@ impl Config {
         if let Some(v) = p.confirm.quit_with_tasks {
             self.confirm.quit_with_tasks = v;
         }
+        if let Some(v) = p.confirm.trash_title {
+            self.confirm.trash_title = v;
+        }
+        if let Some(v) = p.confirm.delete_title {
+            self.confirm.delete_title = v;
+        }
 
         if let Some(v) = p.input.cd_title {
             self.input.cd_title = title_text(v, &mut warnings, "input.cd_title");
@@ -589,6 +601,8 @@ struct PartialTasks {
 #[serde(default)]
 struct PartialConfirm {
     quit_with_tasks: Option<bool>,
+    trash_title: Option<String>,
+    delete_title: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -685,7 +699,17 @@ fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
                 &["show_progress", "suppress_preload"],
                 warnings,
             ),
-            "confirm" => warn_keys(value, "confirm", &["quit_with_tasks"], warnings),
+            "confirm" => warn_keys(
+                value,
+                "confirm",
+                &[
+                    "quit_with_tasks",
+                    "trash_title",
+                    "delete_title",
+                    "overwrite_title",
+                ],
+                warnings,
+            ),
             "input" => warn_keys(
                 value,
                 "input",
@@ -788,6 +812,10 @@ mod tests {
             cd_title = "Change directory:"
             create_title = [ "New file", "New dir" ]
             find_title = [ "next", "prev" ]
+
+            [confirm]
+            trash_title = "Bin {n} item{s}"
+            delete_title = "Erase {n} item{s}"
             "#,
         )
         .unwrap();
@@ -807,6 +835,8 @@ mod tests {
         assert_eq!(loaded.config.input.cd_title, "Change directory:");
         assert_eq!(loaded.config.input.create_title, ["New file", "New dir"]);
         assert_eq!(loaded.config.input.find_title, ["next", "prev"]);
+        assert_eq!(loaded.config.confirm.trash_title, "Bin {n} item{s}");
+        assert_eq!(loaded.config.confirm.delete_title, "Erase {n} item{s}");
         assert!(loaded
             .warnings
             .iter()

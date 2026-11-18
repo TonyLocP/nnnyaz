@@ -2530,6 +2530,13 @@ fn resolve_bookmark(name: &str, base: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Expand Yazi's `{n}` and `{s}` placeholders in a confirm title.
+fn confirm_title(template: &str, n: usize) -> String {
+    template
+        .replace("{n}", &n.to_string())
+        .replace("{s}", if n == 1 { "" } else { "s" })
+}
+
 /// Format a prompt title as a prefix, tolerating Yazi's trailing colon.
 fn title_prefix(title: &str) -> String {
     let title = title.trim().trim_end_matches(':').trim_end();
@@ -5917,20 +5924,21 @@ impl App {
             Mode::Spot => "spot — j/k scroll · h/l swipe · c c copy path · Esc close".into(),
             Mode::Tasks => "tasks — j/k move · Enter inspect · x cancel · Esc/w close".into(),
             Mode::OpenWith => "open with — j/k move · Enter open · Esc cancel".into(),
-            Mode::Prompt(Prompt::Delete) => match self.pending_delete {
-                Some(DeleteMode::Trash) => {
-                    format!("trash {} item(s)? (y/N)", self.targets().len())
+            Mode::Prompt(Prompt::Delete) => {
+                let n = self.targets().len();
+                match self.pending_delete {
+                    Some(DeleteMode::Trash) => format!(
+                        "{} (y/N)",
+                        confirm_title(&self.config.confirm.trash_title, n)
+                    ),
+                    Some(DeleteMode::Permanent) | Some(DeleteMode::FromTrash) => format!(
+                        "{} (y/N)",
+                        confirm_title(&self.config.confirm.delete_title, n)
+                    ),
+                    Some(DeleteMode::EmptyTrash) => "empty trash? (y/N)".into(),
+                    None => "delete? (y/N)".into(),
                 }
-                Some(DeleteMode::Permanent) => {
-                    format!("permanently delete {} item(s)? (y/N)", self.targets().len())
-                }
-                Some(DeleteMode::FromTrash) => format!(
-                    "permanently delete {} item(s) from trash? (y/N)",
-                    self.targets().len()
-                ),
-                Some(DeleteMode::EmptyTrash) => "empty trash? (y/N)".into(),
-                None => "delete? (y/N)".into(),
-            },
+            }
             Mode::Prompt(p) => {
                 format!("{}{}", self.prompt_prefix(p), self.input.as_str())
             }
@@ -7175,6 +7183,19 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn confirm_titles_expand_placeholders() {
+        assert_eq!(
+            confirm_title("Trash {n} selected file{s}?", 1),
+            "Trash 1 selected file?"
+        );
+        assert_eq!(
+            confirm_title("Trash {n} selected file{s}?", 3),
+            "Trash 3 selected files?"
+        );
+        assert_eq!(confirm_title("No placeholders", 2), "No placeholders");
     }
 
     #[test]

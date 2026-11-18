@@ -220,6 +220,8 @@ suppress_preload = false  # do not preload neighbouring image/video/PDF previews
 
 [confirm]
 quit_with_tasks = true
+trash_title = "Trash {n} selected file{s}?"   # {n} count, {s} plural "s"
+delete_title = "Permanently delete {n} selected file{s}?"
 
 # Prompt titles use Yazi's [input] keys. A trailing colon is optional; the
 # *_origin/*_offset/cursor_blink keys are accepted but do not apply because
