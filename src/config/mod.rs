@@ -101,7 +101,7 @@ impl Default for MgrConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PreviewConfig {
     pub cache_size: usize,
     /// Cap on the decoded preview image, in pixels. Larger values keep more
@@ -120,6 +120,9 @@ pub struct PreviewConfig {
     /// Wrap long lines in text previews instead of truncating them (Yazi's
     /// `preview.wrap`).
     pub wrap: bool,
+    /// Directory for rnn's own preview cache (Yazi's `preview.cache_dir`).
+    /// `None` uses the system temp directory; `RNN_CACHE_DIR` still wins.
+    pub cache_dir: Option<PathBuf>,
 }
 
 impl Default for PreviewConfig {
@@ -133,6 +136,7 @@ impl Default for PreviewConfig {
             image_delay: 30,
             tab_size: 2,
             wrap: false,
+            cache_dir: None,
         }
     }
 }
@@ -192,6 +196,18 @@ pub fn config_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(dir).join("rnn"));
     }
     env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/rnn"))
+}
+
+/// Expand a leading `~` (and `~/`) using `HOME`. Returns `None` when the path
+/// starts with `~` but no home directory is available.
+fn expand_tilde(path: &str) -> Option<PathBuf> {
+    if let Some(rest) = path.strip_prefix("~/") {
+        return env::var_os("HOME").map(|home| PathBuf::from(home).join(rest));
+    }
+    if path == "~" {
+        return env::var_os("HOME").map(PathBuf::from);
+    }
+    Some(PathBuf::from(path))
 }
 
 pub fn load() -> Loaded {
@@ -391,6 +407,21 @@ impl Config {
                 },
             }
         }
+        if let Some(v) = &p.preview.cache_dir {
+            if v.is_empty() {
+                self.preview.cache_dir = None;
+            } else {
+                match expand_tilde(v) {
+                    Some(path) if path.is_absolute() => self.preview.cache_dir = Some(path),
+                    Some(_) => {
+                        warnings.push("config.toml: preview.cache_dir must be absolute".into())
+                    }
+                    None => {
+                        warnings.push("config.toml: preview.cache_dir cannot resolve '~'".into())
+                    }
+                }
+            }
+        }
 
         if let Some(v) = p.tasks.show_progress {
             self.tasks.show_progress = v;
@@ -453,6 +484,7 @@ struct PartialPreview {
     image_delay: Option<u32>,
     tab_size: Option<u32>,
     wrap: Option<WrapValue>,
+    cache_dir: Option<String>,
 }
 
 /// `preview.wrap` accepts Yazi's `"no"`/`"yes"` strings and a plain boolean.
@@ -512,6 +544,7 @@ fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
                     "image_delay",
                     "tab_size",
                     "wrap",
+                    "cache_dir",
                 ],
                 warnings,
             ),
@@ -658,6 +691,38 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.contains("preview.wrap 'sometimes'")));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn preview_cache_dir_accepts_absolute_and_empty() {
+        let dir = temp_dir("cache-dir");
+        let cache = dir.join("cache");
+        let write = |body: &str| {
+            fs::write(dir.join("config.toml"), body).unwrap();
+            load_from(&dir)
+        };
+
+        let loaded = write(&format!("[preview]\ncache_dir = \"{}\"\n", cache.display()));
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert_eq!(
+            loaded.config.preview.cache_dir.as_deref(),
+            Some(cache.as_path())
+        );
+
+        // Empty means "use the default temp dir".
+        let loaded = write("[preview]\ncache_dir = \"\"\n");
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert!(loaded.config.preview.cache_dir.is_none());
+
+        // Relative paths are rejected with a warning.
+        let loaded = write("[preview]\ncache_dir = \"relative/cache\"\n");
+        assert!(loaded.config.preview.cache_dir.is_none());
+        assert!(loaded
+            .warnings
+            .iter()
+            .any(|w| w.contains("preview.cache_dir must be absolute")));
 
         let _ = fs::remove_dir_all(dir);
     }

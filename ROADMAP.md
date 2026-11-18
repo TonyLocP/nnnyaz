@@ -129,11 +129,14 @@ are candidates, roughly in priority order.
 - [x] **More Yazi `mgr` keys** — `sort_sensitive` toggles case-sensitive name
       and extension comparisons, `sort_dir_first = false` mixes directories in
       with files, and `show_symlink = false` hides the ` -> target` suffix.
+- [x] **`preview.cache_dir`** — an absolute path (or empty for the temp
+      default) chooses rnn's own preview cache. Setting it disables sharing
+      Yazi's cache, and `RNN_CACHE_DIR` still takes precedence.
 
 ## Next
 
-- [ ] Support `preview.cache_dir` (rnn currently uses `RNN_CACHE_DIR` and
-      Yazi's cache when found).
+- [ ] Consider Yazi's `preview.cache_size` eviction (rnn bounds the in-memory
+      cache but leaves disk entries in place).
 
 ## Local setup (outside this repo)
 

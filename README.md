@@ -197,6 +197,7 @@ mouse_events = ["click", "scroll", "drag"]  # click | scroll | touch | move | dr
 
 [preview]
 cache_size = 16
+cache_dir = ""          # rnn's preview cache; empty uses the system temp dir
 max_width = 1920        # cap on decoded preview width, in pixels
 max_height = 1080       # cap on decoded preview height, in pixels
 image_filter = "box"    # box | nearest | triangle | catmull-rom | gaussian | lanczos3

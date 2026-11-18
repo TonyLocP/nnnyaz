@@ -317,12 +317,16 @@ fn load_font_from(
     Ok(capped)
 }
 
-/// On-disk preview cache root. `RNN_CACHE_DIR` overrides it (tests, config);
-/// otherwise a dir under the system temp dir, like yazi's default.
+/// On-disk preview cache root. `RNN_CACHE_DIR` overrides it, then
+/// `preview.cache_dir`, then a dir under the system temp dir (yazi's default).
 fn cache_dir() -> PathBuf {
-    std::env::var_os("RNN_CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("rnn-preview-cache"))
+    if let Some(dir) = std::env::var_os("RNN_CACHE_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Some(dir) = yazi::configured_cache_dir() {
+        return dir;
+    }
+    std::env::temp_dir().join("rnn-preview-cache")
 }
 
 /// Stable content key for a source image (path + mtime + size).

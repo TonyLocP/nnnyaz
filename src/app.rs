@@ -42,7 +42,7 @@ use crate::{
     openwith,
     preview::{
         detect::{self, Kind},
-        kitty, ImageProtocol, Key as PreviewKey, Preview,
+        kitty, yazi, ImageProtocol, Key as PreviewKey, Preview,
     },
     util::human,
 };
@@ -2444,7 +2444,8 @@ impl App {
         // `time` refuses to read the local offset once the process is
         // multi-threaded, so capture it now (main is still single-threaded).
         let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
-        let preview_cfg = config.preview;
+        let preview_cfg = config.preview.clone();
+        yazi::set_cache_dir(preview_cfg.cache_dir.clone());
         let preview_settings = kitty::Settings {
             max: (preview_cfg.max_width, preview_cfg.max_height),
             filter: preview_cfg.image_filter,

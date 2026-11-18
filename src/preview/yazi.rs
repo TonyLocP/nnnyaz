@@ -27,14 +27,28 @@ use std::{
 use twox_hash::XxHash3_128;
 
 /// Directory yazi uses for previews, when a yazi install appears to be
-/// present. `RNN_CACHE_DIR` forces rnn's own cache instead.
+/// present. `RNN_CACHE_DIR` or a configured rnn cache forces rnn's own cache.
 pub fn cache_dir() -> Option<PathBuf> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(resolve_cache_dir).clone()
 }
 
+static CONFIG_CACHE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Record `preview.cache_dir` from rnn's config. Called once at startup;
+/// `RNN_CACHE_DIR` still wins, and a configured directory disables sharing
+/// yazi's cache (it is rnn's own cache).
+pub fn set_cache_dir(dir: Option<PathBuf>) {
+    let _ = CONFIG_CACHE_DIR.set(dir);
+}
+
+/// The configured rnn preview cache directory, if any.
+pub fn configured_cache_dir() -> Option<PathBuf> {
+    CONFIG_CACHE_DIR.get().cloned().flatten()
+}
+
 fn resolve_cache_dir() -> Option<PathBuf> {
-    if env::var_os("RNN_CACHE_DIR").is_some() {
+    if env::var_os("RNN_CACHE_DIR").is_some() || configured_cache_dir().is_some() {
         return None;
     }
 
