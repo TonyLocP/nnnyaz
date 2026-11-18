@@ -176,12 +176,15 @@ are candidates, roughly in priority order.
       nnn's `/` mode cycle and `:` case toggle inside the filter prompt.
       Fuzzy matches are ranked by nnn's score (best first); an invalid regex
       leaves the list unfiltered, like nnn.
+- [x] **nnn's `-e` and `-u`** — `-e` sends text files to
+      `$VISUAL`/`$EDITOR`/`vi` on open (empty files show "empty file" and are
+      left alone), while `-u` is a compatibility no-op because rnn already
+      uses the selection without prompting.
 
 ## Next
 
-- [ ] Consider nnn's `-e` (open text in `$VISUAL`/`$EDITOR`), `-u` (use the
-      selection without prompting), and `-K` (report keymap collisions and
-      exit).
+- [ ] Consider nnn's `-K` (report keymap collisions and exit) and `-f`
+      (persistent history file).
 
 ## Local setup (outside this repo)
 

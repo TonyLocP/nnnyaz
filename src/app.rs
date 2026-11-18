@@ -933,6 +933,8 @@ pub struct App {
     type_to_nav: bool,
     /// `-A`: disable type-to-nav directory auto-entry.
     type_to_nav_autoenter: bool,
+    /// `-e`: open text files in the editor instead of the external opener.
+    open_text_in_editor: bool,
     /// Set when picker mode chooses an entry; the run loop exits at the next
     /// opportunity.
     quit: bool,
@@ -2417,6 +2419,8 @@ struct Cli {
     regex_filter: bool,
     /// `-z`: use fuzzy matching for filters.
     fuzzy_filter: bool,
+    /// `-e`: open text files in `$VISUAL`/`$EDITOR`/`vi`.
+    editor_text: bool,
 }
 
 /// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
@@ -2483,6 +2487,8 @@ Options:
   -A, --no-autoenter         Do not auto-enter a lone matching directory
   -g, --regex                Use regex filters (default: smart substring)
   -z, --fuzzy                Use fuzzy filters
+  -e, --editor               Open text files in $VISUAL/$EDITOR/vi
+  -u, --use-selection        Accepted for nnn compatibility (rnn always uses the selection)
   -R, --no-rollover          Accepted for nnn compatibility (rnn never rolls over)
   -s <NAME>, --session <NAME> Load a session (@ is the last session)
   -S, --persistent-session   Save the session on exit
@@ -2543,6 +2549,11 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.regex_filter = true;
         } else if text == "-z" || text == "--fuzzy" {
             cli.fuzzy_filter = true;
+        } else if text == "-e" || text == "--editor" {
+            cli.editor_text = true;
+        } else if text == "-u" || text == "--use-selection" {
+            // rnn already acts on the selection without prompting, so nnn's
+            // `-u` is accepted as a compatibility no-op.
         } else if text == "-R" || text == "--no-rollover" {
             // rnn never rolls over at the edges (Yazi behavior); accept nnn's
             // flag so scripts written for nnn keep working.
@@ -2946,6 +2957,7 @@ impl App {
             open_on_enter_only: cli.open_on_enter_only,
             type_to_nav: cli.type_to_nav,
             type_to_nav_autoenter: !cli.no_autoenter,
+            open_text_in_editor: cli.editor_text,
             quit: false,
             cwd_file,
             chooser_file,
@@ -3638,7 +3650,7 @@ impl App {
 
     /// nnn's type-to-nav autoenter: when the filter leaves exactly one
     /// directory, descend into it and keep filtering.
-    fn type_to_nav_auto_enter(&mut self) {
+    fn type_to_nav_auto_enter(&mut self, term: &mut DefaultTerminal) {
         if !self.type_to_nav
             || !self.type_to_nav_autoenter
             || self.entries.len() != 1
@@ -3646,7 +3658,7 @@ impl App {
         {
             return;
         }
-        self.enter();
+        self.enter(term);
         self.mode = Mode::Filter;
     }
 
@@ -4167,8 +4179,27 @@ impl App {
         }
     }
 
+    /// Open a file, honouring nnn's `-e`: text files go to the editor while
+    /// everything else uses the external opener.
+    fn open_target(&mut self, term: &mut DefaultTerminal, path: &Path) {
+        if self.open_text_in_editor && path.is_file() {
+            if path.metadata().map(|m| m.len() == 0).unwrap_or(false) {
+                self.status = "empty file".into();
+                return;
+            }
+            if matches!(detect::detect(path), Kind::Text) {
+                let editor = env::var("VISUAL")
+                    .or_else(|_| env::var("EDITOR"))
+                    .unwrap_or_else(|_| "vi".into());
+                self.external(term, &editor, path);
+                self.reload();
+                return;
+            }
+        }
+        self.open_external(path);
+    }
+
     fn open(&mut self, term: &mut DefaultTerminal) {
-        let _ = term;
         match open_action(self.chooser_file.is_some(), self.targets()) {
             OpenAction::Nothing => {}
             OpenAction::Pick => {
@@ -4182,8 +4213,12 @@ impl App {
             }
             OpenAction::EnterDirectory(path) => self.cd(path, None),
             OpenAction::External(paths) => {
-                for path in &paths {
-                    self.open_external(path);
+                if paths.len() == 1 {
+                    self.open_target(term, &paths[0]);
+                } else {
+                    for path in &paths {
+                        self.open_external(path);
+                    }
                 }
             }
         }
@@ -4192,7 +4227,7 @@ impl App {
     /// `l`/`<Right>`: enter a directory, or open the hovered file. Unlike
     /// `open`, this ignores the selection so it always acts on the cursor. In
     /// picker mode a hovered file is picked instead of launched.
-    fn enter(&mut self) {
+    fn enter(&mut self, term: &mut DefaultTerminal) {
         let Some(e) = self.current().cloned() else {
             return;
         };
@@ -4203,7 +4238,7 @@ impl App {
                 self.write_chooser(true);
                 self.quit = true;
             } else {
-                self.open_external(&e.path);
+                self.open_target(term, &e.path);
             }
         }
     }
@@ -4305,8 +4340,12 @@ impl App {
             return;
         }
         if op.command == "rnn:open" {
-            for path in &state.paths {
-                self.open_external(path);
+            if state.paths.len() == 1 {
+                self.open_target(term, &state.paths[0]);
+            } else {
+                for path in &state.paths {
+                    self.open_external(path);
+                }
             }
             return;
         }
@@ -4366,7 +4405,7 @@ impl App {
         }
     }
 
-    fn follow_symlink(&mut self) {
+    fn follow_symlink(&mut self, term: &mut DefaultTerminal) {
         let Some(e) = self.current().cloned() else {
             return;
         };
@@ -4382,7 +4421,7 @@ impl App {
         if target.is_dir() {
             self.cd(target, None);
         } else if target.exists() {
-            self.open_external(&target);
+            self.open_target(term, &target);
         } else {
             self.status = format!("{}: broken symlink", target.display());
         }
@@ -5585,7 +5624,7 @@ impl App {
                     }
                     KeyCode::Enter => {
                         if self.type_to_nav {
-                            self.enter();
+                            self.enter(term);
                             // nnn keeps type-to-nav active after opening.
                             self.mode = Mode::Filter;
                         } else {
@@ -5597,12 +5636,12 @@ impl App {
                     KeyCode::Char('/') => {
                         self.filter_mode = self.filter_mode.cycle();
                         self.reload();
-                        self.type_to_nav_auto_enter();
+                        self.type_to_nav_auto_enter(term);
                     }
                     KeyCode::Char(':') => {
                         self.filter_case = self.filter_case.cycle();
                         self.reload();
-                        self.type_to_nav_auto_enter();
+                        self.type_to_nav_auto_enter(term);
                     }
                     KeyCode::Backspace => {
                         if self.type_to_nav && self.filter.is_empty() {
@@ -5610,13 +5649,13 @@ impl App {
                         } else {
                             self.filter.pop();
                             self.reload();
-                            self.type_to_nav_auto_enter();
+                            self.type_to_nav_auto_enter(term);
                         }
                     }
                     KeyCode::Char(c) => {
                         self.filter.push(c);
                         self.reload();
-                        self.type_to_nav_auto_enter();
+                        self.type_to_nav_auto_enter(term);
                     }
                     _ => {}
                 }
@@ -5962,7 +6001,7 @@ impl App {
             },
             Action::Parent => self.go_parent(),
             Action::Open => self.open(term),
-            Action::Enter => self.enter(),
+            Action::Enter => self.enter(term),
             Action::OpenWith => self.start_open_with(),
             Action::History(n) => {
                 if n < 0 {
@@ -5971,7 +6010,7 @@ impl App {
                     self.history_forward();
                 }
             }
-            Action::Follow => self.follow_symlink(),
+            Action::Follow => self.follow_symlink(term),
             Action::Goto(path) => self.goto(&path),
             Action::GotoTrash => self.goto_trash(),
             Action::Cd => self.start_cd(),
@@ -8457,6 +8496,10 @@ mod tests {
         assert!(parse_cli(args(&["-z"])).unwrap().fuzzy_filter);
         assert!(parse_cli(args(&["--fuzzy"])).unwrap().fuzzy_filter);
         assert!(parse_cli(args(&["-g", "-z"])).is_err());
+        assert!(parse_cli(args(&["-e"])).unwrap().editor_text);
+        assert!(parse_cli(args(&["--editor"])).unwrap().editor_text);
+        assert!(parse_cli(args(&["-u"])).is_ok());
+        assert!(parse_cli(args(&["--use-selection"])).is_ok());
         assert!(parse_cli(args(&["-R"])).is_ok());
         assert!(parse_cli(args(&["--no-rollover"])).is_ok());
         assert_eq!(
