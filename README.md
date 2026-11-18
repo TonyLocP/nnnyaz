@@ -49,7 +49,8 @@ binding that can never fire because another binding claims the same key or
 because a longer sequence (such as `g g`) shadows it. `-E` uses `$EDITOR`
 rather than `$VISUAL` for internal undetached edits (bulk rename/create), and
 `r` on a single entry edits its name in that editor instead of the inline
-prompt. Sessions work like nnn's: `-s <name>` loads a saved session (`@` is the last session)
+prompt. `-c` treats `NNN_OPENER` as a terminal program: it runs the opener
+attached and waits for it (so TUI openers work) and disables `-e`. Sessions work like nnn's: `-s <name>` loads a saved session (`@` is the last session)
 and `-S` saves the current tabs on exit, defaulting to `@`. Loading a named
 session first stores the previous state in `@`. Sessions live under
 `<config>/sessions`. Inside nnnyaz, `t S` opens nnn's session menu (`s` save,
@@ -279,7 +280,9 @@ otherwise; `l`/`→` enter the hovered directory (or act on the hovered file).
 browser-associated files follow the browser you selected with
 `xdg-settings set default-web-browser`. For example, if PDFs are registered to
 Brave while Zen is your default browser, nnnyaz opens the PDF in Zen. Set `OPENER`
-to override this and use your own launcher for everything.
+(or nnn's `NNN_OPENER`) to override this and use your own launcher for
+everything; `OPENER` wins when both are set. With `-c`, the opener runs
+attached to the terminal and nnnyaz waits for it.
 
 Opener commands support Yazi's placeholders: `%s`/`%S` expand to the target
 files, `%d`/`%D` to their parent directories, a 1-based suffix picks one target

@@ -1013,6 +1013,8 @@ pub struct App {
     open_text_in_editor: bool,
     /// `-E`: use `$EDITOR` (not `$VISUAL`) for internal undetached edits.
     internal_editor: bool,
+    /// `-c`: run the opener attached to the terminal instead of detaching it.
+    cli_opener: bool,
     /// Set when picker mode chooses an entry; the run loop exits at the next
     /// opportunity.
     quit: bool,
@@ -1131,6 +1133,21 @@ fn pick_internal_editor(internal: bool, visual: Option<&str>, editor: Option<&st
         pick(visual).or_else(|| pick(editor))
     }
     .unwrap_or_else(|| "vi".into())
+}
+
+/// The external opener: nnnyaz's `OPENER`, then nnn's `NNN_OPENER`, then the
+/// platform default. Blank values are ignored.
+fn opener_command(opener: Option<&str>, nnn_opener: Option<&str>) -> String {
+    let pick = |value: Option<&str>| value.filter(|v| !v.trim().is_empty()).map(str::to_string);
+    pick(opener)
+        .or_else(|| pick(nnn_opener))
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "open".into()
+            } else {
+                "xdg-open".into()
+            }
+        })
 }
 
 /// Apply a bulk rename through temporary names, so swaps like `a ↔ b` work.
@@ -2513,6 +2530,8 @@ struct Cli {
     editor_text: bool,
     /// `-E`: use `$EDITOR` (not `$VISUAL`) for internal undetached edits.
     internal_editor: bool,
+    /// `-c`: run `NNN_OPENER` attached to the terminal (nnn's CLI-only opener).
+    cli_opener: bool,
     /// `-f`: keep a persistent shell command history.
     history: bool,
     /// `-K`: print keymap collisions and exit.
@@ -2585,6 +2604,7 @@ Options:
   -z, --fuzzy                Use fuzzy filters
   -e, --editor               Open text files in $VISUAL/$EDITOR/vi
   -E, --internal-editor      Use $EDITOR (not $VISUAL) for internal edits
+  -c, --cli-opener           Run NNN_OPENER in the terminal (trumps -e)
   -f, --history              Keep a persistent shell command history
   -K, --key-collisions       Report keymap collisions and exit
   -u, --use-selection        Accepted for nnn compatibility (nnnyaz always uses the selection)
@@ -2652,6 +2672,8 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.editor_text = true;
         } else if text == "-E" || text == "--internal-editor" {
             cli.internal_editor = true;
+        } else if text == "-c" || text == "--cli-opener" {
+            cli.cli_opener = true;
         } else if text == "-f" || text == "--history" {
             cli.history = true;
         } else if text == "-K" || text == "--key-collisions" {
@@ -3220,8 +3242,9 @@ impl App {
             open_on_enter_only: cli.open_on_enter_only,
             type_to_nav: cli.type_to_nav,
             type_to_nav_autoenter: !cli.no_autoenter,
-            open_text_in_editor: cli.editor_text,
+            open_text_in_editor: cli.editor_text && !cli.cli_opener,
             internal_editor: cli.internal_editor,
+            cli_opener: cli.cli_opener,
             quit: false,
             cwd_file,
             chooser_file,
@@ -4535,26 +4558,35 @@ impl App {
         }
     }
 
-    fn open_external(&mut self, path: &Path) {
+    /// Open a path with the external opener. `OPENER` wins over nnn's
+    /// `NNN_OPENER`; either one suppresses the browser redirect. `-c` runs the
+    /// opener attached to the terminal instead of detaching it.
+    fn open_external(&mut self, term: &mut DefaultTerminal, path: &Path) {
+        let explicit = env::var_os("OPENER").is_some() || env::var_os("NNN_OPENER").is_some();
         // Browser-associated files (PDFs, XML, …) should follow the browser the
         // user chose as the system default, not whatever browser owns the MIME
-        // type. A user-set OPENER is an explicit override, so leave it alone.
-        if env::var_os("OPENER").is_none() {
+        // type. An explicit opener is an override, so leave it alone.
+        if !explicit {
             if let Some((browser, uri)) = openwith::browser_redirect(path) {
                 if openwith::launch_desktop(&browser, &uri) {
                     return;
                 }
             }
         }
-        let opener = env::var("OPENER").unwrap_or_else(|_| {
-            if cfg!(target_os = "macos") {
-                "open"
-            } else {
-                "xdg-open"
-            }
-            .to_string()
-        });
-        let r = Command::new(&opener)
+        let opener = opener_command(
+            env::var("OPENER").ok().as_deref(),
+            env::var("NNN_OPENER").ok().as_deref(),
+        );
+        if self.cli_opener {
+            self.external(term, &opener, path);
+            return;
+        }
+        let mut parts = opener.split_whitespace();
+        let Some(prog) = parts.next() else {
+            return;
+        };
+        let r = Command::new(prog)
+            .args(parts)
             .arg(path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -4582,7 +4614,7 @@ impl App {
                 return;
             }
         }
-        self.open_external(path);
+        self.open_external(term, path);
     }
 
     fn open(&mut self, term: &mut DefaultTerminal) {
@@ -4603,7 +4635,7 @@ impl App {
                     self.open_target(term, &paths[0]);
                 } else {
                     for path in &paths {
-                        self.open_external(path);
+                        self.open_external(term, path);
                     }
                 }
             }
@@ -4730,7 +4762,7 @@ impl App {
                 self.open_target(term, &state.paths[0]);
             } else {
                 for path in &state.paths {
-                    self.open_external(path);
+                    self.open_external(term, path);
                 }
             }
             return;
@@ -8493,6 +8525,15 @@ mod tests {
     }
 
     #[test]
+    fn opener_prefers_opener_then_nnn_opener() {
+        assert_eq!(opener_command(Some("mine"), Some("nnn")), "mine");
+        assert_eq!(opener_command(None, Some("nnn")), "nnn");
+        assert_eq!(opener_command(Some("  "), Some("nnn")), "nnn");
+        let fallback = opener_command(None, None);
+        assert!(fallback == "open" || fallback == "xdg-open");
+    }
+
+    #[test]
     fn help_search_matches_keys_and_descriptions() {
         let matches = help_match_indices("zoom");
         assert!(matches.contains(
@@ -9215,6 +9256,8 @@ mod tests {
                 .unwrap()
                 .internal_editor
         );
+        assert!(parse_cli(args(&["-c"])).unwrap().cli_opener);
+        assert!(parse_cli(args(&["--cli-opener"])).unwrap().cli_opener);
         assert!(parse_cli(args(&["-f"])).unwrap().history);
         assert!(parse_cli(args(&["--history"])).unwrap().history);
         assert!(parse_cli(args(&["-K"])).unwrap().key_collisions);

@@ -203,11 +203,14 @@ are candidates, roughly in priority order.
       `$VISUAL`, then `$EDITOR`, then `vi`) for internal undetached edits such
       as bulk rename and bulk create. As an extension, `r` on a single entry
       edits its name in that editor rather than opening the inline prompt.
+- [x] **nnn's `-c` CLI opener** — `NNN_OPENER` is honored as an external
+      opener (after nnnyaz's own `OPENER`), and `-c` runs it attached to the
+      terminal and waits, so TUI openers work. `-c` also disables `-e`, like
+      nnn.
 
 ## Next
 
-- [ ] Consider the remaining nnn flags: `-c` (use `NNN_OPENER` as a
-      CLI-only opener) and `-t <secs>` (lock after inactivity).
+- [ ] Consider nnn's `-t <secs>` flag (lock after inactivity).
 
 ## Local setup (outside this repo)
 
@@ -231,3 +234,5 @@ are candidates, roughly in priority order.
   explicit `ic`/`noic` modes.
 - `-E` also makes `r` on a single entry edit its name in `$EDITOR`. nnn's
   `-E` only changes the editor used for internal edits (bulk rename/create).
+- `NNN_OPENER` is honored, but nnnyaz's own `OPENER` wins when both are set;
+  nnn does not read `OPENER`.
