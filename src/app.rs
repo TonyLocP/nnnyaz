@@ -102,6 +102,13 @@ enum Prompt {
     SessionLoad,
 }
 
+impl Prompt {
+    /// Prompts that show the completion/list overlay.
+    fn completes(self) -> bool {
+        matches!(self, Prompt::Cd | Prompt::SessionLoad)
+    }
+}
+
 /// A pending mark operation waiting for its single-character key.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MarkOp {
@@ -3775,9 +3782,55 @@ impl App {
     fn refresh_completions(&mut self) {
         self.completions.clear();
         self.completion_index = 0;
-        if !matches!(self.mode, Mode::Prompt(Prompt::Cd)) {
-            return;
+        match self.mode {
+            Mode::Prompt(Prompt::Cd) => self.refresh_cd_completions(),
+            Mode::Prompt(Prompt::SessionLoad) => self.refresh_session_completions(),
+            _ => {}
         }
+    }
+
+    /// List saved sessions for the load prompt, `@` first, then alphabetical.
+    /// The prefix narrows the list with the same smart-case substring rule as
+    /// the directory completions.
+    fn refresh_session_completions(&mut self) {
+        let Some(dir) = session_dir() else {
+            return;
+        };
+        let prefix = self.input.as_str().trim().to_string();
+        let smart = !prefix.chars().any(|c| c.is_ascii_uppercase());
+        let Ok(rd) = fs::read_dir(&dir) else {
+            return;
+        };
+        let mut names: Vec<String> = rd
+            .flatten()
+            .filter(|e| e.path().is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                if prefix.is_empty() {
+                    return true;
+                }
+                if smart {
+                    name.to_lowercase().contains(&prefix.to_lowercase())
+                } else {
+                    name.contains(&prefix)
+                }
+            })
+            .collect();
+        names.sort_by(|a, b| {
+            (b == "@")
+                .cmp(&(a == "@"))
+                .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+        });
+        self.completions = names
+            .into_iter()
+            .map(|name| Completion {
+                path: dir.join(&name),
+                display: name,
+            })
+            .collect();
+    }
+
+    fn refresh_cd_completions(&mut self) {
         let Some((base, display, prefix)) = self.completion_context() else {
             return;
         };
@@ -4717,6 +4770,21 @@ impl App {
         }
 
         if matches!(p, Prompt::SessionSave | Prompt::SessionLoad) {
+            // Loading accepts the highlighted entry, so Enter on the list
+            // works without typing. An exact typed name still wins.
+            let name = if p == Prompt::SessionLoad {
+                let typed = name;
+                if session_path(&typed).is_some_and(|path| path.is_file()) {
+                    typed
+                } else {
+                    self.completions
+                        .get(self.completion_index)
+                        .map(|c| c.display.clone())
+                        .unwrap_or(typed)
+                }
+            } else {
+                name
+            };
             if name.is_empty() {
                 return;
             }
@@ -5739,6 +5807,9 @@ impl App {
                         KeyCode::Char('l') => {
                             self.input.clear();
                             self.mode = Mode::Prompt(Prompt::SessionLoad);
+                            // Show every saved session immediately, so `l`
+                            // doubles as the session list.
+                            self.refresh_completions();
                         }
                         KeyCode::Char('r') => {
                             self.mode = Mode::Normal;
@@ -5770,13 +5841,13 @@ impl App {
                     }
                     KeyCode::Backspace => {
                         self.input.backspace();
-                        if p == Prompt::Cd {
+                        if p.completes() {
                             self.refresh_completions();
                         }
                     }
                     KeyCode::Delete => {
                         self.input.delete();
-                        if p == Prompt::Cd {
+                        if p.completes() {
                             self.refresh_completions();
                         }
                     }
@@ -5791,13 +5862,13 @@ impl App {
                     KeyCode::Char(c) if ctrl => apply_ctrl_edit(&mut self.input, c, shift),
                     KeyCode::Char(c) if !ctrl => {
                         self.input.insert(c);
-                        if p == Prompt::Cd {
+                        if p.completes() {
                             self.refresh_completions();
                         }
                     }
-                    KeyCode::Up if p == Prompt::Cd => self.move_completion(-1),
-                    KeyCode::Down if p == Prompt::Cd => self.move_completion(1),
-                    KeyCode::Tab if p == Prompt::Cd => self.accept_completion(),
+                    KeyCode::Up if p.completes() => self.move_completion(-1),
+                    KeyCode::Down if p.completes() => self.move_completion(1),
+                    KeyCode::Tab if p.completes() => self.accept_completion(),
                     _ => {}
                 }
                 return Ok(false);
@@ -7122,6 +7193,8 @@ impl App {
             RENAME_HINTS
                 .into_iter()
                 .find(|hint| Span::raw(*hint).width() + 16 <= avail)
+        } else if p == Prompt::SessionLoad {
+            (!self.completions.is_empty()).then_some("↑/↓ select, Enter load")
         } else if p == Prompt::Bookmark {
             bookmark_hint.as_deref()
         } else {
@@ -7174,7 +7247,10 @@ impl App {
     }
 
     fn draw_completions(&self, f: &mut Frame) {
-        if !matches!(self.mode, Mode::Prompt(Prompt::Cd)) || self.completions.is_empty() {
+        let sessions = matches!(self.mode, Mode::Prompt(Prompt::SessionLoad));
+        if !matches!(self.mode, Mode::Prompt(Prompt::Cd)) && !sessions
+            || self.completions.is_empty()
+        {
             return;
         }
         let area = f.area();
@@ -7209,7 +7285,11 @@ impl App {
         f.render_widget(Clear, rect);
         f.render_stateful_widget(
             List::new(items)
-                .block(Block::bordered().title(" directories "))
+                .block(Block::bordered().title(if sessions {
+                    " sessions "
+                } else {
+                    " directories "
+                }))
                 .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
             rect,
             &mut state,
@@ -7426,7 +7506,10 @@ impl App {
         ) {
             return true;
         }
-        matches!(self.mode, Mode::Prompt(Prompt::Cd)) && !self.completions.is_empty()
+        matches!(
+            self.mode,
+            Mode::Prompt(Prompt::Cd) | Mode::Prompt(Prompt::SessionLoad)
+        ) && !self.completions.is_empty()
     }
 
     // ─────────────── terminal / mouse ───────────────

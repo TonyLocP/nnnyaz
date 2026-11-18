@@ -46,7 +46,8 @@ already acts on the selection without prompting. Sessions work like nnn's: `-s <
 and `-S` saves the current tabs on exit, defaulting to `@`. Loading a named
 session first stores the previous state in `@`. Sessions live under
 `<config>/sessions`. Inside rnn, `t S` opens nnn's session menu (`s` save,
-`l` load, `r` restore `@`).
+`l` load, `r` restore `@`); `l` lists the saved sessions and filters them as
+you type, with `↑`/`↓` and Enter to pick one.
 
 ## Quitting and the current directory
 

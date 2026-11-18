@@ -167,7 +167,9 @@ are candidates, roughly in priority order.
       restored. Loading a named session stores the previous state in `@`
       first, matching nnn.
 - [x] **Session manager** — `t S` opens nnn's `'s'ave/'l'oad/'r'estore?`
-      prompt; `r` reloads `@` without saving the current state over it.
+      prompt; `r` reloads `@` without saving the current state over it. `l`
+      lists the saved sessions immediately and narrows the list as you type;
+      `↑`/`↓` selects and Enter loads (an exact typed name still wins).
 - [x] **nnn's `-n`, `-A`, and `-R`** — `-n` starts in type-to-nav (persistent
       filtering, Enter opens the match), `-A` disables auto-entering a lone
       matching directory, and `-R` is accepted for compatibility because rnn
