@@ -1,8 +1,8 @@
-# rnn
+# yannni
 
 A small nnn/Yazi-style terminal file manager with a native preview pane.
 
-rnn keeps a Yazi-like feel: modal `mgr` navigation, prefix keymaps
+yannni keeps a Yazi-like feel: modal `mgr` navigation, prefix keymaps
 (`g`, `,`, `c`, `m`, `t`), tabs, a trash bin, a background task manager, and
 an `open with` menu. Configuration is declarative TOML, with an optional
 `init.lua` for overrides and small custom actions.
@@ -11,16 +11,16 @@ an `open with` menu. Configuration is declarative TOML, with an optional
 
 ```sh
 cargo build --release
-install -Dm755 target/release/rnn ~/.local/bin/rnn
+install -Dm755 target/release/yannni ~/.local/bin/yannni
 ```
 
 Run it in a directory:
 
 ```sh
-rnn [path]
+yannni [path]
 ```
 
-`rnn --help` lists the command-line options and `rnn --version` prints the
+`yannni --help` lists the command-line options and `yannni --version` prints the
 version. The main options are `--cwd-file` (see below) and the picker flags
 `--chooser-file` / `-p` and `-0` / `--null`. nnn's startup overrides also work:
 `-H` shows hidden files, `-T <key>` sets the sort order (`a`/`d`/`s` size,
@@ -35,13 +35,13 @@ skips the warning about running tasks on quit, and `-o` makes `l`/`→` open
 only directories, so files open with Enter alone. `-n` starts in nnn's
 type-to-nav mode (persistent filtering; Enter opens the match), `-A` disables
 auto-entering a lone matching directory, and `-R` is accepted for nnn
-compatibility even though rnn never rolls over at the list edges. `-g` and
+compatibility even though yannni never rolls over at the list edges. `-g` and
 `-z` select regex and fuzzy filtering instead of the default smart-case
 substring match. While the filter prompt is open, `/` cycles string → fuzzy →
 regex (matching nnn) and `:` cycles smart case → case-insensitive →
 case-sensitive; the active mode is shown next to the filter text. `-e` opens
 text files in `$VISUAL`/`$EDITOR`/`vi` instead of the external opener (empty
-files are left alone), `-u` is accepted for compatibility because rnn
+files are left alone), `-u` is accepted for compatibility because yannni
 already acts on the selection without prompting, and `-f` keeps a persistent
 shell-command history at `<config>/.history` (Up/Down in the `;`/`:` prompt
 recall the last 16 commands). `-K` reports keymap collisions and exits: a
@@ -49,7 +49,7 @@ binding that can never fire because another binding claims the same key or
 because a longer sequence (such as `g g`) shadows it. Sessions work like nnn's: `-s <name>` loads a saved session (`@` is the last session)
 and `-S` saves the current tabs on exit, defaulting to `@`. Loading a named
 session first stores the previous state in `@`. Sessions live under
-`<config>/sessions`. Inside rnn, `t S` opens nnn's session menu (`s` save,
+`<config>/sessions`. Inside yannni, `t S` opens nnn's session menu (`s` save,
 `l` load, `r` restore `@`); `l` lists the saved sessions and filters them as
 you type. `j`/`k` always edit the filter text; `J`/`K`, `Ctrl+j`/`Ctrl+k`, or
 `↑`/`↓` move through the list, and Enter loads. `Ctrl+d` in the list deletes
@@ -57,20 +57,20 @@ the highlighted session after a `y/N` confirmation.
 
 ## Quitting and the current directory
 
-`q` quits and leaves the shell where it was. `Q` quits and records rnn's
+`q` quits and leaves the shell where it was. `Q` quits and records yannni's
 current directory so a shell wrapper can `cd` there. A child process cannot
 change its parent shell's directory, so this needs a small wrapper.
 
-Pass a file with `--cwd-file <path>` (or set `RNN_CWD_FILE`); `Q` writes the
+Pass a file with `--cwd-file <path>` (or set `YANNNI_CWD_FILE`); `Q` writes the
 current directory to it. The file is only written by `Q`, never by `q`, so the
-wrapper should remove it before starting rnn:
+wrapper should remove it before starting yannni:
 
 ```fish
-function rnn --description 'rnn with cd-on-quit'
+function yannni --description 'yannni with cd-on-quit'
     set -l cwd_file (mktemp)
     or return
     rm -f $cwd_file
-    command rnn --cwd-file $cwd_file $argv
+    command yannni --cwd-file $cwd_file $argv
     set -l status $status
     if test -s $cwd_file
         cd (cat $cwd_file)
@@ -80,15 +80,15 @@ function rnn --description 'rnn with cd-on-quit'
 end
 ```
 
-Save it as `~/.config/fish/functions/rnn.fish`. Bash/zsh wrappers use the same
+Save it as `~/.config/fish/functions/yannni.fish`. Bash/zsh wrappers use the same
 idea:
 
 ```sh
-rnn() {
+yannni() {
   local cwd_file
   cwd_file=$(mktemp) || return
   rm -f "$cwd_file"
-  command rnn --cwd-file "$cwd_file" "$@"
+  command yannni --cwd-file "$cwd_file" "$@"
   local status=$?
   [ -s "$cwd_file" ] && cd "$(cat "$cwd_file")"
   rm -f "$cwd_file"
@@ -120,22 +120,22 @@ export NNN_BMS='d:~/Documents;u:/home/user/Cam Uploads;D:~/Downloads/'
 
 ## Picker mode
 
-rnn can act as a file picker, like nnn's `-p` or Yazi's `--chooser-file`.
+yannni can act as a file picker, like nnn's `-p` or Yazi's `--chooser-file`.
 Pass a file with `--chooser-file <path>`, `-p <path>`, or set
-`RNN_CHOOSER_FILE`. Select entries with `Space`; press `Enter` on any entry
+`YANNNI_CHOOSER_FILE`. Select entries with `Space`; press `Enter` on any entry
 (files and directories alike) to pick the selection, or the hovered entry when
 nothing is selected, and quit. Quitting normally with `q` or `Q` also writes an
 existing selection.
 
 `-p -` writes the paths to stdout instead of a file, which is useful in
 command substitution. `-0` (or `--null`) separates paths with NUL instead of a
-newline; like Yazi and nnn, rnn puts separators only between paths and does
+newline; like Yazi and nnn, yannni puts separators only between paths and does
 not append a trailing one. If nothing is selected on a plain quit, the chooser
 file is left untouched.
 
 ```fish
 # Pick files and print them one per line.
-set -l files (rnn -p - ~/Downloads)
+set -l files (yannni -p - ~/Downloads)
 for f in $files
     echo $f
 end
@@ -143,7 +143,7 @@ end
 
 ```sh
 # Pick files and pass them to a command with NUL separators.
-rnn -p - -0 ~/Downloads | xargs -0 some-command
+yannni -p - -0 ~/Downloads | xargs -0 some-command
 ```
 
 The status line shows `picker` while picker mode is active.
@@ -153,7 +153,7 @@ The status line shows `picker` while picker mode is active.
 Image and video thumbnails are drawn with the kitty graphics protocol in kitty
 and ghostty, and with sixel in terminals that support it (foot, WezTerm, mlterm,
 xterm with sixel enabled, …). The protocol is detected automatically; set
-`RNN_IMAGE_PROTOCOL=kitty|sixel|none` to override it.
+`YANNNI_IMAGE_PROTOCOL=kitty|sixel|none` to override it.
 
 Inside tmux, enable graphics passthrough:
 
@@ -187,11 +187,11 @@ overlay.
 
 ## Configuration
 
-rnn reads configuration from the first of:
+yannni reads configuration from the first of:
 
-1. `$RNN_CONFIG_HOME`
-2. `$XDG_CONFIG_HOME/rnn`
-3. `~/.config/rnn`
+1. `$YANNNI_CONFIG_HOME`
+2. `$XDG_CONFIG_HOME/yannni`
+3. `~/.config/yannni`
 
 The files are all optional:
 
@@ -226,7 +226,7 @@ mouse_events = ["click", "scroll", "drag"]  # click | scroll | touch | move | dr
 
 [preview]
 cache_size = 16
-cache_dir = ""          # rnn's preview cache; empty uses the system temp dir
+cache_dir = ""          # yannni's preview cache; empty uses the system temp dir
 max_width = 1920        # cap on decoded preview width, in pixels
 max_height = 1080       # cap on decoded preview height, in pixels
 image_filter = "box"    # box | nearest | triangle | catmull-rom | gaussian | lanczos3
@@ -246,7 +246,7 @@ delete_title = "Permanently delete {n} selected file{s}?"
 
 # Prompt titles use Yazi's [input] keys. A trailing colon is optional; the
 # *_origin/*_offset/cursor_blink keys are accepted but do not apply because
-# rnn prompts on the status line.
+# yannni prompts on the status line.
 [input]
 cd_title = "go to"
 create_title = [ "create", "create dir" ]
@@ -266,7 +266,7 @@ rules = [
 ]
 ```
 
-If `[opener]` or `[open]` is omitted, rnn falls back to your Yazi config and
+If `[opener]` or `[open]` is omitted, yannni falls back to your Yazi config and
 then to built-in defaults.
 
 `Enter`/`o` open the whole selection when there is one, or the hovered entry
@@ -275,7 +275,7 @@ otherwise; `l`/`→` enter the hovered directory (or act on the hovered file).
 `open` opener uses the system handler for the file's MIME type, but
 browser-associated files follow the browser you selected with
 `xdg-settings set default-web-browser`. For example, if PDFs are registered to
-Brave while Zen is your default browser, rnn opens the PDF in Zen. Set `OPENER`
+Brave while Zen is your default browser, yannni opens the PDF in Zen. Set `OPENER`
 to override this and use your own launcher for everything.
 
 Opener commands support Yazi's placeholders: `%s`/`%S` expand to the target
@@ -331,7 +331,7 @@ Key sequences are written like `<C-d>`, `<A-->`, `<S-Enter>`, `<Space>`, `g g`.
 Unsupported Yazi contexts (`input`, `confirm`, `pick`, `cmp`, `help`, `which`)
 are ignored.
 
-Run `~` inside rnn for the built-in key list.
+Run `~` inside yannni for the built-in key list.
 
 Yazi's action names are accepted too, so most of a Yazi `keymap.toml` can be
 pasted in unchanged. For example: `arrow prev`, `enter`, `leave`,
@@ -373,7 +373,7 @@ select the whole name.
 | `Enter` / `Esc` | Save / cancel |
 
 While renaming, a dim hint on the right of the status line lists the binds and
-shortens itself on narrow terminals. rnn requests a keyboard protocol that
+shortens itself on narrow terminals. yannni requests a keyboard protocol that
 distinguishes modified keys: tmux's modifyOtherKeys inside tmux, kitty's
 protocol elsewhere. Terminals without support fall back to the legacy encoding.
 
@@ -381,9 +381,9 @@ protocol elsewhere. Terminals without support fall back to the legacy encoding.
 
 With two or more entries selected, `r` opens their names — one per line — in
 `$VISUAL`/`$EDITOR`. Save and quit to apply the whole batch. Names can be
-swapped (`a`/`b`), because rnn moves them through temporary names. If the line
+swapped (`a`/`b`), because yannni moves them through temporary names. If the line
 count changes, a name is empty, duplicated, or contains `/`, or a destination
-already exists outside the batch, rnn refuses the rename and leaves everything
+already exists outside the batch, yannni refuses the rename and leaves everything
 untouched.
 
 ### Shell commands
@@ -395,7 +395,7 @@ command, which is what interactive programs need.
 
 ### `theme.toml`
 
-Themes use rnn's semantic roles rather than Yazi's theme schema. A role can be
+Themes use yannni's semantic roles rather than Yazi's theme schema. A role can be
 a color name, a `#rrggbb`/`#rgb` value, a 0–255 palette index, or a style table.
 
 ```toml
@@ -418,14 +418,14 @@ Roles: `fg`, `dim`, `selection`, `directory`, `tab_active`, `tab_inactive`,
 table using the same schema as the TOML files.
 
 ```lua
-rnn.keymap.set("mgr", "<C-s>", "search fd", "search")
-rnn.notify("rnn " .. rnn.version)
+yannni.keymap.set("mgr", "<C-s>", "search fd", "search")
+yannni.notify("yannni " .. yannni.version)
 
-rnn.register_action("hello", function()
-  rnn.notify("hello from Lua")
+yannni.register_action("hello", function()
+  yannni.notify("hello from Lua")
 end)
 
-rnn.keymap.set("mgr", "H", "hello")
+yannni.keymap.set("mgr", "H", "hello")
 
 return {
   mgr = { show_hidden = true, linemode = "mtime" },
@@ -435,11 +435,11 @@ return {
 
 Available API:
 
-- `rnn.version` — rnn version string
-- `rnn.config` — read-only snapshot of the loaded settings
-- `rnn.notify(message)` — set the status message
-- `rnn.keymap.set(context, keys, action, desc)` — bind a key
-- `rnn.register_action(name, fn)` — register a named action
+- `yannni.version` — yannni version string
+- `yannni.config` — read-only snapshot of the loaded settings
+- `yannni.notify(message)` — set the status message
+- `yannni.keymap.set(context, keys, action, desc)` — bind a key
+- `yannni.register_action(name, fn)` — register a named action
 
 Keybindings always reference action names or commands, not arbitrary Lua
 closures. Custom actions are referenced by name:
@@ -451,7 +451,7 @@ prepend_keymap = [ { on = "H", run = "hello" } ]
 
 ## Yazi compatibility
 
-rnn deliberately mirrors Yazi where it has an equivalent feature: default
+yannni deliberately mirrors Yazi where it has an equivalent feature: default
 keybindings, prefix menus, open-with rules, trash, tasks, and zoxide. It does
-not try to be a drop-in Yazi replacement: config lives under `rnn`, the theme
-schema is rnn-specific, and the plugin API is intentionally minimal.
+not try to be a drop-in Yazi replacement: config lives under `yannni`, the theme
+schema is yannni-specific, and the plugin API is intentionally minimal.

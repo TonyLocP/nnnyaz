@@ -2,7 +2,7 @@
 //!
 //! Precedence: built-in defaults, then `config.toml`, `keymap.toml` and
 //! `theme.toml`, then `init.lua`. Parse errors warn and keep the last good
-//! value so a broken config never makes rnn unusable.
+//! value so a broken config never makes yannni unusable.
 
 pub mod keymap;
 pub mod lua;
@@ -128,8 +128,8 @@ pub struct PreviewConfig {
     /// Wrap long lines in text previews instead of truncating them (Yazi's
     /// `preview.wrap`).
     pub wrap: bool,
-    /// Directory for rnn's own preview cache (Yazi's `preview.cache_dir`).
-    /// `None` uses the system temp directory; `RNN_CACHE_DIR` still wins.
+    /// Directory for yannni's own preview cache (Yazi's `preview.cache_dir`).
+    /// `None` uses the system temp directory; `YANNNI_CACHE_DIR` still wins.
     pub cache_dir: Option<PathBuf>,
 }
 
@@ -166,7 +166,7 @@ impl Default for TasksConfig {
 }
 
 /// Prompt titles (Yazi's `[input]` section). Origin/offset settings do not
-/// apply because rnn prompts on the status line instead of a floating box.
+/// apply because yannni prompts on the status line instead of a floating box.
 #[derive(Clone, Debug)]
 pub struct InputConfig {
     pub cd_title: String,
@@ -235,13 +235,13 @@ pub struct Loaded {
 
 /// Resolve the configuration directory.
 pub fn config_dir() -> Option<PathBuf> {
-    if let Some(dir) = env::var_os("RNN_CONFIG_HOME") {
+    if let Some(dir) = env::var_os("YANNNI_CONFIG_HOME") {
         return Some(PathBuf::from(dir));
     }
     if let Some(dir) = env::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(dir).join("rnn"));
+        return Some(PathBuf::from(dir).join("yannni"));
     }
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/rnn"))
+    env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/yannni"))
 }
 
 /// Expand a leading `~` (and `~/`) using `HOME`. Returns `None` when the path
@@ -339,7 +339,7 @@ impl Config {
         if let Some(ratio) = p.mgr.ratio {
             let pair = match ratio.as_slice() {
                 [a, b] => Some((*a, *b)),
-                // Yazi uses [parent, current, preview]; rnn only has the last two.
+                // Yazi uses [parent, current, preview]; yannni only has the last two.
                 [_, a, b] => Some((*a, *b)),
                 _ => None,
             };
@@ -762,7 +762,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = env::temp_dir().join(format!(
-            "rnn-config-{tag}-{}-{}",
+            "yannni-config-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

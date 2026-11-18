@@ -108,7 +108,7 @@ impl SixelState {
                         settings.filter,
                     );
                     let bytes = encode(&fitted, is_tmux);
-                    if std::env::var_os("RNN_DEBUG").is_some() {
+                    if std::env::var_os("YANNNI_DEBUG").is_some() {
                         eprintln!(
                             "sixel: encoded gen={gen} cells={dims:?} bytes={}",
                             bytes.len()

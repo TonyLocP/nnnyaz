@@ -12,7 +12,7 @@ mod translit;
 mod util;
 
 fn main() -> io::Result<()> {
-    if std::env::var_os("RNN_PROBE").is_some() {
+    if std::env::var_os("YANNNI_PROBE").is_some() {
         return probe_graphics();
     }
     let mut app = app::App::new(config::load())?;
@@ -20,9 +20,9 @@ fn main() -> io::Result<()> {
     let protocol = detect_protocol();
     let font = probe_cell_size().unwrap_or((8, 16));
     let shm = protocol == preview::ImageProtocol::Kitty && probe_shm();
-    if std::env::var_os("RNN_DEBUG").is_some() {
+    if std::env::var_os("YANNNI_DEBUG").is_some() {
         eprintln!(
-            "rnn: protocol={protocol:?} font={font:?} shm={shm} term={:?} tmux={}",
+            "yannni: protocol={protocol:?} font={font:?} shm={shm} term={:?} tmux={}",
             std::env::var("TERM").unwrap_or_default(),
             preview::tmux_active()
         );
@@ -47,7 +47,7 @@ fn main() -> io::Result<()> {
     res
 }
 
-/// `RNN_PROBE=1`: send a tiny kitty transmit and dump whatever the terminal
+/// `YANNNI_PROBE=1`: send a tiny kitty transmit and dump whatever the terminal
 /// replies for ~3s, so Ghostty can tell us what is wrong with the payload
 /// rather than us guessing. Responds are read rather than suppressed (`q=0`:
 /// the terminal answers OK on success and an error code on failure). Reply
@@ -68,7 +68,7 @@ fn probe_graphics() -> io::Result<()> {
     let id = preview::kitty::next_id();
     let is_tmux = preview::tmux_active();
     eprintln!(
-        "rnn-probe: protocol={:?} is_tmux={} id={id} s=8 v=8 cells=(1,1)",
+        "yannni-probe: protocol={:?} is_tmux={} id={id} s=8 v=8 cells=(1,1)",
         detect_protocol(),
         is_tmux
     );
@@ -94,7 +94,7 @@ fn probe_graphics() -> io::Result<()> {
     };
     io::stdout().write_all(plain.as_bytes())?;
     io::stdout().flush()?;
-    eprintln!("rnn-probe: also sent plain a=T image id={id2} (q=0, expects an OK/error reply)");
+    eprintln!("yannni-probe: also sent plain a=T image id={id2} (q=0, expects an OK/error reply)");
 
     // The reply arrives as a bare `ESC_G...ESC\` with no newline. In cooked
     // mode the tty line discipline eats/interprets it before `read` can see it,
@@ -142,18 +142,18 @@ fn probe_graphics() -> io::Result<()> {
             rest = &rest[i + 1..];
         }
     }
-    let path = "/tmp/opencode/rnn_probe_resp.bin";
+    let path = "/tmp/opencode/yannni_probe_resp.bin";
     if let Ok(mut f) = std::fs::File::create(path) {
         use std::io::Write as _;
         let _ = f.write_all(&buf);
     }
-    eprintln!("rnn-probe: reply bytes={} tokens={counts:?}", buf.len());
+    eprintln!("yannni-probe: reply bytes={} tokens={counts:?}", buf.len());
     if buf.is_empty() {
-        eprintln!("rnn-probe: NO reply received (Ghostty silent to both q=0 transmits)");
+        eprintln!("yannni-probe: NO reply received (Ghostty silent to both q=0 transmits)");
     }
     for (i, b) in buf.iter().enumerate().take(600) {
         if i % 48 == 0 {
-            eprint!("\nrnn-probe:");
+            eprint!("\nyannni-probe:");
         }
         eprint!(" {:02x}", b);
     }
@@ -233,12 +233,12 @@ fn probe_shm() -> bool {
 }
 
 /// Decide which graphics protocol the terminal speaks. An explicit
-/// `RNN_IMAGE_PROTOCOL=kitty|sixel|none` wins; otherwise kitty/ghostty
+/// `YANNNI_IMAGE_PROTOCOL=kitty|sixel|none` wins; otherwise kitty/ghostty
 /// environment hints are checked first, then a DA1 query for sixel support.
 fn detect_protocol() -> preview::ImageProtocol {
     use preview::ImageProtocol;
 
-    if let Ok(v) = std::env::var("RNN_IMAGE_PROTOCOL") {
+    if let Ok(v) = std::env::var("YANNNI_IMAGE_PROTOCOL") {
         match v.trim().to_ascii_lowercase().as_str() {
             "none" | "off" | "0" | "false" => return ImageProtocol::None,
             "kitty" => return ImageProtocol::Kitty,

@@ -117,9 +117,9 @@ pub fn next_id() -> u32 {
 ///
 /// Mirrors yazi's `precache` (`yazi-adapter/src/image.rs`): the first view
 /// decodes the (possibly huge) source and writes a small re-encoded copy into a
-/// temp cache dir, so later views — even after restarting rnn — skip the source
+/// temp cache dir, so later views — even after restarting yannni — skip the source
 /// decode entirely. When a yazi cache is available that cache is used
-/// exclusively; otherwise rnn keeps its own. `mtime`/`size` are part of rnn's
+/// exclusively; otherwise yannni keeps its own. `mtime`/`size` are part of yannni's
 /// fallback key, so edited files are re-decoded.
 pub fn load_image(
     path: &Path,
@@ -134,12 +134,12 @@ pub fn load_image(
 }
 
 /// Read or fill a preview in yazi's cache. A miss is decoded from the source
-/// and written back under yazi's key; rnn's own cache is never touched.
+/// and written back under yazi's key; yannni's own cache is never touched.
 fn load_shared(dir: &Path, path: &Path, settings: &Settings) -> io::Result<DynamicImage> {
     let target = yazi::target(dir, path);
     if let Some(target) = &target {
         if let Some(img) = decode(target) {
-            if std::env::var_os("RNN_DEBUG").is_some() {
+            if std::env::var_os("YANNNI_DEBUG").is_some() {
                 eprintln!("cache: yazi hit {}", target.display());
             }
             return Ok(img);
@@ -155,7 +155,7 @@ fn load_shared(dir: &Path, path: &Path, settings: &Settings) -> io::Result<Dynam
 }
 
 /// Extract a frame from a video and decode it, using yazi's preview cache
-/// when available (keyed by the source video, so yazi and rnn share thumbs).
+/// when available (keyed by the source video, so yazi and yannni share thumbs).
 pub fn load_video_thumbnail(
     path: &Path,
     mtime: Option<SystemTime>,
@@ -172,7 +172,7 @@ fn load_video_shared(dir: &Path, path: &Path, settings: &Settings) -> io::Result
     let target = yazi::target(dir, path);
     if let Some(target) = &target {
         if let Some(img) = decode(target) {
-            if std::env::var_os("RNN_DEBUG").is_some() {
+            if std::env::var_os("YANNNI_DEBUG").is_some() {
                 eprintln!("cache: yazi video hit {}", target.display());
             }
             return Ok(img);
@@ -181,7 +181,7 @@ fn load_video_shared(dir: &Path, path: &Path, settings: &Settings) -> io::Result
 
     fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(
-        ".rnn-video-{}-{}.jpg",
+        ".yannni-video-{}-{}.jpg",
         std::process::id(),
         next_id()
     ));
@@ -218,10 +218,10 @@ fn load_video_from(
     Ok(capped)
 }
 
-/// Render a PDF page to an image, caching per page in rnn's own cache.
+/// Render a PDF page to an image, caching per page in yannni's own cache.
 ///
 /// Yazi's shared cache holds whichever page its PDF previewer last rendered,
-/// so it cannot be reused safely here; rnn keys its copy by page as well as by
+/// so it cannot be reused safely here; yannni keys its copy by page as well as by
 /// the source file's path/mtime/size.
 pub fn load_pdf_page(
     path: &Path,
@@ -267,7 +267,7 @@ fn load_font_shared(dir: &Path, path: &Path, settings: &Settings) -> io::Result<
     let target = yazi::target(dir, path);
     if let Some(target) = &target {
         if let Some(img) = decode(target) {
-            if std::env::var_os("RNN_DEBUG").is_some() {
+            if std::env::var_os("YANNNI_DEBUG").is_some() {
                 eprintln!("cache: yazi font hit {}", target.display());
             }
             return Ok(img);
@@ -276,7 +276,7 @@ fn load_font_shared(dir: &Path, path: &Path, settings: &Settings) -> io::Result<
 
     fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(
-        ".rnn-font-{}-{}.jpg",
+        ".yannni-font-{}-{}.jpg",
         std::process::id(),
         next_id()
     ));
@@ -317,16 +317,16 @@ fn load_font_from(
     Ok(capped)
 }
 
-/// On-disk preview cache root. `RNN_CACHE_DIR` overrides it, then
+/// On-disk preview cache root. `YANNNI_CACHE_DIR` overrides it, then
 /// `preview.cache_dir`, then a dir under the system temp dir (yazi's default).
 fn cache_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("RNN_CACHE_DIR") {
+    if let Some(dir) = std::env::var_os("YANNNI_CACHE_DIR") {
         return PathBuf::from(dir);
     }
     if let Some(dir) = yazi::configured_cache_dir() {
         return dir;
     }
-    std::env::temp_dir().join("rnn-preview-cache")
+    std::env::temp_dir().join("yannni-preview-cache")
 }
 
 /// Stable content key for a source image (path + mtime + size).
@@ -516,7 +516,7 @@ fn cache_tx() -> &'static mpsc::Sender<CacheJob> {
                         } => {
                             let written = encode(&img, quality)
                                 .and_then(|(_, buf)| yazi::write_entry(&target, &buf));
-                            if std::env::var_os("RNN_DEBUG").is_some() {
+                            if std::env::var_os("YANNNI_DEBUG").is_some() {
                                 match &written {
                                     Ok(()) => eprintln!("cache: yazi store {}", target.display()),
                                     Err(err) => eprintln!(
@@ -552,7 +552,7 @@ fn schedule_shared(target: &Path, img: &DynamicImage, quality: u8) {
     });
 }
 
-/// Write a preview into rnn's fallback cache. The encoded bytes go to a unique
+/// Write a preview into yannni's fallback cache. The encoded bytes go to a unique
 /// temp name and are renamed, so a reader never sees a half-written file.
 fn write_cache(dir: &Path, stem: &str, img: &DynamicImage, quality: u8) -> io::Result<()> {
     static SEQ: AtomicU32 = AtomicU32::new(0);
@@ -883,7 +883,7 @@ impl KittyState {
             self.cells = Some((dims, self.zoom));
             let gen = self.transmit_gen.load(Ordering::SeqCst) + 1;
             self.transmit_gen.store(gen, Ordering::SeqCst);
-            if std::env::var_os("RNN_DEBUG").is_some() {
+            if std::env::var_os("YANNNI_DEBUG").is_some() {
                 eprintln!(
                     "kitty: spawn gen={gen} dims={dims:?} zoom={} (t={}ms)",
                     self.zoom,
@@ -906,7 +906,7 @@ impl KittyState {
                     let fitted =
                         fit_to_cells_zoom(&img, font, dims, zoom, settings.max, settings.filter);
                     let fit = start.elapsed();
-                    let debug = std::env::var_os("RNN_DEBUG").is_some();
+                    let debug = std::env::var_os("YANNNI_DEBUG").is_some();
                     if shm {
                         if let Some(seq) = encode_shm(&fitted, id, is_tmux) {
                             stream_seq(&seq);
@@ -936,12 +936,12 @@ impl KittyState {
         }
 
         if self.transmitted_gen.load(Ordering::SeqCst) < self.transmit_gen.load(Ordering::SeqCst) {
-            if std::env::var_os("RNN_DEBUG").is_some() {
+            if std::env::var_os("YANNNI_DEBUG").is_some() {
                 eprintln!("kitty: draw skip (streaming)");
             }
             return; // transmit still in flight; placeholders land next frame
         }
-        if std::env::var_os("RNN_DEBUG").is_some() {
+        if std::env::var_os("YANNNI_DEBUG").is_some() {
             eprintln!("kitty: draw placeholders");
         }
 
@@ -1349,7 +1349,7 @@ mod tests {
             .trim_end_matches(['\u{1b}', '\\']);
         let name = base64_simd::STANDARD.decode_to_vec(payload).unwrap();
         let name = String::from_utf8(name).unwrap();
-        assert!(name.starts_with("/rnn-"), "{name}");
+        assert!(name.starts_with("/yannni-"), "{name}");
         let _ = crate::preview::shm::remove(&name);
     }
 
@@ -1449,7 +1449,7 @@ mod tests {
 
     #[test]
     fn icc_transform_converts_gray_profile_to_srgb() {
-        let base = std::env::temp_dir().join(format!("rnn-icc-test-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("yannni-icc-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         let path = base.join("gray.png");
@@ -1498,7 +1498,7 @@ mod tests {
 
     #[test]
     fn decode_source_applies_exif_orientation() {
-        let base = std::env::temp_dir().join(format!("rnn-exif-test-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("yannni-exif-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         let path = base.join("rotated.jpg");
@@ -1610,7 +1610,7 @@ mod tests {
 
     #[test]
     fn disk_cache_roundtrip() {
-        let base = std::env::temp_dir().join(format!("rnn-cache-test-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("yannni-cache-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let cache = base.join("cache");
         let src = base.join("src.png");
@@ -1638,7 +1638,8 @@ mod tests {
 
     #[test]
     fn shared_cache_writes_yazi_entry() {
-        let base = std::env::temp_dir().join(format!("rnn-yazi-cache-test-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("yannni-yazi-cache-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let cache = base.join("yazi");
         let src = base.join("src.png");
@@ -1704,7 +1705,7 @@ mod tests {
         let (_, buf) = encode(&capped, 90).unwrap();
         println!("encode cache jpeg: {:?} ({} bytes)", t.elapsed(), buf.len());
 
-        let tmp = std::env::temp_dir().join("rnn-bench-cache.jpg");
+        let tmp = std::env::temp_dir().join("yannni-bench-cache.jpg");
         fs::write(&tmp, &buf).unwrap();
         let t = Instant::now();
         let cached = decode_source(&tmp).unwrap();

@@ -1,4 +1,4 @@
-# rnn roadmap
+# yannni roadmap
 
 A running list of parity and UX work. Checked items are done; unchecked items
 are candidates, roughly in priority order.
@@ -34,13 +34,13 @@ are candidates, roughly in priority order.
       (typing runs undo as one step). The selection is highlighted and the
       terminal cursor follows the caret. A dim hint on the right of the status
       line lists the rename binds, shortening itself to fit narrow terminals.
-      rnn asks tmux for modifyOtherKeys and other terminals for kitty's
+      yannni asks tmux for modifyOtherKeys and other terminals for kitty's
       keyboard protocol so Ctrl+Shift+letter is distinguishable from
       Ctrl+letter.
 - [x] **PDF preview** — PDFs render as images through `pdftoppm`, the same
       backend Yazi uses, instead of a hex dump. `J`/`K` and preview scrolling
       turn pages, the title and info panel show the page number, and page
-      images are cached per page in rnn's own cache (Yazi's PDF cache holds
+      images are cached per page in yannni's own cache (Yazi's PDF cache holds
       only the last page, so it cannot be shared safely).
 - [x] **Snappier image preview** — large photos downscale with the box filter
       (several times faster than Triangle) and the disk-cache write now happens
@@ -56,7 +56,7 @@ are candidates, roughly in priority order.
       entries are written already rotated). `[preview]` now accepts Yazi's
       `max_width`, `max_height`, `image_filter`, `image_quality`, and
       `image_delay` in addition to `cache_size`; invalid values warn and keep
-      the default. rnn keeps its faster defaults (1920×1080, box filter,
+      the default. yannni keeps its faster defaults (1920×1080, box filter,
       quality 90) rather than Yazi's 600×900/triangle/75.
 - [x] **Font and archive previews** — font files (`ttf`, `otf`, `ttc`, `woff`,
       …) render a glyph sheet through ImageMagick (`magick`/`convert`) and go
@@ -94,7 +94,7 @@ are candidates, roughly in priority order.
       the normal decoder path.
 - [x] **Compressed tarball previews** — when 7z reports a compressed archive as
       a single inner `.tar` (`.tar.gz`, `.tgz`, `.tar.bz2`, `.tar.xz`,
-      `.tar.zst`, …), rnn pipes `7z e -so` into `7z l -ttar -si` and shows the
+      `.tar.zst`, …), yannni pipes `7z e -so` into `7z l -ttar -si` and shows the
       tar's contents instead of the inner archive file. If the inner listing
       fails, it falls back to the outer listing.
 - [x] **CLI help and version** — `-h`/`--help` prints usage, options, and the
@@ -107,7 +107,7 @@ are candidates, roughly in priority order.
 - [x] **nnn startup overrides** — `-H` shows hidden files, `-T <key>` selects
       the startup sort order (`a`/`d`/`s` size, `e` extension, `t` time,
       `v` natural; an uppercase key reverses), and `-l <n>` sets the number of
-      lines moved per mouse-wheel tick. `d` maps to apparent size because rnn
+      lines moved per mouse-wheel tick. `d` maps to apparent size because yannni
       does not track disk blocks.
 - [x] **Tab expansion in text previews** — tabs expand to the next multiple of
       `preview.tab_size` (default 2, like Yazi) before syntax highlighting, so
@@ -120,7 +120,7 @@ are candidates, roughly in priority order.
 - [x] **Yazi-style spot** — `F` fills the screen with the preview. `j`/`k`
       scroll it, `h`/`l` swipe to the previous/next file, `c c` copies the
       hovered path, and `Esc`, `Tab`, or `Ctrl+c` closes it. Yazi keymaps that
-      bind `spot` now open this view (Yazi's `<Tab>`), while rnn's `<Tab>`
+      bind `spot` now open this view (Yazi's `<Tab>`), while yannni's `<Tab>`
       keeps opening the metadata info overlay. The spot reuses the preview
       worker, so images, video thumbnails, PDFs, and text all work.
 - [x] **nnn's `-i` info bar** — `-i`/`--file-info` appends `file -b`'s
@@ -130,8 +130,8 @@ are candidates, roughly in priority order.
       and extension comparisons, `sort_dir_first = false` mixes directories in
       with files, and `show_symlink = false` hides the ` -> target` suffix.
 - [x] **`preview.cache_dir`** — an absolute path (or empty for the temp
-      default) chooses rnn's own preview cache. Setting it disables sharing
-      Yazi's cache, and `RNN_CACHE_DIR` still takes precedence.
+      default) chooses yannni's own preview cache. Setting it disables sharing
+      Yazi's cache, and `YANNNI_CACHE_DIR` still takes precedence.
 - [x] **`mgr.sort_fallback`** — equal size/time/extension keys now break ties
       with an alphabetical or natural name comparison, matching Yazi (the
       fallback is case-sensitive, unlike `sort_sensitive`).
@@ -160,7 +160,7 @@ are candidates, roughly in priority order.
 - [x] **Yazi `[confirm]` titles** — `trash_title` and `delete_title` customize
       the delete prompts, with `{n}` replaced by the count and `{s}` by `"s"`
       for plural targets (an empty string for one). `overwrite_title` is
-      accepted but unused because rnn has no overwrite prompt.
+      accepted but unused because yannni has no overwrite prompt.
 - [x] **nnn sessions** — `-s <name>` loads a session (`@` is the last session)
       and `-S` saves the current tabs on exit, defaulting to `@`. Tabs, cwd,
       cursor, filter, hidden files, sort, linemode, selections, and history are
@@ -174,7 +174,7 @@ are candidates, roughly in priority order.
       `Ctrl+d` deletes the highlighted session after a `y/N` confirmation.
 - [x] **nnn's `-n`, `-A`, and `-R`** — `-n` starts in type-to-nav (persistent
       filtering, Enter opens the match), `-A` disables auto-entering a lone
-      matching directory, and `-R` is accepted for compatibility because rnn
+      matching directory, and `-R` is accepted for compatibility because yannni
       never rolls over at the list edges (Yazi behavior).
 - [x] **nnn's `-g` and `-z` filters** — regex and fuzzy filtering, with
       nnn's `/` mode cycle and `:` case toggle inside the filter prompt.
@@ -182,7 +182,7 @@ are candidates, roughly in priority order.
       leaves the list unfiltered, like nnn.
 - [x] **nnn's `-e` and `-u`** — `-e` sends text files to
       `$VISUAL`/`$EDITOR`/`vi` on open (empty files show "empty file" and are
-      left alone), while `-u` is a compatibility no-op because rnn already
+      left alone), while `-u` is a compatibility no-op because yannni already
       uses the selection without prompting.
 - [x] **nnn's `-f` history file** — `-f` loads and saves the last 16 shell
       commands at `<config>/.history`, and Up/Down in the `;`/`:` prompt
@@ -194,6 +194,11 @@ are candidates, roughly in priority order.
 - [x] **Scrollable, searchable help** — `~`/`F1` opens a sectioned overlay
       with `j/k` or `↑/↓` scrolling, half/full-page and Home/End jumps, and
       a `/` search over keys and descriptions (`n`/`N` cycle matches).
+
+- [x] **Renamed to `yannni`** — the crate, binary, GitHub repo, config
+      directory (`~/.config/yannni`), cache paths, and environment variables
+      (`YANNNI_*`) all use the new name. The old `rnn` names are gone with no
+      fallbacks.
 
 ## Next
 

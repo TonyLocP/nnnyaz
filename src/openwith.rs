@@ -1,6 +1,6 @@
 //! Yazi-compatible "open with" menu.
 //!
-//! rnn has no configuration of its own, so this reuses the user's existing
+//! yannni has no configuration of its own, so this reuses the user's existing
 //! Yazi config: the `[opener]` definitions and the `[open]` rules decide
 //! which programs are offered for a given file. That keeps the menu in sync
 //! with what the user already sees in Yazi.
@@ -216,7 +216,7 @@ fn scan_placeholder(it: &mut Peekable<Chars<'_>>, p: char) -> bool {
 
 /// Build the open-with list for a group of targets.
 ///
-/// `doc` is the `[opener]`/`[open]` part of rnn's `config.toml` (if any). It
+/// `doc` is the `[opener]`/`[open]` part of yannni's `config.toml` (if any). It
 /// replaces the matching section from the user's Yazi config; missing sections
 /// still fall back to Yazi's config and then to built-in defaults. Like yazi's
 /// `Open::match_common`, only openers offered by every target's `[open]` rule
@@ -282,7 +282,7 @@ fn fallback() -> Vec<Opener> {
         Opener {
             name: "open".into(),
             desc: Some("system default".into()),
-            command: "rnn:open".into(),
+            command: "yannni:open".into(),
             block: false,
         },
         Opener {
@@ -311,7 +311,7 @@ fn builtin_openers() -> HashMap<String, Opener> {
         Opener {
             name: "open".into(),
             desc: Some("system default".into()),
-            command: "rnn:open".into(),
+            command: "yannni:open".into(),
             block: false,
         },
     );
@@ -946,7 +946,7 @@ mod tests {
         .unwrap();
 
         let dir = std::env::temp_dir().join(format!(
-            "rnn-openwith-{}-{}",
+            "yannni-openwith-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1005,7 +1005,7 @@ MimeType=application/pdf;
     #[test]
     fn builtin_open_uses_the_internal_opener() {
         let openers = builtin_openers();
-        assert_eq!(openers["open"].command, "rnn:open");
-        assert_eq!(fallback()[0].command, "rnn:open");
+        assert_eq!(openers["open"].command, "yannni:open");
+        assert_eq!(fallback()[0].command, "yannni:open");
     }
 }

@@ -55,7 +55,7 @@ pub enum ImageProtocol {
     Sixel,
 }
 
-/// True when rnn itself runs inside tmux, not merely launched from a tmux
+/// True when yannni itself runs inside tmux, not merely launched from a tmux
 /// session. A foot window started from tmux inherits `$TMUX`, but its `$TERM`
 /// is `foot`, so the terminal name is the reliable signal.
 pub fn tmux_active() -> bool {
@@ -318,7 +318,7 @@ impl Preview {
             }
         }
         let r = sixel::draw(rect, &data);
-        if std::env::var_os("RNN_DEBUG").is_some() {
+        if std::env::var_os("YANNNI_DEBUG").is_some() {
             eprintln!(
                 "sixel: draw gen={gen} rect={rect:?} bytes={} result={:?}",
                 data.len(),
@@ -468,7 +468,7 @@ impl Preview {
             if g != self.last_streamed {
                 self.last_streamed = g;
                 self.changed = true;
-                if std::env::var_os("RNN_DEBUG").is_some() {
+                if std::env::var_os("YANNNI_DEBUG").is_some() {
                     eprintln!("preview: stream gen {g} -> redraw");
                 }
             }
@@ -635,7 +635,7 @@ const PRELOAD_IDLE: Duration = Duration::from_millis(150);
 /// Bound on one preload batch so a long j/k burst cannot build a backlog.
 const PRELOAD_BATCH_MAX: usize = 8;
 
-/// Millisecond timestamp for `RNN_DEBUG` tracing.
+/// Millisecond timestamp for `YANNNI_DEBUG` tracing.
 pub(crate) fn debug_stamp() -> u128 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -664,7 +664,7 @@ fn worker(
         }
         let start = std::time::Instant::now();
         let art = generate(&req.key, req.page, &settings, tab_size);
-        if std::env::var_os("RNN_DEBUG").is_some() {
+        if std::env::var_os("YANNNI_DEBUG").is_some() {
             eprintln!(
                 "preview: show {} in {:?} (t={}ms)",
                 req.key.0.display(),
@@ -723,7 +723,7 @@ fn preload_worker(
             }
             let start = std::time::Instant::now();
             let art = generate(&req.key, req.page, &settings, tab_size);
-            if std::env::var_os("RNN_DEBUG").is_some() {
+            if std::env::var_os("YANNNI_DEBUG").is_some() {
                 eprintln!(
                     "preview: preload {} in {:?} (t={}ms)",
                     req.key.0.display(),
@@ -785,7 +785,7 @@ fn generate(key: &Key, page: usize, settings: &Settings, tab_size: usize) -> Art
         },
         // Images are decoded off-thread and cached both in memory (this
         // `cache`) and on disk (a downscaled copy in the temp cache dir), so
-        // revisiting — or restarting rnn — never re-decodes a large source.
+        // revisiting — or restarting yannni — never re-decodes a large source.
         // Videos are turned into a still frame with ffmpeg and PDFs into a
         // rendered page with pdftoppm, then rendered through the same image
         // path. `J`/`K` switch PDF pages.

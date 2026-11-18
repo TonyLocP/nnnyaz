@@ -5,11 +5,11 @@
 //! unpadded base32. When a yazi installation is detected we read from that
 //! cache first and write new previews into it, so both programs share one set
 //! of decoded images. If yazi cannot be found, [`cache_dir`] returns `None`
-//! and rnn falls back to its own cache.
+//! and yannni falls back to its own cache.
 //!
 //! The cache layout mirrors yazi v26.9.1 (`FileSig` + `ChaSig` + `skip`). A
 //! different yazi version that changes the key simply produces misses, which
-//! are harmless: rnn decodes the source again and writes a fresh entry.
+//! are harmless: yannni decodes the source again and writes a fresh entry.
 
 use std::{
     env, fs,
@@ -27,7 +27,7 @@ use std::{
 use twox_hash::XxHash3_128;
 
 /// Directory yazi uses for previews, when a yazi install appears to be
-/// present. `RNN_CACHE_DIR` or a configured rnn cache forces rnn's own cache.
+/// present. `YANNNI_CACHE_DIR` or a configured yannni cache forces yannni's own cache.
 pub fn cache_dir() -> Option<PathBuf> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(resolve_cache_dir).clone()
@@ -35,20 +35,20 @@ pub fn cache_dir() -> Option<PathBuf> {
 
 static CONFIG_CACHE_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-/// Record `preview.cache_dir` from rnn's config. Called once at startup;
-/// `RNN_CACHE_DIR` still wins, and a configured directory disables sharing
-/// yazi's cache (it is rnn's own cache).
+/// Record `preview.cache_dir` from yannni's config. Called once at startup;
+/// `YANNNI_CACHE_DIR` still wins, and a configured directory disables sharing
+/// yazi's cache (it is yannni's own cache).
 pub fn set_cache_dir(dir: Option<PathBuf>) {
     let _ = CONFIG_CACHE_DIR.set(dir);
 }
 
-/// The configured rnn preview cache directory, if any.
+/// The configured yannni preview cache directory, if any.
 pub fn configured_cache_dir() -> Option<PathBuf> {
     CONFIG_CACHE_DIR.get().cloned().flatten()
 }
 
 fn resolve_cache_dir() -> Option<PathBuf> {
-    if env::var_os("RNN_CACHE_DIR").is_some() || configured_cache_dir().is_some() {
+    if env::var_os("YANNNI_CACHE_DIR").is_some() || configured_cache_dir().is_some() {
         return None;
     }
 
@@ -266,12 +266,12 @@ mod tests {
 
     #[test]
     fn entry_name_matches_yazi() {
-        let path = Path::new("/tmp/rnn-yazi-test.png");
+        let path = Path::new("/tmp/yannni-yazi-test.png");
         let ctime = UNIX_EPOCH.checked_add(Duration::new(1_700_000_000, 123_456_789));
         let mtime = UNIX_EPOCH.checked_add(Duration::new(1_700_000_001, 987_654_321));
         assert_eq!(
             entry_name(path, 123_456, None, ctime, mtime),
-            "TFRNHTDHF4L7BRMPZWSMVMK3WM"
+            "7BVJKVBHMY2MPETN4KOEJYHIBM"
         );
     }
 

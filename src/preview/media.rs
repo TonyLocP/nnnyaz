@@ -371,7 +371,7 @@ mod tests {
         use std::process::Command;
 
         let dir = std::env::temp_dir().join(format!(
-            "rnn-archive-test-{}-{}",
+            "yannni-archive-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -411,7 +411,7 @@ mod tests {
         use std::process::Command;
 
         let dir = std::env::temp_dir().join(format!(
-            "rnn-targz-test-{}-{}",
+            "yannni-targz-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

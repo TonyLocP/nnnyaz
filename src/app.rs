@@ -517,7 +517,7 @@ impl FilterMode {
     }
 }
 
-/// Case handling for filters. Smart case keeps rnn's Yazi-style substring
+/// Case handling for filters. Smart case keeps yannni's Yazi-style substring
 /// behavior (an uppercase needle is case-sensitive); `:` cycles through the
 /// explicit nnn modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -987,7 +987,7 @@ pub struct App {
     tabs: Vec<TabSnapshot>,
     tab_index: usize,
     tab_name: Option<String>,
-    /// `-S`: save the session under this name when rnn exits.
+    /// `-S`: save the session under this name when yannni exits.
     session_name: Option<String>,
     info: Option<Info>,
     info_cursor: usize,
@@ -1133,10 +1133,10 @@ fn apply_bulk_rename(plan: &[(PathBuf, PathBuf)]) -> io::Result<()> {
             ));
         };
         let mut suffix = 0usize;
-        let mut temp = parent.join(format!(".rnn-rename-{pid}-{i}"));
+        let mut temp = parent.join(format!(".yannni-rename-{pid}-{i}"));
         while fs::symlink_metadata(&temp).is_ok() {
             suffix += 1;
-            temp = parent.join(format!(".rnn-rename-{pid}-{i}-{suffix}"));
+            temp = parent.join(format!(".yannni-rename-{pid}-{i}-{suffix}"));
         }
         if let Err(e) = fs::rename(src, &temp) {
             restore_staged(&staged);
@@ -2451,7 +2451,7 @@ fn run_shell_task(
 
 // ───────────────────────── app ─────────────────────────
 
-/// Command-line options. rnn has no argument-parser dependency, so this stays
+/// Command-line options. yannni has no argument-parser dependency, so this stays
 /// deliberately small: one optional starting path, `--cwd-file`, the picker
 /// options (`--chooser-file` / `-p`, `-0`), `--help` / `--version`, and nnn's
 /// `-H` / `-T` startup overrides.
@@ -2504,7 +2504,7 @@ struct Cli {
 }
 
 /// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
-/// `d` (disk usage) falls back to apparent size because rnn only tracks the
+/// `d` (disk usage) falls back to apparent size because yannni only tracks the
 /// latter.
 fn parse_sort_key(key: &str) -> Result<(Sort, bool), String> {
     let ch = key
@@ -2541,9 +2541,9 @@ fn parse_scroll_lines(value: &str) -> Result<usize, String> {
 fn print_help() {
     println!(
         "\
-rnn — a small nnn/Yazi-style terminal file manager
+yannni — a small nnn/Yazi-style terminal file manager
 
-Usage: rnn [OPTIONS] [PATH]
+Usage: yannni [OPTIONS] [PATH]
 
 Arguments:
   [PATH]  Starting directory or file [default: .]
@@ -2570,8 +2570,8 @@ Options:
   -e, --editor               Open text files in $VISUAL/$EDITOR/vi
   -f, --history              Keep a persistent shell command history
   -K, --key-collisions       Report keymap collisions and exit
-  -u, --use-selection        Accepted for nnn compatibility (rnn always uses the selection)
-  -R, --no-rollover          Accepted for nnn compatibility (rnn never rolls over)
+  -u, --use-selection        Accepted for nnn compatibility (yannni always uses the selection)
+  -R, --no-rollover          Accepted for nnn compatibility (yannni never rolls over)
   -s <NAME>, --session <NAME> Load a session (@ is the last session)
   -S, --persistent-session   Save the session on exit
   -T <KEY>, --sort <KEY>     Sort order: a/d/s size, e extension, t time,
@@ -2579,14 +2579,14 @@ Options:
   -l <N>, --scroll <N>       Lines moved per mouse-wheel scroll [default: 1]
 
 Environment:
-  RNN_CWD_FILE      Default for --cwd-file
-  RNN_CHOOSER_FILE  Default for --chooser-file
-  RNN_CONFIG_HOME   Configuration directory (default: $XDG_CONFIG_HOME/rnn)
-  RNN_IMAGE_PROTOCOL  Force kitty, sixel, or none"
+  YANNNI_CWD_FILE      Default for --cwd-file
+  YANNNI_CHOOSER_FILE  Default for --chooser-file
+  YANNNI_CONFIG_HOME   Configuration directory (default: $XDG_CONFIG_HOME/yannni)
+  YANNNI_IMAGE_PROTOCOL  Force kitty, sixel, or none"
     );
 }
 
-/// Parse rnn's command line. `--cwd-file <path>` and `--cwd-file=<path>` are
+/// Parse yannni's command line. `--cwd-file <path>` and `--cwd-file=<path>` are
 /// accepted; so are `--chooser-file <path>`, `--chooser-file=<path>`, nnn's
 /// `-p <path>` (or `-p<path>`), `-0` for NUL-separated picker output, and
 /// `-h`/`--help` or `-V`/`--version`. The first non-option argument is the
@@ -2638,10 +2638,10 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
         } else if text == "-K" || text == "--key-collisions" {
             cli.key_collisions = true;
         } else if text == "-u" || text == "--use-selection" {
-            // rnn already acts on the selection without prompting, so nnn's
+            // yannni already acts on the selection without prompting, so nnn's
             // `-u` is accepted as a compatibility no-op.
         } else if text == "-R" || text == "--no-rollover" {
-            // rnn never rolls over at the edges (Yazi behavior); accept nnn's
+            // yannni never rolls over at the edges (Yazi behavior); accept nnn's
             // flag so scripts written for nnn keep working.
         } else if text == "-S" || text == "--persistent-session" {
             cli.persistent_session = true;
@@ -2766,12 +2766,12 @@ fn chooser_bytes(paths: &[PathBuf], null: bool) -> Vec<u8> {
     out
 }
 
-/// Write `cwd` to the cwd file so a shell wrapper can `cd` there after rnn
+/// Write `cwd` to the cwd file so a shell wrapper can `cd` there after yannni
 /// exits. Failures are reported on stderr, which is visible once the terminal
 /// is restored, and do not prevent quitting.
 fn write_cwd_file(path: &Path, cwd: &Path) {
     if let Err(e) = fs::write(path, format!("{}\n", cwd.display())) {
-        eprintln!("rnn: cannot write cwd file {}: {e}", path.display());
+        eprintln!("yannni: cannot write cwd file {}: {e}", path.display());
     }
 }
 
@@ -3052,16 +3052,16 @@ impl App {
             std::process::exit(0);
         }
         if cli.version {
-            println!("rnn {}", env!("CARGO_PKG_VERSION"));
+            println!("yannni {}", env!("CARGO_PKG_VERSION"));
             std::process::exit(0);
         }
         let cwd_file = cli.cwd_file.or_else(|| {
-            env::var_os("RNN_CWD_FILE")
+            env::var_os("YANNNI_CWD_FILE")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
         });
         let chooser_file = cli.chooser_file.or_else(|| {
-            env::var_os("RNN_CHOOSER_FILE")
+            env::var_os("YANNNI_CHOOSER_FILE")
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
         });
@@ -3069,7 +3069,7 @@ impl App {
         let config::Loaded { config, warnings } = loaded;
         if cli.key_collisions {
             for warning in &warnings {
-                eprintln!("rnn: {warning}");
+                eprintln!("yannni: {warning}");
             }
             for collision in config.keymap.collisions() {
                 println!("key collision! [{collision}]");
@@ -3081,12 +3081,12 @@ impl App {
             (None, Some(key)) => {
                 let base = env::current_dir()?;
                 let Some(path) = resolve_bookmark(key, &base) else {
-                    eprintln!("rnn: bookmark '{key}' not set");
+                    eprintln!("yannni: bookmark '{key}' not set");
                     std::process::exit(1);
                 };
                 if !path.is_dir() {
                     eprintln!(
-                        "rnn: bookmark '{key}': {} is not a directory",
+                        "yannni: bookmark '{key}': {} is not a directory",
                         path.display()
                     );
                     std::process::exit(1);
@@ -4365,7 +4365,7 @@ impl App {
         let editor = env::var("VISUAL")
             .or_else(|_| env::var("EDITOR"))
             .unwrap_or_else(|_| "vi".into());
-        let tmp = env::temp_dir().join(format!("rnn-bulk-create-{}.txt", std::process::id()));
+        let tmp = env::temp_dir().join(format!("yannni-bulk-create-{}.txt", std::process::id()));
         if let Err(e) = fs::write(&tmp, "") {
             self.status = format!("bulk create: {e}");
             return;
@@ -4416,7 +4416,7 @@ impl App {
         let editor = env::var("VISUAL")
             .or_else(|_| env::var("EDITOR"))
             .unwrap_or_else(|_| "vi".into());
-        let tmp = env::temp_dir().join(format!("rnn-bulk-rename-{}.txt", std::process::id()));
+        let tmp = env::temp_dir().join(format!("yannni-bulk-rename-{}.txt", std::process::id()));
         let mut content = String::new();
         for src in &sources {
             let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
@@ -4574,13 +4574,13 @@ impl App {
             options.push(openwith::Opener {
                 name: "trash-restore".into(),
                 desc: Some("Restore selected files".into()),
-                command: "rnn:trash-restore".into(),
+                command: "yannni:trash-restore".into(),
                 block: false,
             });
             options.push(openwith::Opener {
                 name: "trash-empty".into(),
                 desc: Some("Empty trash bin".into()),
-                command: "rnn:trash-empty".into(),
+                command: "yannni:trash-empty".into(),
                 block: false,
             });
         }
@@ -4651,15 +4651,15 @@ impl App {
             return;
         };
         self.mode = Mode::Normal;
-        if op.command.starts_with("rnn:trash-restore") {
+        if op.command.starts_with("yannni:trash-restore") {
             self.restore_selected();
             return;
         }
-        if op.command.starts_with("rnn:trash-empty") {
+        if op.command.starts_with("yannni:trash-empty") {
             self.start_delete(DeleteMode::EmptyTrash);
             return;
         }
-        if op.command == "rnn:open" {
+        if op.command == "yannni:open" {
             if state.paths.len() == 1 {
                 self.open_target(term, &state.paths[0]);
             } else {
@@ -5432,7 +5432,7 @@ impl App {
         if dest == Path::new("-") {
             self.chooser_stdout = Some(out);
         } else if let Err(e) = fs::write(&dest, &out) {
-            eprintln!("rnn: cannot write chooser file {}: {e}", dest.display());
+            eprintln!("yannni: cannot write chooser file {}: {e}", dest.display());
         }
     }
 
@@ -6417,7 +6417,7 @@ impl App {
     }
 
     /// Feed a key into the active keymap trie. Returns `Some(quit)` when an
-    /// action decided to exit rnn.
+    /// action decided to exit yannni.
     fn handle_mapped_key(
         &mut self,
         ctx: Context,
@@ -7828,7 +7828,7 @@ impl App {
         let start = self.help_scroll;
         let end = (start + self.help_page).min(HELP_ROWS.len());
         let title = format!(
-            " rnn keys · {}-{}/{} ",
+            " yannni keys · {}-{}/{} ",
             start + 1,
             end.max(start + 1),
             HELP_ROWS.len()
@@ -8078,7 +8078,7 @@ impl App {
         if self.config.mgr.mouse_events & Self::mouse_flag(mouse.kind) == 0 {
             return Ok(false);
         }
-        if std::env::var_os("RNN_DEBUG").is_some() {
+        if std::env::var_os("YANNNI_DEBUG").is_some() {
             eprintln!(
                 "mouse: {:?} at ({}, {}) mode={:?}",
                 mouse.kind, mouse.column, mouse.row, self.mode
@@ -8119,7 +8119,7 @@ impl App {
                         self.begin_mouse_action();
                         self.state.select(Some(index));
                         self.apply_visual();
-                        if std::env::var_os("RNN_DEBUG").is_some() {
+                        if std::env::var_os("YANNNI_DEBUG").is_some() {
                             eprintln!("mouse: select {index} ({})", self.entries[index].name);
                         }
                         if right {
@@ -8196,7 +8196,7 @@ impl App {
     // ─────────────── main loop ───────────────
 
     pub fn run(&mut self, term: &mut DefaultTerminal) -> io::Result<()> {
-        let time = std::env::var_os("RNN_TIME").is_some();
+        let time = std::env::var_os("YANNNI_TIME").is_some();
         let mut last_search_poll = std::time::Instant::now();
         let mut last_task_poll = std::time::Instant::now();
         self.preview.begin_sixel(!self.overlay_open());
@@ -8260,7 +8260,7 @@ impl App {
                 self.preview.flush_sixel(!self.overlay_open());
                 if time {
                     eprintln!(
-                        "rnn-t: key={} draw={:?} render={:?} flush={:?}",
+                        "yannni-t: key={} draw={:?} render={:?} flush={:?}",
                         key_ms.map(|d| format!("{d:?}")).unwrap_or_default(),
                         t.elapsed(),
                         closure,
@@ -8323,7 +8323,7 @@ mod tests {
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let dir = env::temp_dir().join(format!(
-            "rnn-test-{tag}-{}-{}",
+            "yannni-test-{tag}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -8640,7 +8640,7 @@ mod tests {
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".rnn-rename-")
+                .starts_with(".yannni-rename-")
         }));
         fs::remove_dir_all(dir).unwrap();
     }
@@ -9248,7 +9248,7 @@ mod tests {
     #[test]
     fn cwd_file_gets_the_current_directory() {
         let path = std::env::temp_dir().join(format!(
-            "rnn-cwd-{}-{}",
+            "yannni-cwd-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
