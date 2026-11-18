@@ -190,6 +190,7 @@ sort_by = "name"        # name | natural | size | mtime | btime | extension | ra
 sort_reverse = false
 sort_sensitive = false  # compare names case-sensitively
 sort_dir_first = true   # keep directories above files
+sort_fallback = "alphabetical"  # tie-break: alphabetical | natural
 show_symlink = true     # append " -> target" to symlinks in the list
 linemode = "size"       # size | permissions | btime | mtime | owner | none
 scrolloff = 5           # rows of context kept above/below the cursor (0 disables)

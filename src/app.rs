@@ -74,6 +74,13 @@ pub(crate) enum Sort {
     Random,
 }
 
+/// Tie-break for equal primary sort keys (Yazi's `mgr.sort_fallback`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SortFallback {
+    Alphabetical,
+    Natural,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Prompt {
     Create,
@@ -2765,6 +2772,7 @@ impl App {
         let reverse = self.sort_reverse;
         let sensitive = self.config.mgr.sort_sensitive;
         let dir_first = self.config.mgr.sort_dir_first;
+        let fallback = self.config.mgr.sort_fallback;
         if matches!(sort, Sort::Random) {
             // Fisher–Yates with a time-seeded xorshift; no extra dependency.
             let mut seed = SystemTime::now()
@@ -2787,7 +2795,7 @@ impl App {
                     std::cmp::Ordering::Equal
                 };
                 dir.then_with(|| {
-                    let order = match sort {
+                    let mut order = match sort {
                         Sort::Name => {
                             if sensitive {
                                 a.name.cmp(&b.name)
@@ -2801,21 +2809,24 @@ impl App {
                         Sort::Btime => a.created.cmp(&b.created),
                         Sort::Extension => {
                             let (ea, eb) = (extension(&a.name), extension(&b.name));
-                            let ord = if sensitive {
+                            if sensitive {
                                 ea.cmp(&eb)
                             } else {
                                 ea.to_lowercase().cmp(&eb.to_lowercase())
-                            };
-                            ord.then_with(|| {
-                                if sensitive {
-                                    a.name.cmp(&b.name)
-                                } else {
-                                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
-                                }
-                            })
+                            }
                         }
                         Sort::Random => std::cmp::Ordering::Equal,
                     };
+                    // Yazi's sort_fallback breaks ties for size/time/extension
+                    // (and is case-sensitive, unlike sort_sensitive).
+                    if order == std::cmp::Ordering::Equal
+                        && !matches!(sort, Sort::Name | Sort::Natural | Sort::Random)
+                    {
+                        order = match fallback {
+                            SortFallback::Alphabetical => a.name.cmp(&b.name),
+                            SortFallback::Natural => natural_cmp(&a.name, &b.name, true),
+                        };
+                    }
                     if reverse {
                         order.reverse()
                     } else {

@@ -132,11 +132,14 @@ are candidates, roughly in priority order.
 - [x] **`preview.cache_dir`** — an absolute path (or empty for the temp
       default) chooses rnn's own preview cache. Setting it disables sharing
       Yazi's cache, and `RNN_CACHE_DIR` still takes precedence.
+- [x] **`mgr.sort_fallback`** — equal size/time/extension keys now break ties
+      with an alphabetical or natural name comparison, matching Yazi (the
+      fallback is case-sensitive, unlike `sort_sensitive`).
 
 ## Next
 
-- [ ] Consider Yazi's `preview.cache_size` eviction (rnn bounds the in-memory
-      cache but leaves disk entries in place).
+- [ ] Consider Yazi's `mgr.sort_translit` (transliterate accented names before
+      sorting; needs a transliteration table).
 
 ## Local setup (outside this repo)
 

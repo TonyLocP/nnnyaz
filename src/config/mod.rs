@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use crate::{
     action::{parse_linemode, parse_sort},
-    app::{Linemode, Sort},
+    app::{Linemode, Sort, SortFallback},
     preview::kitty::Filter,
 };
 
@@ -35,6 +35,9 @@ pub struct MgrConfig {
     /// Keep directories above files regardless of the sort key (Yazi's
     /// `mgr.sort_dir_first`).
     pub sort_dir_first: bool,
+    /// Tie-break when the primary sort keys are equal (Yazi's
+    /// `mgr.sort_fallback`).
+    pub sort_fallback: SortFallback,
     /// Append `-> target` to symlinks in the file list (Yazi's
     /// `mgr.show_symlink`).
     pub show_symlink: bool,
@@ -93,6 +96,7 @@ impl Default for MgrConfig {
             sort_reverse: false,
             sort_sensitive: false,
             sort_dir_first: true,
+            sort_fallback: SortFallback::Alphabetical,
             show_symlink: true,
             linemode: Linemode::Size,
             scrolloff: 5,
@@ -325,6 +329,15 @@ impl Config {
         if let Some(v) = p.mgr.sort_dir_first {
             self.mgr.sort_dir_first = v;
         }
+        if let Some(v) = &p.mgr.sort_fallback {
+            match v.as_str() {
+                "alphabetical" | "name" => self.mgr.sort_fallback = SortFallback::Alphabetical,
+                "natural" => self.mgr.sort_fallback = SortFallback::Natural,
+                _ => warnings.push(format!(
+                    "config.toml: mgr.sort_fallback '{v}' is not 'alphabetical' or 'natural'"
+                )),
+            }
+        }
         if let Some(v) = p.mgr.show_symlink {
             self.mgr.show_symlink = v;
         }
@@ -467,6 +480,7 @@ struct PartialMgr {
     sort_reverse: Option<bool>,
     sort_sensitive: Option<bool>,
     sort_dir_first: Option<bool>,
+    sort_fallback: Option<String>,
     show_symlink: Option<bool>,
     linemode: Option<String>,
     scrolloff: Option<usize>,
@@ -525,6 +539,7 @@ fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
                     "sort_reverse",
                     "sort_sensitive",
                     "sort_dir_first",
+                    "sort_fallback",
                     "show_symlink",
                     "linemode",
                     "scrolloff",
@@ -610,6 +625,7 @@ mod tests {
             sort_reverse = true
             sort_sensitive = true
             sort_dir_first = false
+            sort_fallback = "natural"
             show_symlink = false
             linemode = "mtime"
             typo = 1
@@ -626,6 +642,7 @@ mod tests {
         assert!(loaded.config.mgr.sort_reverse);
         assert!(loaded.config.mgr.sort_sensitive);
         assert!(!loaded.config.mgr.sort_dir_first);
+        assert_eq!(loaded.config.mgr.sort_fallback, SortFallback::Natural);
         assert!(!loaded.config.mgr.show_symlink);
         assert_eq!(loaded.config.mgr.linemode, Linemode::Mtime);
         assert_eq!(loaded.config.preview.cache_size, 4);
