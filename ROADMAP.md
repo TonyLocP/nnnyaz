@@ -113,6 +113,10 @@ are candidates, roughly in priority order.
       `preview.tab_size` (default 2, like Yazi) before syntax highlighting, so
       tab-indented source keeps its shape. Previously each tab collapsed to a
       single space.
+- [x] **Wrapping text previews** — `preview.wrap` accepts Yazi's `"no"`/`"yes"`
+      (and a plain boolean). When enabled, long lines wrap instead of being
+      clipped at the pane edge, and preview scrolling still counts logical
+      lines like Yazi's spot.
 
 ## Next
 

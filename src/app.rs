@@ -28,7 +28,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
     DefaultTerminal, Frame,
 };
 
@@ -6506,8 +6506,15 @@ impl App {
             }
         } else {
             let h = inner.height as usize;
-            let lines = self.preview.lines_slice(h).unwrap_or_default();
-            f.render_widget(Paragraph::new(lines), inner);
+            if self.config.preview.wrap {
+                // Wrap needs more than `h` logical lines to fill the pane, so
+                // hand the paragraph everything after the seek and let it clip.
+                let lines = self.preview.lines_slice(usize::MAX).unwrap_or_default();
+                f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+            } else {
+                let lines = self.preview.lines_slice(h).unwrap_or_default();
+                f.render_widget(Paragraph::new(lines), inner);
+            }
         }
     }
 

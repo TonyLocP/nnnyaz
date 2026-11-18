@@ -194,6 +194,7 @@ image_filter = "box"    # box | nearest | triangle | catmull-rom | gaussian | la
 image_quality = 90      # JPEG quality for cached previews (1-100)
 image_delay = 30        # ms to wait before decoding a newly selected image
 tab_size = 2            # spaces per tab in text previews (1-16)
+wrap = "no"             # "yes" wraps long lines in text previews
 
 [tasks]
 show_progress = true

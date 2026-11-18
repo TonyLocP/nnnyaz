@@ -106,6 +106,9 @@ pub struct PreviewConfig {
     pub image_delay: u8,
     /// Spaces a tab expands to in text previews (Yazi's `preview.tab_size`).
     pub tab_size: u8,
+    /// Wrap long lines in text previews instead of truncating them (Yazi's
+    /// `preview.wrap`).
+    pub wrap: bool,
 }
 
 impl Default for PreviewConfig {
@@ -118,6 +121,7 @@ impl Default for PreviewConfig {
             image_quality: 90,
             image_delay: 30,
             tab_size: 2,
+            wrap: false,
         }
     }
 }
@@ -355,6 +359,18 @@ impl Config {
                 self.preview.tab_size = v as u8;
             }
         }
+        if let Some(v) = p.preview.wrap {
+            match v {
+                WrapValue::Bool(b) => self.preview.wrap = b,
+                WrapValue::Str(s) => match s.to_ascii_lowercase().as_str() {
+                    "yes" | "true" | "on" => self.preview.wrap = true,
+                    "no" | "false" | "off" => self.preview.wrap = false,
+                    _ => warnings.push(format!(
+                        "config.toml: preview.wrap '{s}' is not 'no' or 'yes'"
+                    )),
+                },
+            }
+        }
 
         if let Some(v) = p.tasks.show_progress {
             self.tasks.show_progress = v;
@@ -413,6 +429,15 @@ struct PartialPreview {
     image_quality: Option<u32>,
     image_delay: Option<u32>,
     tab_size: Option<u32>,
+    wrap: Option<WrapValue>,
+}
+
+/// `preview.wrap` accepts Yazi's `"no"`/`"yes"` strings and a plain boolean.
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+enum WrapValue {
+    Bool(bool),
+    Str(String),
 }
 
 #[derive(Deserialize, Default)]
@@ -459,6 +484,8 @@ fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
                     "image_filter",
                     "image_quality",
                     "image_delay",
+                    "tab_size",
+                    "wrap",
                 ],
                 warnings,
             ),
@@ -570,6 +597,36 @@ mod tests {
         let loaded = load_from(&dir);
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
         assert_eq!(loaded.config.mgr.ratio, (4, 3));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn preview_wrap_accepts_yazi_strings_and_bools() {
+        let dir = temp_dir("wrap");
+        let write = |body: &str| {
+            fs::write(dir.join("config.toml"), body).unwrap();
+            load_from(&dir)
+        };
+
+        let loaded = write("[preview]\nwrap = \"yes\"\n");
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert!(loaded.config.preview.wrap);
+
+        let loaded = write("[preview]\nwrap = true\n");
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert!(loaded.config.preview.wrap);
+
+        let loaded = write("[preview]\nwrap = \"no\"\n");
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert!(!loaded.config.preview.wrap);
+
+        let loaded = write("[preview]\nwrap = \"sometimes\"\n");
+        assert!(!loaded.config.preview.wrap);
+        assert!(loaded
+            .warnings
+            .iter()
+            .any(|w| w.contains("preview.wrap 'sometimes'")));
+
         let _ = fs::remove_dir_all(dir);
     }
 
