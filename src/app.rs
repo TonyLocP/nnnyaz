@@ -54,6 +54,7 @@ struct Entry {
     name: String,
     path: PathBuf,
     is_dir: bool,
+    link_target: Option<PathBuf>,
     size: u64,
     modified: Option<SystemTime>,
     created: Option<SystemTime>,
@@ -947,13 +948,22 @@ fn smart_contains(haystack: &str, needle: &str) -> bool {
 }
 
 fn entry_for(path: PathBuf, name: String) -> Option<Entry> {
-    let md = fs::metadata(&path)
-        .or_else(|_| fs::symlink_metadata(&path))
-        .ok()?;
+    let lmd = fs::symlink_metadata(&path).ok();
+    let is_symlink = lmd
+        .as_ref()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    let link_target = if is_symlink {
+        fs::read_link(&path).ok()
+    } else {
+        None
+    };
+    let md = fs::metadata(&path).ok().or(lmd)?;
     Some(Entry {
         name,
         path,
         is_dir: md.is_dir(),
+        link_target,
         size: md.len(),
         modified: md.modified().ok(),
         created: md.created().ok(),
@@ -963,7 +973,7 @@ fn entry_for(path: PathBuf, name: String) -> Option<Entry> {
     })
 }
 
-fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+fn natural_cmp(a: &str, b: &str, sensitive: bool) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let mut ai = a.chars().peekable();
     let mut bi = b.chars().peekable();
@@ -991,7 +1001,11 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
                         return ord;
                     }
                 } else {
-                    let ord = x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase());
+                    let ord = if sensitive {
+                        x.cmp(&y)
+                    } else {
+                        x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase())
+                    };
                     if ord != Ordering::Equal {
                         return ord;
                     }
@@ -2748,6 +2762,8 @@ impl App {
 
         let sort = self.sort;
         let reverse = self.sort_reverse;
+        let sensitive = self.config.mgr.sort_sensitive;
+        let dir_first = self.config.mgr.sort_dir_first;
         if matches!(sort, Sort::Random) {
             // Fisher–Yates with a time-seeded xorshift; no extra dependency.
             let mut seed = SystemTime::now()
@@ -2764,16 +2780,39 @@ impl App {
             }
         } else {
             v.sort_by(|a, b| {
-                b.is_dir.cmp(&a.is_dir).then_with(|| {
+                let dir = if dir_first {
+                    b.is_dir.cmp(&a.is_dir)
+                } else {
+                    std::cmp::Ordering::Equal
+                };
+                dir.then_with(|| {
                     let order = match sort {
-                        Sort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                        Sort::Natural => natural_cmp(&a.name, &b.name),
+                        Sort::Name => {
+                            if sensitive {
+                                a.name.cmp(&b.name)
+                            } else {
+                                a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                            }
+                        }
+                        Sort::Natural => natural_cmp(&a.name, &b.name, sensitive),
                         Sort::Size => a.size.cmp(&b.size),
                         Sort::Time => a.modified.cmp(&b.modified),
                         Sort::Btime => a.created.cmp(&b.created),
-                        Sort::Extension => extension(&a.name)
-                            .cmp(&extension(&b.name))
-                            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                        Sort::Extension => {
+                            let (ea, eb) = (extension(&a.name), extension(&b.name));
+                            let ord = if sensitive {
+                                ea.cmp(&eb)
+                            } else {
+                                ea.to_lowercase().cmp(&eb.to_lowercase())
+                            };
+                            ord.then_with(|| {
+                                if sensitive {
+                                    a.name.cmp(&b.name)
+                                } else {
+                                    a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                                }
+                            })
+                        }
                         Sort::Random => std::cmp::Ordering::Equal,
                     };
                     if reverse {
@@ -5534,6 +5573,7 @@ impl App {
     fn rebuild_list(&mut self, width: u16) {
         let inner = width.saturating_sub(1) as usize;
         let linemode = self.linemode;
+        let show_symlink = self.config.mgr.show_symlink;
         let items: Vec<ListItem> = self
             .entries
             .iter()
@@ -5543,7 +5583,12 @@ impl App {
                 } else {
                     " "
                 };
-                let left = format!("{mark}{}{}", e.name, if e.is_dir { "/" } else { "" });
+                let mut left = format!("{mark}{}{}", e.name, if e.is_dir { "/" } else { "" });
+                if show_symlink {
+                    if let Some(target) = &e.link_target {
+                        left.push_str(&format!(" -> {}", target.display()));
+                    }
+                }
                 let right = match linemode {
                     Linemode::None => String::new(),
                     Linemode::Size => {
@@ -6968,6 +7013,20 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn natural_sort_honours_case_sensitivity() {
+        use std::cmp::Ordering;
+        // Numbers compare by value, not as text.
+        assert_eq!(natural_cmp("file10", "file2", false), Ordering::Greater);
+        assert_eq!(natural_cmp("a2", "A10", false), Ordering::Less);
+        // Sensitive: uppercase sorts before lowercase in ASCII.
+        assert_eq!(natural_cmp("Apple", "Banana", true), Ordering::Less);
+        assert_eq!(natural_cmp("apple", "Banana", true), Ordering::Greater);
+        // Insensitive ignores case.
+        assert_eq!(natural_cmp("apple", "Banana", false), Ordering::Less);
+        assert_eq!(natural_cmp("Apple", "alpha", false), Ordering::Greater);
     }
 
     #[test]

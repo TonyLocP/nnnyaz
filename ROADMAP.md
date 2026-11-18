@@ -126,12 +126,12 @@ are candidates, roughly in priority order.
 - [x] **nnn's `-i` info bar** — `-i`/`--file-info` appends `file -b`'s
       description of the hovered entry to the status line, cached by path and
       mtime so moving around a directory does not spawn a process per redraw.
+- [x] **More Yazi `mgr` keys** — `sort_sensitive` toggles case-sensitive name
+      and extension comparisons, `sort_dir_first = false` mixes directories in
+      with files, and `show_symlink = false` hides the ` -> target` suffix.
 
 ## Next
 
-- [ ] Support more Yazi `mgr` keys: `sort_sensitive`, `sort_dir_first`, and
-      `show_symlink` (rnn always sorts case-insensitively and shows symlink
-      targets in the status line).
 - [ ] Support `preview.cache_dir` (rnn currently uses `RNN_CACHE_DIR` and
       Yazi's cache when found).
 

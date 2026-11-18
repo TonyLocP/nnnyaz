@@ -30,6 +30,14 @@ pub struct MgrConfig {
     pub show_preview: bool,
     pub sort: Sort,
     pub sort_reverse: bool,
+    /// Compare names case-sensitively (Yazi's `mgr.sort_sensitive`).
+    pub sort_sensitive: bool,
+    /// Keep directories above files regardless of the sort key (Yazi's
+    /// `mgr.sort_dir_first`).
+    pub sort_dir_first: bool,
+    /// Append `-> target` to symlinks in the file list (Yazi's
+    /// `mgr.show_symlink`).
+    pub show_symlink: bool,
     pub linemode: Linemode,
     /// Keep this many rows visible above and below the cursor when scrolling.
     pub scrolloff: usize,
@@ -83,6 +91,9 @@ impl Default for MgrConfig {
             show_preview: true,
             sort: Sort::Name,
             sort_reverse: false,
+            sort_sensitive: false,
+            sort_dir_first: true,
+            show_symlink: true,
             linemode: Linemode::Size,
             scrolloff: 5,
             mouse_events: MOUSE_CLICK | MOUSE_SCROLL | MOUSE_DRAG,
@@ -292,6 +303,15 @@ impl Config {
         if let Some(v) = p.mgr.sort_reverse {
             self.mgr.sort_reverse = v;
         }
+        if let Some(v) = p.mgr.sort_sensitive {
+            self.mgr.sort_sensitive = v;
+        }
+        if let Some(v) = p.mgr.sort_dir_first {
+            self.mgr.sort_dir_first = v;
+        }
+        if let Some(v) = p.mgr.show_symlink {
+            self.mgr.show_symlink = v;
+        }
         if let Some(v) = p.mgr.linemode {
             match parse_linemode(&v) {
                 Ok(linemode) => self.mgr.linemode = linemode,
@@ -414,6 +434,9 @@ struct PartialMgr {
     show_preview: Option<bool>,
     sort_by: Option<String>,
     sort_reverse: Option<bool>,
+    sort_sensitive: Option<bool>,
+    sort_dir_first: Option<bool>,
+    show_symlink: Option<bool>,
     linemode: Option<String>,
     scrolloff: Option<usize>,
     mouse_events: Option<Vec<String>>,
@@ -468,6 +491,9 @@ fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
                     "show_preview",
                     "sort_by",
                     "sort_reverse",
+                    "sort_sensitive",
+                    "sort_dir_first",
+                    "show_symlink",
                     "linemode",
                     "scrolloff",
                     "mouse_events",
@@ -549,6 +575,9 @@ mod tests {
             show_hidden = true
             sort_by = "size"
             sort_reverse = true
+            sort_sensitive = true
+            sort_dir_first = false
+            show_symlink = false
             linemode = "mtime"
             typo = 1
 
@@ -562,6 +591,9 @@ mod tests {
         assert!(loaded.config.mgr.show_hidden);
         assert_eq!(loaded.config.mgr.sort, Sort::Size);
         assert!(loaded.config.mgr.sort_reverse);
+        assert!(loaded.config.mgr.sort_sensitive);
+        assert!(!loaded.config.mgr.sort_dir_first);
+        assert!(!loaded.config.mgr.show_symlink);
         assert_eq!(loaded.config.mgr.linemode, Linemode::Mtime);
         assert_eq!(loaded.config.preview.cache_size, 4);
         assert!(loaded
