@@ -968,6 +968,16 @@ pub struct App {
     /// `-f`: load and save the shell history at `<config>/.history`.
     shell_history_file: Option<PathBuf>,
     status: String,
+    /// Help overlay: index of the top visible row.
+    help_scroll: usize,
+    /// Help overlay: visible row count, updated while drawing.
+    help_page: usize,
+    /// Help overlay: committed search query.
+    help_query: String,
+    /// Help overlay: index of the current search match.
+    help_match: Option<usize>,
+    /// Help overlay: true while the `/` query is being typed.
+    help_search: bool,
     focus: Option<String>,
     page: usize,
     /// Lines moved per mouse-wheel tick (`-l`).
@@ -2898,6 +2908,141 @@ fn title_prefix(title: &str) -> String {
     }
 }
 
+/// Rows shown by the `~` help overlay. An empty key string marks a section.
+const HELP_ROWS: &[(&str, &str)] = &[
+    ("", "Navigation"),
+    ("j/k, ↑/↓", "move"),
+    ("gg / G", "top / bottom"),
+    ("h/l, ←/→", "parent / open"),
+    ("H / L", "history back / forward"),
+    ("Ctrl+u/d", "half page"),
+    ("Ctrl+b/f", "full page"),
+    ("g<Space>", "go to path (live menu)"),
+    ("gh gc gd", "home / config / downloads"),
+    ("go gp gv", "osu / pictures / videos"),
+    ("gf / gt", "follow symlink / trash"),
+    ("", "Opening"),
+    ("o / Enter", "open"),
+    ("O / S-Enter", "open with…"),
+    ("e / i", "editor / pager"),
+    ("l / →", "enter directory (or open file)"),
+    ("O in trash", "restore / empty"),
+    ("", "Selection and clipboard"),
+    ("Space", "toggle selection"),
+    ("Ctrl+a/r", "select all / invert"),
+    ("v / V", "visual select / unset"),
+    ("y / x", "yank / cut"),
+    ("p / P", "paste / paste-force"),
+    ("Y / X", "cancel yank"),
+    ("Ctrl+y/p", "clipboard copy / paste"),
+    ("c …", "copy path / url / dir / name"),
+    ("d / D", "trash / delete (confirm)"),
+    ("", "Files"),
+    ("r / a", "rename / create"),
+    ("A", "bulk create"),
+    ("b / B", "bookmarks / add this dir"),
+    ("' x", "jump to mark x"),
+    ("m …", "linemode; m x sets mark"),
+    ("_ / Alt+-", "symlink relative / absolute"),
+    ("Ctrl+-", "hardlink"),
+    ("", "View"),
+    ("J / K", "seek preview"),
+    ("+ / - / 0", "zoom in / out / fit"),
+    ("T", "toggle preview pane"),
+    ("F", "full-screen preview"),
+    (".", "hidden files"),
+    ("Tab", "info (j/k h/l c c)"),
+    ("", "Search and sort"),
+    ("f", "filter"),
+    ("/ ?", "find next / previous"),
+    ("n / N", "next / previous found"),
+    ("s / S", "search fd / rg"),
+    ("z", "fzf jump"),
+    ("Z", "zoxide jump"),
+    (",a ,n ,s", "sort name / natural / size"),
+    (",m ,b ,e", "sort time / btime / ext"),
+    (",r", "sort randomly"),
+    ("", "Tabs"),
+    ("t t/n", "new tab here / home"),
+    ("t r/c/S", "rename / close / session"),
+    ("1-9 [ ]", "switch tab"),
+    ("{ / }", "swap tab"),
+    ("Ctrl+c", "close tab / quit"),
+    ("", "Shell and tasks"),
+    ("; / :", "shell background / block"),
+    ("Ctrl+z", "suspend"),
+    ("w", "task manager"),
+    ("Ctrl+n", "create"),
+    ("", "Help"),
+    ("~ / F1", "help"),
+    ("j/k, ↑/↓", "scroll"),
+    ("g / G", "top / bottom"),
+    ("/", "search keys and descriptions"),
+    ("n / N", "next / previous match"),
+    ("q / Esc", "close"),
+];
+
+/// Split `text` into spans, reversing every case-insensitive occurrence of
+/// `query`. ASCII lowering keeps byte offsets stable for slicing.
+fn help_spans(text: &str, query: &str, base: Style) -> Vec<Span<'static>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return vec![Span::styled(text.to_string(), base)];
+    }
+    let hay = text.to_ascii_lowercase();
+    let needle = query.to_ascii_lowercase();
+    let mut spans = Vec::new();
+    let mut start = 0;
+    while let Some(pos) = hay[start..].find(&needle) {
+        let abs = start + pos;
+        if abs > start {
+            spans.push(Span::styled(text[start..abs].to_string(), base));
+        }
+        let end = abs + needle.len();
+        spans.push(Span::styled(
+            text[abs..end].to_string(),
+            base.add_modifier(Modifier::REVERSED),
+        ));
+        start = end;
+    }
+    if start < text.len() {
+        spans.push(Span::styled(text[start..].to_string(), base));
+    }
+    spans
+}
+
+/// Indices of the help rows whose keys or description contain `query`.
+fn help_match_indices(query: &str) -> Vec<usize> {
+    let needle = query.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    HELP_ROWS
+        .iter()
+        .enumerate()
+        .filter(|(_, (keys, desc))| {
+            keys.to_ascii_lowercase().contains(&needle)
+                || desc.to_ascii_lowercase().contains(&needle)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// The next match, wrapping around. With no current match, forward starts at
+/// the first and backward at the last.
+fn help_next_match(matches: &[usize], current: Option<usize>, forward: bool) -> Option<usize> {
+    if matches.is_empty() {
+        return None;
+    }
+    let next = match current.and_then(|m| matches.iter().position(|&x| x == m)) {
+        Some(pos) if forward => matches[(pos + 1) % matches.len()],
+        Some(pos) => matches[(pos + matches.len() - 1) % matches.len()],
+        None if forward => matches[0],
+        None => *matches.last().unwrap(),
+    };
+    Some(next)
+}
+
 impl App {
     pub fn new(loaded: config::Loaded) -> io::Result<Self> {
         let cli = parse_cli(env::args_os().skip(1))
@@ -3028,6 +3173,11 @@ impl App {
             shell_history_pos: None,
             shell_history_file,
             status,
+            help_scroll: 0,
+            help_page: 10,
+            help_query: String::new(),
+            help_match: None,
+            help_search: false,
             focus: None,
             page: 10,
             scroll_lines: cli.scroll_lines.unwrap_or(1),
@@ -5405,6 +5555,136 @@ impl App {
         self.info_from_tasks = false;
     }
 
+    fn open_help(&mut self) {
+        self.mode = Mode::Help;
+        self.help_scroll = 0;
+        self.help_query.clear();
+        self.help_match = None;
+        self.help_search = false;
+        self.input.clear();
+    }
+
+    fn close_help(&mut self) {
+        self.mode = Mode::Normal;
+        self.help_search = false;
+        self.input.clear();
+    }
+
+    fn handle_help_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.help_search {
+            match key.code {
+                KeyCode::Esc => {
+                    self.help_search = false;
+                    self.input.clear();
+                    self.help_query.clear();
+                    self.help_match = None;
+                }
+                KeyCode::Enter => {
+                    self.help_query = self.input.as_str().trim().to_string();
+                    self.help_search = false;
+                    if self.help_match.is_none() {
+                        self.help_jump(true);
+                    }
+                }
+                KeyCode::Char('c') if ctrl => {
+                    self.help_search = false;
+                    self.input.clear();
+                    self.help_query.clear();
+                    self.help_match = None;
+                }
+                KeyCode::Backspace => {
+                    self.input.backspace();
+                    self.help_sync_query();
+                }
+                KeyCode::Delete => {
+                    self.input.delete();
+                    self.help_sync_query();
+                }
+                KeyCode::Left => self.input.move_left(),
+                KeyCode::Right => self.input.move_right(),
+                KeyCode::Home => self.input.move_home(),
+                KeyCode::End => self.input.move_end(),
+                KeyCode::Up => self.help_jump(false),
+                KeyCode::Down => self.help_jump(true),
+                KeyCode::Char(c) if ctrl => apply_ctrl_edit(
+                    &mut self.input,
+                    c,
+                    key.modifiers.contains(KeyModifiers::SHIFT),
+                ),
+                KeyCode::Char(c) => {
+                    self.input.insert(c);
+                    self.help_sync_query();
+                }
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('~') | KeyCode::F(1) => {
+                self.close_help()
+            }
+            KeyCode::Char('c') if ctrl => self.close_help(),
+            KeyCode::Char('/') => {
+                self.help_search = true;
+                self.input.set(self.help_query.clone());
+            }
+            KeyCode::Char('n') => self.help_jump(true),
+            KeyCode::Char('N') => self.help_jump(false),
+            KeyCode::Char('j') | KeyCode::Down => self.help_scroll_by(1),
+            KeyCode::Char('k') | KeyCode::Up => self.help_scroll_by(-1),
+            KeyCode::Char('d') if ctrl => self.help_scroll_by(self.help_page as isize / 2),
+            KeyCode::Char('u') if ctrl => self.help_scroll_by(-(self.help_page as isize / 2)),
+            KeyCode::Char('f') if ctrl => self.help_scroll_by(self.help_page as isize),
+            KeyCode::Char('b') if ctrl => self.help_scroll_by(-(self.help_page as isize)),
+            KeyCode::PageDown => self.help_scroll_by(self.help_page as isize),
+            KeyCode::PageUp => self.help_scroll_by(-(self.help_page as isize)),
+            KeyCode::Char('g') | KeyCode::Home => self.help_scroll = 0,
+            KeyCode::Char('G') | KeyCode::End => {
+                self.help_scroll = HELP_ROWS.len().saturating_sub(self.help_page.max(1));
+            }
+            _ => {}
+        }
+    }
+
+    /// Keep the live query in sync while typing in the help search prompt.
+    fn help_sync_query(&mut self) {
+        self.help_query = self.input.as_str().trim().to_string();
+        self.help_match = None;
+        self.help_jump(true);
+    }
+
+    fn help_matches(&self) -> Vec<usize> {
+        help_match_indices(&self.help_query)
+    }
+
+    /// Move to the next/previous match, wrapping around. `None` starts at the
+    /// first match going forward and the last going backward.
+    fn help_jump(&mut self, forward: bool) {
+        let matches = self.help_matches();
+        let Some(next) = help_next_match(&matches, self.help_match, forward) else {
+            self.help_match = None;
+            return;
+        };
+        self.help_match = Some(next);
+        self.help_reveal(next);
+    }
+
+    fn help_reveal(&mut self, index: usize) {
+        let page = self.help_page.max(1);
+        if index < self.help_scroll {
+            self.help_scroll = index;
+        } else if index >= self.help_scroll + page {
+            self.help_scroll = index + 1 - page;
+        }
+        self.help_scroll = self.help_scroll.min(HELP_ROWS.len().saturating_sub(page));
+    }
+
+    fn help_scroll_by(&mut self, delta: isize) {
+        let max = HELP_ROWS.len().saturating_sub(self.help_page.max(1)) as isize;
+        self.help_scroll = (self.help_scroll as isize + delta).clamp(0, max) as usize;
+    }
+
     fn goto_trash(&mut self) {
         if let Err(e) = ensure_trash_dirs() {
             self.status = format!("trash: {e}");
@@ -6070,7 +6350,7 @@ impl App {
                 return Ok(false);
             }
             Mode::Help => {
-                self.mode = Mode::Normal;
+                self.handle_help_key(key);
                 return Ok(false);
             }
             Mode::OpenWith => {
@@ -6238,7 +6518,7 @@ impl App {
                     self.list_dirty = true;
                 }
             }
-            Action::Help => self.mode = Mode::Help,
+            Action::Help => self.open_help(),
             Action::Tasks => {
                 self.task_cursor = self.task_cursor.min(self.tasks.len().saturating_sub(1));
                 self.mode = Mode::Tasks;
@@ -6766,7 +7046,33 @@ impl App {
                     )
                 }
             }
-            Mode::Help => "rnn keys — press any key to close".into(),
+            Mode::Help => {
+                if self.help_search {
+                    let total = self.help_matches().len();
+                    let plural = if total == 1 { "match" } else { "matches" };
+                    if self.input.as_str().is_empty() {
+                        "help search: type to filter · Esc cancel".into()
+                    } else {
+                        format!(
+                            "help search: {}  [{total} {plural}] · Enter keep · Esc cancel",
+                            self.input.as_str()
+                        )
+                    }
+                } else if !self.help_query.is_empty() {
+                    let matches = self.help_matches();
+                    let pos = self
+                        .help_match
+                        .and_then(|m| matches.iter().position(|&x| x == m))
+                        .map_or(0, |p| p + 1);
+                    format!(
+                        "help — / search · n/N next · {pos}/{} matches for '{}' · q close",
+                        matches.len(),
+                        self.help_query
+                    )
+                } else {
+                    "help — j/k or ↑/↓ scroll · / search · q close".into()
+                }
+            }
             Mode::Info => {
                 if self.info_from_tasks {
                     "task — j/k scroll · c c copy · Esc close".into()
@@ -7497,94 +7803,65 @@ impl App {
         );
     }
 
-    fn draw_help(&self, f: &mut Frame) {
-        let left = [
-            "j/k, ↑/↓     move",
-            "gg / G      top / bottom",
-            "h/l, ←/→    parent / open",
-            "H / L       history back / fwd",
-            "Ctrl+u/d    half page",
-            "Ctrl+b/f    full page",
-            "Space       toggle selection",
-            "Ctrl+a/r    select all / invert",
-            "v / V       visual select / unset",
-            "y / x       yank / cut",
-            "p / P       paste / paste-force",
-            "Y / X       cancel yank",
-            "d / D       trash / delete (confirm)",
-            "b / B       bookmarks / add this dir",
-            "r / a       rename / create",
-            "A           bulk create",
-            "w           task manager",
-            "Ctrl+n      create",
-            "Ctrl+y/p    clipboard copy / paste",
-            "; / :       shell background / block",
-            "Ctrl+z      suspend",
-            "t t/n       new tab here / home",
-            "t r/c/S     rename / close / session",
-            "1-9 [ ]     switch tab",
-            "{ / }       swap tab",
-            "Tab         info (j/k h/l c c)",
-            "F           full-screen preview",
-            "Ctrl+c      close tab / quit",
-        ];
-        let right = [
-            "o / Enter   open",
-            "O / S-Enter open with…",
-            "e / i       editor / pager",
-            "J / K       seek preview",
-            "+ / - / 0   zoom in / out / fit",
-            "T           toggle preview pane",
-            ".           hidden files",
-            "f           filter",
-            "/ ?         find next / previous",
-            "n / N       next / previous found",
-            "s / S       search fd / rg",
-            "z           fzf jump",
-            "Z           zoxide jump",
-            "' x         jump to mark x",
-            "c …         copy path/url/dir/name",
-            "m …         linemode; m x sets mark",
-            "_ / Alt+-   symlink relative / absolute",
-            "Ctrl+-      hardlink",
-            "gh gc gd    home / config / downloads",
-            "go gp gv    osu / pictures / videos",
-            "g<Space>    go to path (live menu)",
-            "gf / gt     follow symlink / trash",
-            "O in trash  restore / empty",
-            ",a ,n ,s    sort name/natural/size",
-            ",m ,b ,e    sort time / btime / ext",
-            ",r          sort randomly",
-            "~ / F1      help",
-        ];
+    fn draw_help(&mut self, f: &mut Frame) {
         let area = f.area();
-        let width = area.width.saturating_sub(4).min(88);
-        let height = area
-            .height
-            .saturating_sub(4)
-            .min((left.len().max(right.len()) + 2) as u16);
-        if width == 0 || height == 0 {
+        if area.width < 10 || area.height < 5 {
             return;
         }
+        let width = area.width.saturating_sub(4).min(88);
+        let height = area.height.saturating_sub(4).max(5);
         let rect = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
             width,
             height,
         );
-        let lines: Vec<Line<'static>> = (0..left.len().max(right.len()))
-            .map(|i| {
-                let l = left.get(i).copied().unwrap_or("");
-                let r = right.get(i).copied().unwrap_or("");
-                Line::from(vec![
-                    Span::raw(format!("{l:<44}")),
-                    Span::raw(r.to_string()),
-                ])
-            })
-            .collect();
+        let inner = Rect::new(
+            rect.x + 1,
+            rect.y + 1,
+            rect.width.saturating_sub(2),
+            rect.height.saturating_sub(2),
+        );
+        self.help_page = inner.height.max(1) as usize;
+        let max_scroll = HELP_ROWS.len().saturating_sub(self.help_page);
+        self.help_scroll = self.help_scroll.min(max_scroll);
+        let start = self.help_scroll;
+        let end = (start + self.help_page).min(HELP_ROWS.len());
+        let title = format!(
+            " rnn keys · {}-{}/{} ",
+            start + 1,
+            end.max(start + 1),
+            HELP_ROWS.len()
+        );
+        let query = self.help_query.clone();
+        let mut lines = Vec::with_capacity(end - start);
+        for (index, (keys, desc)) in HELP_ROWS.iter().enumerate().take(end).skip(start) {
+            if keys.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!(" {desc}"),
+                    self.config.theme.info_section,
+                )));
+                continue;
+            }
+            let marker = if Some(index) == self.help_match {
+                "▸ "
+            } else {
+                "  "
+            };
+            let mut spans = vec![Span::styled(marker, self.config.theme.dim)];
+            spans.extend(help_spans(keys, &query, self.config.theme.prefix_key));
+            let pad = 16usize.saturating_sub(keys.chars().count()).max(1);
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.extend(help_spans(desc, &query, self.config.theme.fg));
+            lines.push(Line::from(spans));
+        }
         f.render_widget(Clear, rect);
         f.render_widget(
-            Paragraph::new(lines).block(Block::bordered().title(" rnn keys ")),
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(self.config.theme.border),
+            ),
             rect,
         );
     }
@@ -8135,6 +8412,45 @@ mod tests {
         assert_eq!(shell_history_step(3, Some(0), true), Some(2));
         assert_eq!(shell_history_step(3, Some(2), false), Some(0));
         assert_eq!(shell_history_step(3, Some(1), false), Some(2));
+    }
+
+    #[test]
+    fn help_search_matches_keys_and_descriptions() {
+        let matches = help_match_indices("zoom");
+        assert!(matches.contains(
+            &HELP_ROWS
+                .iter()
+                .position(|(k, _)| *k == "+ / - / 0")
+                .unwrap()
+        ));
+        let matches = help_match_indices("PANE");
+        assert!(matches.contains(&HELP_ROWS.iter().position(|(k, _)| *k == "T").unwrap()));
+        assert!(help_match_indices("  ").is_empty());
+        assert!(help_match_indices("nothing-matches-this").is_empty());
+    }
+
+    #[test]
+    fn help_search_wraps_between_matches() {
+        let matches = [2, 5, 9];
+        assert_eq!(help_next_match(&matches, None, true), Some(2));
+        assert_eq!(help_next_match(&matches, None, false), Some(9));
+        assert_eq!(help_next_match(&matches, Some(2), true), Some(5));
+        assert_eq!(help_next_match(&matches, Some(9), true), Some(2));
+        assert_eq!(help_next_match(&matches, Some(2), false), Some(9));
+        assert_eq!(help_next_match(&[], None, true), None);
+    }
+
+    #[test]
+    fn help_spans_reverse_every_match() {
+        let spans = help_spans("open with open", "open", Style::new());
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "open with open");
+        let reversed: Vec<_> = spans
+            .iter()
+            .filter(|s| s.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(reversed, vec!["open", "open"]);
     }
 
     #[test]

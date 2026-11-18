@@ -191,6 +191,9 @@ are candidates, roughly in priority order.
       `key collision! [...]` for bindings that can never fire: an action
       shadowed by a longer sequence, or sibling chords that match the same
       key. It exits 0 like nnn.
+- [x] **Scrollable, searchable help** — `~`/`F1` opens a sectioned overlay
+      with `j/k` or `↑/↓` scrolling, half/full-page and Home/End jumps, and
+      a `/` search over keys and descriptions (`n`/`N` cycle matches).
 
 ## Next
 
