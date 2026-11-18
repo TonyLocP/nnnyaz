@@ -2516,6 +2516,16 @@ fn resolve_bookmark(name: &str, base: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Format a prompt title as a prefix, tolerating Yazi's trailing colon.
+fn title_prefix(title: &str) -> String {
+    let title = title.trim().trim_end_matches(':').trim_end();
+    if title.is_empty() {
+        String::new()
+    } else {
+        format!("{title}: ")
+    }
+}
+
 impl App {
     pub fn new(loaded: config::Loaded) -> io::Result<Self> {
         let cli = parse_cli(env::args_os().skip(1))
@@ -5851,14 +5861,26 @@ impl App {
         };
         let direction = if self.sort_reverse { "↓" } else { "↑" };
         let mut text = match self.mode {
-            Mode::Filter => format!("filter: {}", self.filter),
+            Mode::Filter => format!(
+                "{}{}",
+                title_prefix(&self.config.input.filter_title),
+                self.filter
+            ),
             Mode::Find => {
-                let arrow = if self.find_forward { "→" } else { "←" };
+                let title = if self.find_forward {
+                    &self.config.input.find_title[0]
+                } else {
+                    &self.config.input.find_title[1]
+                };
                 if self.find_query.is_empty() {
-                    format!("find{arrow}: ")
+                    title_prefix(title)
                 } else {
                     let (pos, total) = self.find_progress(&self.find_query);
-                    format!("find{arrow}: {}  [{pos}/{total}]", self.find_query)
+                    format!(
+                        "{}{}  [{pos}/{total}]",
+                        title_prefix(title),
+                        self.find_query
+                    )
                 }
             }
             Mode::Help => "rnn keys — press any key to close".into(),
@@ -5887,19 +5909,7 @@ impl App {
                 None => "delete? (y/N)".into(),
             },
             Mode::Prompt(p) => {
-                let label = match p {
-                    Prompt::Create => "create",
-                    Prompt::Rename => "rename",
-                    Prompt::Cd => "go to",
-                    Prompt::SearchFd => "fd",
-                    Prompt::SearchRg => "rg",
-                    Prompt::Shell => "shell",
-                    Prompt::TabRename => "rename tab",
-                    Prompt::Bookmark => "bookmark",
-                    Prompt::BookmarkName => "bookmark name",
-                    Prompt::Delete => "",
-                };
-                format!("{label}: {}", self.input.as_str())
+                format!("{}{}", self.prompt_prefix(p), self.input.as_str())
             }
             Mode::Normal if !self.status.is_empty() => self.status.clone(),
             Mode::Normal => {
@@ -6450,22 +6460,30 @@ impl App {
         );
     }
 
+    /// Prefix for the active prompt, from Yazi's `[input]` titles.
+    fn prompt_prefix(&self, p: Prompt) -> String {
+        let input = &self.config.input;
+        match p {
+            Prompt::Create => {
+                let dir = self.input.as_str().trim_end().ends_with('/');
+                title_prefix(&input.create_title[usize::from(dir)])
+            }
+            Prompt::Rename => title_prefix(&input.rename_title),
+            Prompt::Cd => title_prefix(&input.cd_title),
+            Prompt::SearchFd => "fd: ".into(),
+            Prompt::SearchRg => "rg: ".into(),
+            Prompt::Shell => title_prefix(&input.shell_title[usize::from(self.shell_block)]),
+            Prompt::TabRename => "rename tab: ".into(),
+            Prompt::Bookmark => "bookmark: ".into(),
+            Prompt::BookmarkName => "bookmark name: ".into(),
+            Prompt::Delete => String::new(),
+        }
+    }
+
     /// Render a prompt label and editable buffer, highlighting the selection
     /// and placing the terminal cursor so the caret stays visible.
     fn draw_prompt_status(&self, f: &mut Frame, area: Rect, p: Prompt) {
-        let label = match p {
-            Prompt::Create => "create",
-            Prompt::Rename => "rename",
-            Prompt::Cd => "go to",
-            Prompt::SearchFd => "fd",
-            Prompt::SearchRg => "rg",
-            Prompt::Shell => "shell",
-            Prompt::TabRename => "rename tab",
-            Prompt::Bookmark => "bookmark",
-            Prompt::BookmarkName => "bookmark name",
-            Prompt::Delete => "",
-        };
-        let prefix = format!("{label}: ");
+        let prefix = self.prompt_prefix(p);
         let prefix_w = Span::raw(prefix.as_str()).width();
         if prefix_w >= area.width as usize {
             f.render_widget(
@@ -7134,6 +7152,14 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn title_prefix_tolerates_yazi_colons() {
+        assert_eq!(title_prefix("create"), "create: ");
+        assert_eq!(title_prefix("Change directory:"), "Change directory: ");
+        assert_eq!(title_prefix("  Rename :  "), "Rename: ");
+        assert_eq!(title_prefix(""), "");
     }
 
     #[test]

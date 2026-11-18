@@ -165,6 +165,34 @@ impl Default for TasksConfig {
     }
 }
 
+/// Prompt titles (Yazi's `[input]` section). Origin/offset settings do not
+/// apply because rnn prompts on the status line instead of a floating box.
+#[derive(Clone, Debug)]
+pub struct InputConfig {
+    pub cd_title: String,
+    /// `[create file, create directory]`; Yazi's array form.
+    pub create_title: [String; 2],
+    pub rename_title: String,
+    pub filter_title: String,
+    /// `[forward, backward]`.
+    pub find_title: [String; 2],
+    /// `[background, blocking]`.
+    pub shell_title: [String; 2],
+}
+
+impl Default for InputConfig {
+    fn default() -> Self {
+        InputConfig {
+            cd_title: "go to".into(),
+            create_title: ["create".into(), "create dir".into()],
+            rename_title: "rename".into(),
+            filter_title: "filter".into(),
+            find_title: ["find→".into(), "find←".into()],
+            shell_title: ["shell".into(), "shell (block)".into()],
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ConfirmConfig {
     pub quit_with_tasks: bool,
@@ -184,6 +212,7 @@ pub struct Config {
     pub preview: PreviewConfig,
     pub tasks: TasksConfig,
     pub confirm: ConfirmConfig,
+    pub input: InputConfig,
     /// `[opener]` / `[open]` from `config.toml`; `None` means "use Yazi's".
     pub open: Option<toml::Value>,
     pub keymap: Keymap,
@@ -457,6 +486,31 @@ impl Config {
             self.confirm.quit_with_tasks = v;
         }
 
+        if let Some(v) = p.input.cd_title {
+            self.input.cd_title = title_text(v, &mut warnings, "input.cd_title");
+        }
+        if let Some(v) = p.input.create_title {
+            if let Some(pair) = title_pair(v, &mut warnings, "input.create_title") {
+                self.input.create_title = pair;
+            }
+        }
+        if let Some(v) = p.input.rename_title {
+            self.input.rename_title = title_text(v, &mut warnings, "input.rename_title");
+        }
+        if let Some(v) = p.input.filter_title {
+            self.input.filter_title = title_text(v, &mut warnings, "input.filter_title");
+        }
+        if let Some(v) = p.input.find_title {
+            if let Some(pair) = title_pair(v, &mut warnings, "input.find_title") {
+                self.input.find_title = pair;
+            }
+        }
+        if let Some(v) = p.input.shell_title {
+            if let Some(pair) = title_pair(v, &mut warnings, "input.shell_title") {
+                self.input.shell_title = pair;
+            }
+        }
+
         let mut open = toml::value::Table::new();
         if let Some(v) = p.opener {
             open.insert("opener".into(), v);
@@ -479,6 +533,7 @@ struct PartialConfig {
     preview: PartialPreview,
     tasks: PartialTasks,
     confirm: PartialConfirm,
+    input: PartialInput,
     opener: Option<toml::Value>,
     open: Option<toml::Value>,
 }
@@ -536,6 +591,51 @@ struct PartialConfirm {
     quit_with_tasks: Option<bool>,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PartialInput {
+    cd_title: Option<TitleValue>,
+    create_title: Option<TitleValue>,
+    rename_title: Option<TitleValue>,
+    filter_title: Option<TitleValue>,
+    find_title: Option<TitleValue>,
+    shell_title: Option<TitleValue>,
+}
+
+/// A prompt title: Yazi accepts a string, or an array of strings for prompts
+/// with two modes (create file/directory, find next/previous, shell modes).
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+enum TitleValue {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn title_text(value: TitleValue, warnings: &mut Vec<String>, key: &str) -> String {
+    match value {
+        TitleValue::One(s) => s,
+        TitleValue::Many(v) if !v.is_empty() => v[0].clone(),
+        TitleValue::Many(_) => {
+            warnings.push(format!("config.toml: {key} must be a non-empty string"));
+            String::new()
+        }
+    }
+}
+
+fn title_pair(value: TitleValue, warnings: &mut Vec<String>, key: &str) -> Option<[String; 2]> {
+    match value {
+        TitleValue::One(s) => Some([s.clone(), s]),
+        TitleValue::Many(v) if v.len() == 2 => Some([v[0].clone(), v[1].clone()]),
+        TitleValue::Many(v) if v.len() == 1 => Some([v[0].clone(), v[0].clone()]),
+        TitleValue::Many(_) => {
+            warnings.push(format!(
+                "config.toml: {key} must be a string or two strings"
+            ));
+            None
+        }
+    }
+}
+
 fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
     let Some(table) = value.as_table() else {
         warnings.push("config.toml: expected a table".into());
@@ -586,6 +686,32 @@ fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
                 warnings,
             ),
             "confirm" => warn_keys(value, "confirm", &["quit_with_tasks"], warnings),
+            "input" => warn_keys(
+                value,
+                "input",
+                &[
+                    "cursor_blink",
+                    "cd_title",
+                    "cd_origin",
+                    "cd_offset",
+                    "create_title",
+                    "create_origin",
+                    "create_offset",
+                    "rename_title",
+                    "rename_origin",
+                    "rename_offset",
+                    "filter_title",
+                    "filter_origin",
+                    "filter_offset",
+                    "find_title",
+                    "find_origin",
+                    "find_offset",
+                    "shell_title",
+                    "shell_origin",
+                    "shell_offset",
+                ],
+                warnings,
+            ),
             // openers are validated by openwith.rs.
             "opener" | "open" => {}
             other => warnings.push(format!("config.toml: unknown section '{other}'")),
@@ -657,6 +783,11 @@ mod tests {
 
             [tasks]
             suppress_preload = true
+
+            [input]
+            cd_title = "Change directory:"
+            create_title = [ "New file", "New dir" ]
+            find_title = [ "next", "prev" ]
             "#,
         )
         .unwrap();
@@ -673,6 +804,9 @@ mod tests {
         assert_eq!(loaded.config.mgr.linemode, Linemode::Mtime);
         assert_eq!(loaded.config.preview.cache_size, 4);
         assert!(loaded.config.tasks.suppress_preload);
+        assert_eq!(loaded.config.input.cd_title, "Change directory:");
+        assert_eq!(loaded.config.input.create_title, ["New file", "New dir"]);
+        assert_eq!(loaded.config.input.find_title, ["next", "prev"]);
         assert!(loaded
             .warnings
             .iter()

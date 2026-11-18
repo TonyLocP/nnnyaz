@@ -149,11 +149,15 @@ are candidates, roughly in priority order.
 - [x] **`tasks.suppress_preload`** — disables preloading the previews of
       neighbouring image/video/PDF/font files, trading instant navigation for
       less background work.
+- [x] **Yazi `[input]` titles** — `cd_title`, `create_title`, `rename_title`,
+      `filter_title`, `find_title`, and `shell_title` customize prompt labels.
+      The two-element arrays pick by mode (file vs. directory, next vs.
+      previous, background vs. blocking shell); `*_origin`, `*_offset`, and
+      `cursor_blink` are accepted but do not apply to status-line prompts.
 
 ## Next
 
-- [ ] Consider Yazi's `[input]` titles (`cd_title`, `rename_title`, …) for
-      rnn's status-line prompts.
+- [ ] Consider nnn's `-Q` to skip the running-task quit warning.
 
 ## Local setup (outside this repo)
 

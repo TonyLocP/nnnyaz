@@ -219,6 +219,17 @@ suppress_preload = false  # do not preload neighbouring image/video/PDF previews
 [confirm]
 quit_with_tasks = true
 
+# Prompt titles use Yazi's [input] keys. A trailing colon is optional; the
+# *_origin/*_offset/cursor_blink keys are accepted but do not apply because
+# rnn prompts on the status line.
+[input]
+cd_title = "go to"
+create_title = [ "create", "create dir" ]
+rename_title = "rename"
+filter_title = "filter"
+find_title = [ "find→", "find←" ]
+shell_title = [ "shell", "shell (block)" ]
+
 # Open-with rules use Yazi's [opener] and [open] schema.
 [opener]
 myedit = { run = "nvim %s", desc = "Edit with Neovim", block = true }
