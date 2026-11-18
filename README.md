@@ -514,7 +514,7 @@ was written by **Big Pickle** in OpenCode, because I'm broke. <3
 
 My role was setting the direction and testing the result. Please read this as
 an AI-coded project with a human at the wheel, not as hand-written software.
-If something slipped past us, an issue is very welcome.
+If there's a problem, an issue is very welcome.
 
 ## Acknowledgements
 
