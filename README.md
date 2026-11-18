@@ -32,11 +32,15 @@ starts with the owner linemode, and `-J` keeps the cursor on an entry after
 toggling its selection. `-b <key>` starts in a bookmark (an `NNN_BMS` key or a
 name in nnn's bookmarks directory); a path argument takes precedence. `-Q`
 skips the warning about running tasks on quit, and `-o` makes `l`/`→` open
-only directories, so files open with Enter alone. Sessions work like nnn's:
-`-s <name>` loads a saved session (`@` is the last session) and `-S` saves the
-current tabs on exit, defaulting to `@`. Loading a named session first stores
-the previous state in `@`. Sessions live under `<config>/sessions`. Inside rnn,
-`t S` opens nnn's session menu (`s` save, `l` load, `r` restore `@`).
+only directories, so files open with Enter alone. `-n` starts in nnn's
+type-to-nav mode (persistent filtering; Enter opens the match), `-A` disables
+auto-entering a lone matching directory, and `-R` is accepted for nnn
+compatibility even though rnn never rolls over at the list edges. Sessions
+work like nnn's: `-s <name>` loads a saved session (`@` is the last session)
+and `-S` saves the current tabs on exit, defaulting to `@`. Loading a named
+session first stores the previous state in `@`. Sessions live under
+`<config>/sessions`. Inside rnn, `t S` opens nnn's session menu (`s` save,
+`l` load, `r` restore `@`).
 
 ## Quitting and the current directory
 

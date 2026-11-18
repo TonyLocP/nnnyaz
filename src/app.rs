@@ -866,6 +866,10 @@ pub struct App {
     confirm_quit: bool,
     /// `-o`: `Action::Enter` only descends into directories.
     open_on_enter_only: bool,
+    /// `-n`: nnn's type-to-nav (persistent filter) behavior.
+    type_to_nav: bool,
+    /// `-A`: disable type-to-nav directory auto-entry.
+    type_to_nav_autoenter: bool,
     /// Set when picker mode chooses an entry; the run loop exits at the next
     /// opportunity.
     quit: bool,
@@ -2289,6 +2293,10 @@ struct Cli {
     session: Option<String>,
     /// `-S`: save the session on exit.
     persistent_session: bool,
+    /// `-n`: start in type-to-nav mode (nnn's persistent filter mode).
+    type_to_nav: bool,
+    /// `-A`: do not auto-enter a directory when the filter matches only it.
+    no_autoenter: bool,
 }
 
 /// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
@@ -2351,6 +2359,9 @@ Options:
   -b <KEY>, --bookmark <KEY> Start in a bookmark (ignored if PATH is given)
   -Q, --no-confirm-quit      Quit without warning about running tasks
   -o, --open-on-enter        Only Enter opens files (l/→ just enter directories)
+  -n, --type-to-nav          Start in type-to-nav (persistent filter) mode
+  -A, --no-autoenter         Do not auto-enter a lone matching directory
+  -R, --no-rollover          Accepted for nnn compatibility (rnn never rolls over)
   -s <NAME>, --session <NAME> Load a session (@ is the last session)
   -S, --persistent-session   Save the session on exit
   -T <KEY>, --sort <KEY>     Sort order: a/d/s size, e extension, t time,
@@ -2402,6 +2413,13 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.no_confirm_quit = true;
         } else if text == "-o" || text == "--open-on-enter" {
             cli.open_on_enter_only = true;
+        } else if text == "-n" || text == "--type-to-nav" {
+            cli.type_to_nav = true;
+        } else if text == "-A" || text == "--no-autoenter" {
+            cli.no_autoenter = true;
+        } else if text == "-R" || text == "--no-rollover" {
+            // rnn never rolls over at the edges (Yazi behavior); accept nnn's
+            // flag so scripts written for nnn keep working.
         } else if text == "-S" || text == "--persistent-session" {
             cli.persistent_session = true;
         } else if text == "-s" || text == "--session" {
@@ -2789,6 +2807,8 @@ impl App {
             quit_warned: false,
             confirm_quit: !cli.no_confirm_quit,
             open_on_enter_only: cli.open_on_enter_only,
+            type_to_nav: cli.type_to_nav,
+            type_to_nav_autoenter: !cli.no_autoenter,
             quit: false,
             cwd_file,
             chooser_file,
@@ -2825,6 +2845,9 @@ impl App {
         } else {
             None
         };
+        if cli.type_to_nav {
+            app.mode = Mode::Filter;
+        }
         Ok(app)
     }
 
@@ -3426,6 +3449,20 @@ impl App {
         let n = (i + d).clamp(0, self.entries.len() as isize - 1);
         self.state.select(Some(n as usize));
         self.apply_visual();
+    }
+
+    /// nnn's type-to-nav autoenter: when the filter leaves exactly one
+    /// directory, descend into it and keep filtering.
+    fn type_to_nav_auto_enter(&mut self) {
+        if !self.type_to_nav
+            || !self.type_to_nav_autoenter
+            || self.entries.len() != 1
+            || !self.entries[0].is_dir
+        {
+            return;
+        }
+        self.enter();
+        self.mode = Mode::Filter;
     }
 
     fn select_all(&mut self) {
@@ -5361,14 +5398,28 @@ impl App {
                         self.mode = Mode::Normal;
                         self.reload();
                     }
-                    KeyCode::Enter => self.mode = Mode::Normal,
+                    KeyCode::Enter => {
+                        if self.type_to_nav {
+                            self.enter();
+                            // nnn keeps type-to-nav active after opening.
+                            self.mode = Mode::Filter;
+                        } else {
+                            self.mode = Mode::Normal;
+                        }
+                    }
                     KeyCode::Backspace => {
-                        self.filter.pop();
-                        self.reload();
+                        if self.type_to_nav && self.filter.is_empty() {
+                            self.mode = Mode::Normal;
+                        } else {
+                            self.filter.pop();
+                            self.reload();
+                            self.type_to_nav_auto_enter();
+                        }
                     }
                     KeyCode::Char(c) => {
                         self.filter.push(c);
                         self.reload();
+                        self.type_to_nav_auto_enter();
                     }
                     _ => {}
                 }
@@ -8183,6 +8234,12 @@ mod tests {
                 .unwrap()
                 .open_on_enter_only
         );
+        assert!(parse_cli(args(&["-n"])).unwrap().type_to_nav);
+        assert!(parse_cli(args(&["--type-to-nav"])).unwrap().type_to_nav);
+        assert!(parse_cli(args(&["-A"])).unwrap().no_autoenter);
+        assert!(parse_cli(args(&["--no-autoenter"])).unwrap().no_autoenter);
+        assert!(parse_cli(args(&["-R"])).is_ok());
+        assert!(parse_cli(args(&["--no-rollover"])).is_ok());
         assert_eq!(
             parse_cli(args(&["-s", "work"])).unwrap().session.as_deref(),
             Some("work")

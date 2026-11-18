@@ -168,11 +168,14 @@ are candidates, roughly in priority order.
       first, matching nnn.
 - [x] **Session manager** — `t S` opens nnn's `'s'ave/'l'oad/'r'estore?`
       prompt; `r` reloads `@` without saving the current state over it.
+- [x] **nnn's `-n`, `-A`, and `-R`** — `-n` starts in type-to-nav (persistent
+      filtering, Enter opens the match), `-A` disables auto-entering a lone
+      matching directory, and `-R` is accepted for compatibility because rnn
+      never rolls over at the list edges (Yazi behavior).
 
 ## Next
 
-- [ ] Consider nnn's `-R` (no rollover at list edges) and `-n`
-      (type-to-nav).
+- [ ] Consider nnn's `-g` (regex filter) and `-z` (fuzzy filter).
 
 ## Local setup (outside this repo)
 
