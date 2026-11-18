@@ -117,15 +117,18 @@ are candidates, roughly in priority order.
       (and a plain boolean). When enabled, long lines wrap instead of being
       clipped at the pane edge, and preview scrolling still counts logical
       lines like Yazi's spot.
+- [x] **Yazi-style spot** — `F` fills the screen with the preview. `j`/`k`
+      scroll it, `h`/`l` swipe to the previous/next file, `c c` copies the
+      hovered path, and `Esc`, `Tab`, or `Ctrl+c` closes it. Yazi keymaps that
+      bind `spot` now open this view (Yazi's `<Tab>`), while rnn's `<Tab>`
+      keeps opening the metadata info overlay. The spot reuses the preview
+      worker, so images, video thumbnails, PDFs, and text all work.
 
 ## Next
 
 - [ ] Consider nnn's `-i` (info panel). rnn's info view is a full-screen
       overlay rather than nnn's info bar, so `-i` needs a decision before it is
       worth adding.
-- [ ] Consider a Yazi-style `spot` full-screen preview. rnn currently uses
-      `<Tab>` for nnn's info panel, so this needs a key that does not collide
-      with the existing nnn/Yazi bindings.
 
 ## Local setup (outside this repo)
 

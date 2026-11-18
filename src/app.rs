@@ -462,6 +462,7 @@ enum Mode {
     Prompt(Prompt),
     Help,
     Info,
+    Spot,
     OpenWith,
     Tasks,
 }
@@ -4630,6 +4631,17 @@ impl App {
         self.list_dirty = true;
     }
 
+    /// Enter the Yazi-style spot: the preview fills the screen and `j`/`k`
+    /// scroll it while `h`/`l` swipe through neighbouring files. Metadata stays
+    /// available with `<Tab>` (the info overlay).
+    fn open_spot(&mut self) {
+        if self.current().is_none() {
+            return;
+        }
+        self.preview.set_preview_seek(0);
+        self.mode = Mode::Spot;
+    }
+
     /// Build the `Tab` overlay for the hovered entry.
     fn open_info(&mut self) {
         let Some(e) = self.current().cloned() else {
@@ -4799,6 +4811,14 @@ impl App {
     fn info_swipe(&mut self, delta: isize) {
         self.move_by(delta);
         self.open_info();
+    }
+
+    fn copy_spot_target(&mut self) {
+        let Some(entry) = self.current() else {
+            return;
+        };
+        let text = format!("{}\n", entry.path.display());
+        self.clipboard_set(text, "text/plain", "copied path".into());
     }
 
     fn info_copy_cell(&mut self) {
@@ -4999,7 +5019,7 @@ impl App {
                 self.handle_open_with_key(key, term);
                 return Ok(false);
             }
-            Mode::Info | Mode::Tasks | Mode::Normal => {}
+            Mode::Info | Mode::Spot | Mode::Tasks | Mode::Normal => {}
         }
 
         // Ctrl+c is a safety net: it always cancels or quits, even when the
@@ -5007,6 +5027,7 @@ impl App {
         if ctrl_c {
             match self.mode {
                 Mode::Info => self.close_info(),
+                Mode::Spot => self.mode = Mode::Normal,
                 Mode::Tasks => self.mode = Mode::Normal,
                 Mode::Normal => {
                     if self.tabs.len() > 1 {
@@ -5034,7 +5055,7 @@ impl App {
         let ctx = match self.mode {
             Mode::Normal => Context::Mgr,
             Mode::Tasks => Context::Tasks,
-            Mode::Info => Context::Info,
+            Mode::Info | Mode::Spot => Context::Info,
             _ => return Ok(false),
         };
         if let Some(quit) = self.handle_mapped_key(ctx, key, term)? {
@@ -5138,9 +5159,14 @@ impl App {
             Action::Close => match self.mode {
                 Mode::Tasks => self.mode = Mode::Normal,
                 Mode::Info => self.close_info(),
+                Mode::Spot => self.mode = Mode::Normal,
                 _ => {}
             },
             Action::Escape => {
+                if self.mode == Mode::Spot {
+                    self.mode = Mode::Normal;
+                    return Ok(false);
+                }
                 if self.visual.is_some() {
                     self.visual = None;
                 } else if !self.filter.is_empty() {
@@ -5159,9 +5185,11 @@ impl App {
                 self.mode = Mode::Tasks;
             }
             Action::Info => self.open_info(),
+            Action::Spot => self.open_spot(),
             Action::Move(n) => match self.mode {
                 Mode::Tasks => self.task_move(n),
                 Mode::Info => self.info_move(n),
+                Mode::Spot => self.seek_preview(n),
                 _ => self.move_by(n),
             },
             Action::HalfPage(n) => self.move_by((self.page / 2) as isize * n as isize),
@@ -5169,11 +5197,13 @@ impl App {
             Action::Top => match self.mode {
                 Mode::Tasks => self.task_cursor = 0,
                 Mode::Info => self.info_move(isize::MIN / 2),
+                Mode::Spot => self.seek_preview(isize::MIN / 2),
                 _ => self.select_top(),
             },
             Action::Bottom => match self.mode {
                 Mode::Tasks => self.task_cursor = self.tasks.len().saturating_sub(1),
                 Mode::Info => self.info_move(isize::MAX / 2),
+                Mode::Spot => self.seek_preview(isize::MAX / 2),
                 _ => self.select_bottom(),
             },
             Action::Parent => self.go_parent(),
@@ -5355,13 +5385,24 @@ impl App {
             Action::TaskBottom => self.task_cursor = self.tasks.len().saturating_sub(1),
             Action::TaskInspect => self.inspect_task(),
             Action::TaskCancel => self.cancel_task(),
-            Action::InfoMove(delta) => self.info_move(delta),
+            Action::InfoMove(delta) => match self.mode {
+                Mode::Spot => self.seek_preview(delta),
+                _ => self.info_move(delta),
+            },
             Action::InfoSwipe(delta) => {
-                if !self.info_from_tasks {
+                if self.mode == Mode::Spot {
+                    self.move_by(delta);
+                } else if !self.info_from_tasks {
                     self.info_swipe(delta);
                 }
             }
-            Action::InfoCopyCell => self.info_copy_cell(),
+            Action::InfoCopyCell => {
+                if self.mode == Mode::Spot {
+                    self.copy_spot_target();
+                } else {
+                    self.info_copy_cell();
+                }
+            }
             Action::Custom(name) => {
                 let result = self
                     .config
@@ -5529,68 +5570,79 @@ impl App {
 
     fn draw(&mut self, f: &mut Frame) {
         let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
-        let cols = if self.show_preview {
-            let (list_pct, preview_pct) = ratio_percentages(self.config.mgr.ratio);
-            Layout::horizontal([
-                Constraint::Percentage(list_pct),
-                Constraint::Percentage(preview_pct),
-            ])
-            .split(rows[0])
-        } else {
-            Layout::horizontal([Constraint::Percentage(100)]).split(rows[0])
-        };
         self.page = rows[0].height.saturating_sub(1) as usize;
 
-        // file list
-        if self.list_dirty || self.list_width != cols[0].width {
-            self.rebuild_list(cols[0].width);
-        }
-        let title_area = Rect::new(
-            cols[0].x,
-            cols[0].y,
-            cols[0].width.saturating_sub(1),
-            cols[0].height.min(1),
-        );
-        let list_area = Rect::new(
-            cols[0].x,
-            cols[0].y + 1,
-            cols[0].width,
-            cols[0].height.saturating_sub(1),
-        );
-        self.title_area = title_area;
-        self.list_area = list_area;
-        self.preview_area = if self.show_preview {
-            cols.get(1).copied().unwrap_or_default()
+        if self.mode == Mode::Spot {
+            // Spot fills the screen with the preview; the list and tab bar are
+            // hidden and do not receive mouse hit-tests.
+            self.title_area = Rect::default();
+            self.list_area = Rect::default();
+            self.preview_area = rows[0];
+            self.tab_spans.clear();
+            self.draw_preview(f, rows[0]);
         } else {
-            Rect::default()
-        };
-
-        let mut tab_spans = Vec::with_capacity(self.tabs.len());
-        let mut spans = Vec::with_capacity(self.tabs.len());
-        let mut x = title_area.x;
-        for i in 0..self.tabs.len() {
-            let name = self.tab_label(i);
-            let style = if i == self.tab_index {
-                self.config.theme.tab_active
+            let cols = if self.show_preview {
+                let (list_pct, preview_pct) = ratio_percentages(self.config.mgr.ratio);
+                Layout::horizontal([
+                    Constraint::Percentage(list_pct),
+                    Constraint::Percentage(preview_pct),
+                ])
+                .split(rows[0])
             } else {
-                self.config.theme.tab_inactive
+                Layout::horizontal([Constraint::Percentage(100)]).split(rows[0])
             };
-            let span = Span::styled(format!(" {}:{} ", i + 1, name), style);
-            let width = span.width() as u16;
-            tab_spans.push((x, x.saturating_add(width)));
-            x = x.saturating_add(width);
-            spans.push(span);
-        }
-        self.tab_spans = tab_spans;
-        f.render_widget(Paragraph::new(Line::from(spans)), title_area);
-        self.apply_scrolloff(list_area.height as usize);
-        f.render_stateful_widget(&self.list, list_area, &mut self.state);
 
-        // preview pane
-        if self.show_preview {
-            self.draw_preview(f, cols[1]);
-        } else {
-            self.preview.set_target(None);
+            // file list
+            if self.list_dirty || self.list_width != cols[0].width {
+                self.rebuild_list(cols[0].width);
+            }
+            let title_area = Rect::new(
+                cols[0].x,
+                cols[0].y,
+                cols[0].width.saturating_sub(1),
+                cols[0].height.min(1),
+            );
+            let list_area = Rect::new(
+                cols[0].x,
+                cols[0].y + 1,
+                cols[0].width,
+                cols[0].height.saturating_sub(1),
+            );
+            self.title_area = title_area;
+            self.list_area = list_area;
+            self.preview_area = if self.show_preview {
+                cols.get(1).copied().unwrap_or_default()
+            } else {
+                Rect::default()
+            };
+
+            let mut tab_spans = Vec::with_capacity(self.tabs.len());
+            let mut spans = Vec::with_capacity(self.tabs.len());
+            let mut x = title_area.x;
+            for i in 0..self.tabs.len() {
+                let name = self.tab_label(i);
+                let style = if i == self.tab_index {
+                    self.config.theme.tab_active
+                } else {
+                    self.config.theme.tab_inactive
+                };
+                let span = Span::styled(format!(" {}:{} ", i + 1, name), style);
+                let width = span.width() as u16;
+                tab_spans.push((x, x.saturating_add(width)));
+                x = x.saturating_add(width);
+                spans.push(span);
+            }
+            self.tab_spans = tab_spans;
+            f.render_widget(Paragraph::new(Line::from(spans)), title_area);
+            self.apply_scrolloff(list_area.height as usize);
+            f.render_stateful_widget(&self.list, list_area, &mut self.state);
+
+            // preview pane
+            if self.show_preview {
+                self.draw_preview(f, cols[1]);
+            } else {
+                self.preview.set_target(None);
+            }
         }
 
         // status line
@@ -5623,6 +5675,7 @@ impl App {
                     "info — j/k scroll · h/l swipe · c c copy · Esc close".into()
                 }
             }
+            Mode::Spot => "spot — j/k scroll · h/l swipe · c c copy path · Esc close".into(),
             Mode::Tasks => "tasks — j/k move · Enter inspect · x cancel · Esc/w close".into(),
             Mode::OpenWith => "open with — j/k move · Enter open · Esc cancel".into(),
             Mode::Prompt(Prompt::Delete) => match self.pending_delete {
@@ -5799,7 +5852,7 @@ impl App {
         }
         let ctx = match self.mode {
             Mode::Tasks => Context::Tasks,
-            Mode::Info => Context::Info,
+            Mode::Info | Mode::Spot => Context::Info,
             _ => Context::Mgr,
         };
         let root = self.config.keymap.node(ctx);
@@ -6349,6 +6402,7 @@ impl App {
             "1-9 [ ]     switch tab",
             "{ / }       swap tab",
             "Tab         info (j/k h/l c c)",
+            "F           full-screen preview",
             "Ctrl+c      close tab / quit",
         ];
         let right = [

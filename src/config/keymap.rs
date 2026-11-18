@@ -647,6 +647,7 @@ impl Default for Keymap {
             ("S", "search rg", None),
             ("w", "tasks", None),
             ("<Tab>", "info", None),
+            ("F", "spot", Some("full-screen preview")),
             ("1", "switch_tab 1", None),
             ("2", "switch_tab 2", None),
             ("3", "switch_tab 3", None),
@@ -847,6 +848,14 @@ mod tests {
         assert_eq!(
             km.mgr.walk(&parse_seq("Z").unwrap()).unwrap().action(),
             Some(&Action::Zoxide)
+        );
+        assert_eq!(
+            km.mgr.walk(&parse_seq("F").unwrap()).unwrap().action(),
+            Some(&Action::Spot)
+        );
+        assert_eq!(
+            km.mgr.walk(&parse_seq("<Tab>").unwrap()).unwrap().action(),
+            Some(&Action::Info)
         );
         assert!(km
             .mgr

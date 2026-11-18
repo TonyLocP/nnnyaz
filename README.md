@@ -152,6 +152,11 @@ photos from phones and cameras are shown upright. Embedded non-sRGB ICC
 profiles (Display P3, Adobe RGB, grayscale gamma curves, …) are converted to
 sRGB before display; CMYK profiles are left to the decoder, matching Yazi.
 
+`F` opens a Yazi-style spot: the preview fills the screen, `j`/`k` scroll it,
+`h`/`l` swipe to the previous/next file, `c c` copies the hovered path, and
+`Esc`, `Tab`, or `Ctrl+c` closes it. `<Tab>` still opens the metadata info
+overlay.
+
 ## Configuration
 
 rnn reads configuration from the first of:
@@ -235,7 +240,9 @@ context, matching Yazi.
 ### `keymap.toml`
 
 Bindings map a key sequence to an action command. Contexts are `mgr`, `tasks`,
-and `info` (`spot` is accepted as an alias for `info`).
+and `info` (Yazi's `spot` context is accepted as an alias for `info`, so Yazi's
+spot bindings also drive the `F` full-screen view). The `spot` action opens
+that view.
 
 ```toml
 [mgr]
