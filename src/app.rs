@@ -100,6 +100,7 @@ enum Prompt {
     Session,
     SessionSave,
     SessionLoad,
+    SessionDelete,
 }
 
 impl Prompt {
@@ -931,6 +932,8 @@ pub struct App {
     task_next_id: usize,
     task_cursor: usize,
     pending_delete: Option<DeleteMode>,
+    /// Session name awaiting a `y` confirmation in the load list.
+    pending_session_delete: Option<String>,
     quit_warned: bool,
     /// `-Q`: quit without the running-task warning.
     confirm_quit: bool,
@@ -2959,6 +2962,7 @@ impl App {
             task_next_id: 1,
             task_cursor: 0,
             pending_delete: None,
+            pending_session_delete: None,
             quit_warned: false,
             confirm_quit: !cli.no_confirm_quit,
             open_on_enter_only: cli.open_on_enter_only,
@@ -3141,6 +3145,36 @@ impl App {
         self.input.clear();
         self.completions.clear();
         self.mode = Mode::Prompt(Prompt::Session);
+    }
+
+    /// `Ctrl+d`/`Delete` in the session list: ask before removing the
+    /// highlighted session file.
+    fn start_session_delete(&mut self) {
+        let Some(name) = self
+            .completions
+            .get(self.completion_index)
+            .map(|c| c.display.clone())
+        else {
+            return;
+        };
+        self.pending_session_delete = Some(name);
+        self.mode = Mode::Prompt(Prompt::SessionDelete);
+    }
+
+    /// The user answered `y` to the session delete confirmation. Returns to
+    /// the list so the remaining sessions stay visible.
+    fn confirm_session_delete(&mut self) {
+        let Some(name) = self.pending_session_delete.take() else {
+            return;
+        };
+        let result = session_path(&name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "invalid session name"))
+            .and_then(fs::remove_file);
+        self.mode = Mode::Prompt(Prompt::SessionLoad);
+        self.refresh_completions();
+        if let Err(e) = result {
+            self.status = format!("session '{name}': {e}");
+        }
     }
 
     fn restore_session(&mut self, file: SessionFile) {
@@ -4856,7 +4890,8 @@ impl App {
             | Prompt::BookmarkName
             | Prompt::Session
             | Prompt::SessionSave
-            | Prompt::SessionLoad => return,
+            | Prompt::SessionLoad
+            | Prompt::SessionDelete => return,
             Prompt::TabRename => return,
         };
         match r {
@@ -5787,6 +5822,7 @@ impl App {
                     self.input.clear();
                     self.completions.clear();
                     self.pending_delete = None;
+                    self.pending_session_delete = None;
                     return Ok(false);
                 }
                 if p == Prompt::Delete {
@@ -5796,6 +5832,16 @@ impl App {
                         self.pending_delete = None;
                     }
                     self.mode = Mode::Normal;
+                    return Ok(false);
+                }
+                if p == Prompt::SessionDelete {
+                    if key.code == KeyCode::Char('y') {
+                        self.confirm_session_delete();
+                    } else {
+                        self.pending_session_delete = None;
+                        self.mode = Mode::Prompt(Prompt::SessionLoad);
+                        self.refresh_completions();
+                    }
                     return Ok(false);
                 }
                 if p == Prompt::Session {
@@ -5859,6 +5905,21 @@ impl App {
                     KeyCode::Right => self.input.move_right(),
                     KeyCode::Home => self.input.move_home(),
                     KeyCode::End => self.input.move_end(),
+                    KeyCode::Char('j')
+                        if !ctrl && p == Prompt::SessionLoad && self.input.as_str().is_empty() =>
+                    {
+                        self.move_completion(1)
+                    }
+                    KeyCode::Char('k')
+                        if !ctrl && p == Prompt::SessionLoad && self.input.as_str().is_empty() =>
+                    {
+                        self.move_completion(-1)
+                    }
+                    KeyCode::Char('d')
+                        if ctrl && p == Prompt::SessionLoad && !self.completions.is_empty() =>
+                    {
+                        self.start_session_delete()
+                    }
                     KeyCode::Char(c) if ctrl => apply_ctrl_edit(&mut self.input, c, shift),
                     KeyCode::Char(c) if !ctrl => {
                         self.input.insert(c);
@@ -6596,6 +6657,10 @@ impl App {
                     None => "delete? (y/N)".into(),
                 }
             }
+            Mode::Prompt(Prompt::SessionDelete) => match &self.pending_session_delete {
+                Some(name) => format!("delete session '{name}'? (y/N)"),
+                None => "delete session? (y/N)".into(),
+            },
             Mode::Prompt(p) => {
                 format!("{}{}", self.prompt_prefix(p), self.input.as_str())
             }
@@ -6718,13 +6783,13 @@ impl App {
             }
         }
         let status_style = match self.mode {
-            Mode::Prompt(Prompt::Delete) => self.config.theme.status_error,
+            Mode::Prompt(Prompt::Delete | Prompt::SessionDelete) => self.config.theme.status_error,
             Mode::Prompt(_) | Mode::Filter | Mode::Find => self.config.theme.status_info,
             Mode::Normal if !self.status.is_empty() => self.config.theme.status_info,
             _ => self.config.theme.status,
         };
         match self.mode {
-            Mode::Prompt(Prompt::Delete) => {
+            Mode::Prompt(Prompt::Delete | Prompt::SessionDelete) => {
                 f.render_widget(Paragraph::new(text).style(status_style), rows[1]);
             }
             Mode::Prompt(p) => self.draw_prompt_status(f, rows[1], p),
@@ -7166,6 +7231,7 @@ impl App {
             Prompt::BookmarkName => "bookmark name: ".into(),
             Prompt::Session => "'s'ave/'l'oad/'r'estore? ".into(),
             Prompt::SessionSave | Prompt::SessionLoad => "session name: ".into(),
+            Prompt::SessionDelete => String::new(),
             Prompt::Delete => String::new(),
         }
     }
@@ -7194,7 +7260,7 @@ impl App {
                 .into_iter()
                 .find(|hint| Span::raw(*hint).width() + 16 <= avail)
         } else if p == Prompt::SessionLoad {
-            (!self.completions.is_empty()).then_some("↑/↓ select, Enter load")
+            (!self.completions.is_empty()).then_some("j/k select · Enter load · Ctrl+d delete")
         } else if p == Prompt::Bookmark {
             bookmark_hint.as_deref()
         } else {
