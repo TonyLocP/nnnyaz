@@ -722,6 +722,7 @@ impl Default for Keymap {
             ("t n", "new_tab home", Some("new tab at home")),
             ("t r", "rename_tab", Some("rename tab")),
             ("t c", "close_tab", Some("close tab")),
+            ("t S", "session", Some("save/load session")),
             ("t [", "next_tab -1", Some("previous tab")),
             ("t ]", "next_tab 1", Some("next tab")),
         ];

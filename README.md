@@ -35,7 +35,8 @@ skips the warning about running tasks on quit, and `-o` makes `l`/`→` open
 only directories, so files open with Enter alone. Sessions work like nnn's:
 `-s <name>` loads a saved session (`@` is the last session) and `-S` saves the
 current tabs on exit, defaulting to `@`. Loading a named session first stores
-the previous state in `@`. Sessions live under `<config>/sessions`.
+the previous state in `@`. Sessions live under `<config>/sessions`. Inside rnn,
+`t S` opens nnn's session menu (`s` save, `l` load, `r` restore `@`).
 
 ## Quitting and the current directory
 

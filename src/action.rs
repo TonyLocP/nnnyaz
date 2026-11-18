@@ -18,6 +18,7 @@ pub enum Action {
     Tasks,
     Info,
     Spot,
+    Session,
     Nop,
 
     // navigation
@@ -196,6 +197,7 @@ impl Action {
             Action::Tasks => "tasks",
             Action::Info => "info",
             Action::Spot => "spot",
+            Action::Session => "session",
             Action::Nop => "nop",
             Action::Move(_) => "move",
             Action::HalfPage(_) => "half_page",
@@ -310,6 +312,7 @@ impl Action {
             "tasks" | "tasks:show" => Action::Tasks,
             "info" => Action::Info,
             "spot" => Action::Spot,
+            "session" | "sessions" => Action::Session,
             "nop" => Action::Nop,
             "move" => Action::Move(num(0)?),
             "arrow" => match args.first().copied() {
@@ -626,6 +629,7 @@ mod tests {
         assert_eq!(parse("tasks:show").unwrap(), Action::Tasks);
         assert_eq!(parse("info").unwrap(), Action::Info);
         assert_eq!(parse("spot").unwrap(), Action::Spot);
+        assert_eq!(parse("session").unwrap(), Action::Session);
         assert_eq!(parse("inspect").unwrap(), Action::TaskInspect);
         assert_eq!(parse("swipe -1").unwrap(), Action::InfoSwipe(-1));
         assert_eq!(parse("swipe prev").unwrap(), Action::InfoSwipe(-1));

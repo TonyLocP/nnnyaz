@@ -96,6 +96,10 @@ enum Prompt {
     TabRename,
     Bookmark,
     BookmarkName,
+    /// nnn's session manager: press `s`, `l`, or `r`.
+    Session,
+    SessionSave,
+    SessionLoad,
 }
 
 /// A pending mark operation waiting for its single-character key.
@@ -2814,14 +2818,7 @@ impl App {
             .clone()
             .or_else(|| cli.persistent_session.then(|| "@".to_string()));
         if let Some(name) = session_name.as_deref() {
-            if name != "@" {
-                // Loading a named session preserves the previous state in `@`.
-                let _ = app.save_session("@");
-            }
-            match load_session(name) {
-                Some(file) => app.restore_session(file),
-                None => app.status = format!("session '{name}' not found"),
-            }
+            app.load_session_by_name(name);
         }
         app.session_name = if cli.persistent_session {
             session_name
@@ -2946,6 +2943,25 @@ impl App {
             return;
         };
         let _ = self.save_session(&name);
+    }
+
+    /// Load a session interactively or at startup. Loading a named session
+    /// preserves the current state in `@` first, like nnn; restoring `@`
+    /// itself skips that save.
+    fn load_session_by_name(&mut self, name: &str) {
+        if name != "@" {
+            let _ = self.save_session("@");
+        }
+        match load_session(name) {
+            Some(file) => self.restore_session(file),
+            None => self.status = format!("session '{name}' not found"),
+        }
+    }
+
+    fn start_session_menu(&mut self) {
+        self.input.clear();
+        self.completions.clear();
+        self.mode = Mode::Prompt(Prompt::Session);
     }
 
     fn restore_session(&mut self, file: SessionFile) {
@@ -4439,6 +4455,21 @@ impl App {
             return;
         }
 
+        if matches!(p, Prompt::SessionSave | Prompt::SessionLoad) {
+            if name.is_empty() {
+                return;
+            }
+            if p == Prompt::SessionSave {
+                self.status = match self.save_session(&name) {
+                    Ok(()) => format!("session '{name}' saved"),
+                    Err(e) => format!("session '{name}': {e}"),
+                };
+            } else {
+                self.load_session_by_name(&name);
+            }
+            return;
+        }
+
         if name.is_empty() {
             return;
         }
@@ -4493,7 +4524,10 @@ impl App {
             | Prompt::SearchRg
             | Prompt::Shell
             | Prompt::Bookmark
-            | Prompt::BookmarkName => return,
+            | Prompt::BookmarkName
+            | Prompt::Session
+            | Prompt::SessionSave
+            | Prompt::SessionLoad => return,
             Prompt::TabRename => return,
         };
         match r {
@@ -5409,6 +5443,24 @@ impl App {
                     self.mode = Mode::Normal;
                     return Ok(false);
                 }
+                if p == Prompt::Session {
+                    match key.code {
+                        KeyCode::Char('s') => {
+                            self.input.clear();
+                            self.mode = Mode::Prompt(Prompt::SessionSave);
+                        }
+                        KeyCode::Char('l') => {
+                            self.input.clear();
+                            self.mode = Mode::Prompt(Prompt::SessionLoad);
+                        }
+                        KeyCode::Char('r') => {
+                            self.mode = Mode::Normal;
+                            self.load_session_by_name("@");
+                        }
+                        _ => self.mode = Mode::Normal,
+                    }
+                    return Ok(false);
+                }
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                 let shift = key.modifiers.contains(KeyModifiers::SHIFT);
                 match key.code {
@@ -5639,6 +5691,7 @@ impl App {
             }
             Action::Info => self.open_info(),
             Action::Spot => self.open_spot(),
+            Action::Session => self.start_session_menu(),
             Action::Move(n) => match self.mode {
                 Mode::Tasks => self.task_move(n),
                 Mode::Info => self.info_move(n),
@@ -6751,6 +6804,8 @@ impl App {
             Prompt::TabRename => "rename tab: ".into(),
             Prompt::Bookmark => "bookmark: ".into(),
             Prompt::BookmarkName => "bookmark name: ".into(),
+            Prompt::Session => "'s'ave/'l'oad/'r'estore? ".into(),
+            Prompt::SessionSave | Prompt::SessionLoad => "session name: ".into(),
             Prompt::Delete => String::new(),
         }
     }

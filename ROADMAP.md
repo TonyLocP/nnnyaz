@@ -166,11 +166,13 @@ are candidates, roughly in priority order.
       cursor, filter, hidden files, sort, linemode, selections, and history are
       restored. Loading a named session stores the previous state in `@`
       first, matching nnn.
+- [x] **Session manager** — `t S` opens nnn's `'s'ave/'l'oad/'r'estore?`
+      prompt; `r` reloads `@` without saving the current state over it.
 
 ## Next
 
-- [ ] Consider nnn's session manager (`s` in nnn; a keybinding here) to save
-      or load sessions without restarting.
+- [ ] Consider nnn's `-R` (no rollover at list edges) and `-n`
+      (type-to-nav).
 
 ## Local setup (outside this repo)
 
