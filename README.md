@@ -35,7 +35,11 @@ skips the warning about running tasks on quit, and `-o` makes `l`/`→` open
 only directories, so files open with Enter alone. `-n` starts in nnn's
 type-to-nav mode (persistent filtering; Enter opens the match), `-A` disables
 auto-entering a lone matching directory, and `-R` is accepted for nnn
-compatibility even though rnn never rolls over at the list edges. Sessions
+compatibility even though rnn never rolls over at the list edges. `-g` and
+`-z` select regex and fuzzy filtering instead of the default smart-case
+substring match. While the filter prompt is open, `/` cycles string → fuzzy →
+regex (matching nnn) and `:` cycles smart case → case-insensitive →
+case-sensitive; the active mode is shown next to the filter text. Sessions
 work like nnn's: `-s <name>` loads a saved session (`@` is the last session)
 and `-S` saves the current tabs on exit, defaulting to `@`. Loading a named
 session first stores the previous state in `@`. Sessions live under

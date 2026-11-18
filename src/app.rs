@@ -482,6 +482,65 @@ enum Mode {
     Tasks,
 }
 
+/// nnn's three filter styles (`-g` regex, `-z` fuzzy, default substring).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilterMode {
+    String,
+    Fuzzy,
+    Regex,
+}
+
+impl FilterMode {
+    fn label(self) -> &'static str {
+        match self {
+            FilterMode::String => "str",
+            FilterMode::Fuzzy => "fzy",
+            FilterMode::Regex => "reg",
+        }
+    }
+
+    /// nnn cycles string → fuzzy → regex with `/` inside the filter prompt.
+    fn cycle(self) -> Self {
+        match self {
+            FilterMode::String => FilterMode::Fuzzy,
+            FilterMode::Fuzzy => FilterMode::Regex,
+            FilterMode::Regex => FilterMode::String,
+        }
+    }
+}
+
+/// Case handling for filters. Smart case keeps rnn's Yazi-style substring
+/// behavior (an uppercase needle is case-sensitive); `:` cycles through the
+/// explicit nnn modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilterCase {
+    Smart,
+    Insensitive,
+    Sensitive,
+}
+
+impl FilterCase {
+    fn label(self) -> &'static str {
+        match self {
+            FilterCase::Smart => "sc",
+            FilterCase::Insensitive => "ic",
+            FilterCase::Sensitive => "noic",
+        }
+    }
+
+    fn cycle(self) -> Self {
+        match self {
+            FilterCase::Smart => FilterCase::Insensitive,
+            FilterCase::Insensitive => FilterCase::Sensitive,
+            FilterCase::Sensitive => FilterCase::Smart,
+        }
+    }
+
+    fn sensitive(self) -> bool {
+        self == FilterCase::Sensitive
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Linemode {
     Size,
@@ -807,6 +866,10 @@ pub struct App {
     entries: Vec<Entry>,
     state: ListState,
     filter: String,
+    /// `-g`/`-z` or `/` inside the filter prompt select the filter style.
+    filter_mode: FilterMode,
+    /// `:` inside the filter prompt cycles smart/explicit case handling.
+    filter_case: FilterCase,
     show_hidden: bool,
     show_preview: bool,
     /// `-i`: append `file -b`'s description to the status line.
@@ -1055,6 +1118,59 @@ fn smart_contains(haystack: &str, needle: &str) -> bool {
     } else {
         haystack.to_lowercase().contains(&needle.to_lowercase())
     }
+}
+
+/// nnn's fuzzy normalization: spaces, underscores, and hyphens compare equal.
+fn fuzzy_norm(c: char) -> char {
+    match c {
+        ' ' | '_' | '-' => ' ',
+        c => c,
+    }
+}
+
+/// Greedy fuzzy match returning nnn's score (lower is better) when every
+/// needle character appears in order. `None` means no match.
+fn fuzzy_score(haystack: &str, needle: &str, sensitive: bool) -> Option<i64> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let prepare = |s: &str| -> Vec<char> {
+        if sensitive {
+            s.chars().collect()
+        } else {
+            s.chars()
+                .flat_map(|c| c.to_lowercase())
+                .collect::<Vec<char>>()
+        }
+    };
+    let hay = prepare(haystack);
+    let pat = prepare(needle);
+    let mut positions = Vec::with_capacity(pat.len());
+    let mut p = 0;
+    for (i, c) in hay.iter().enumerate() {
+        if p < pat.len() && fuzzy_norm(*c) == fuzzy_norm(pat[p]) {
+            positions.push(i);
+            p += 1;
+        }
+    }
+    if p != pat.len() {
+        return None;
+    }
+    let first = positions[0];
+    let last = positions[positions.len() - 1];
+    let span = last - first + 1;
+    let gaps = span - pat.len();
+    let mut consec = 0;
+    let mut word_starts = 0;
+    for (i, pos) in positions.iter().enumerate() {
+        if i > 0 && *pos == positions[i - 1] + 1 {
+            consec += 1;
+        }
+        if *pos == 0 || fuzzy_norm(hay[pos - 1]) == ' ' {
+            word_starts += 1;
+        }
+    }
+    Some((gaps * 1000 + first * 100 + (span - consec) * 10) as i64 - word_starts as i64 * 5)
 }
 
 fn entry_for(path: PathBuf, name: String) -> Option<Entry> {
@@ -2297,6 +2413,10 @@ struct Cli {
     type_to_nav: bool,
     /// `-A`: do not auto-enter a directory when the filter matches only it.
     no_autoenter: bool,
+    /// `-g`: use regex matching for filters.
+    regex_filter: bool,
+    /// `-z`: use fuzzy matching for filters.
+    fuzzy_filter: bool,
 }
 
 /// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
@@ -2361,6 +2481,8 @@ Options:
   -o, --open-on-enter        Only Enter opens files (l/→ just enter directories)
   -n, --type-to-nav          Start in type-to-nav (persistent filter) mode
   -A, --no-autoenter         Do not auto-enter a lone matching directory
+  -g, --regex                Use regex filters (default: smart substring)
+  -z, --fuzzy                Use fuzzy filters
   -R, --no-rollover          Accepted for nnn compatibility (rnn never rolls over)
   -s <NAME>, --session <NAME> Load a session (@ is the last session)
   -S, --persistent-session   Save the session on exit
@@ -2417,6 +2539,10 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.type_to_nav = true;
         } else if text == "-A" || text == "--no-autoenter" {
             cli.no_autoenter = true;
+        } else if text == "-g" || text == "--regex" {
+            cli.regex_filter = true;
+        } else if text == "-z" || text == "--fuzzy" {
+            cli.fuzzy_filter = true;
         } else if text == "-R" || text == "--no-rollover" {
             // rnn never rolls over at the edges (Yazi behavior); accept nnn's
             // flag so scripts written for nnn keep working.
@@ -2521,6 +2647,9 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
         } else if cli.path.replace(PathBuf::from(arg)).is_some() {
             return Err("too many arguments".into());
         }
+    }
+    if cli.regex_filter && cli.fuzzy_filter {
+        return Err("-g and -z are mutually exclusive".into());
     }
     Ok(cli)
 }
@@ -2752,6 +2881,14 @@ impl App {
             entries: vec![],
             state: ListState::default(),
             filter: String::new(),
+            filter_mode: if cli.regex_filter {
+                FilterMode::Regex
+            } else if cli.fuzzy_filter {
+                FilterMode::Fuzzy
+            } else {
+                FilterMode::String
+            },
+            filter_case: FilterCase::Smart,
             show_hidden,
             show_preview: mgr.show_preview,
             show_file_info: cli.show_file_info,
@@ -3203,8 +3340,34 @@ impl App {
         }
 
         if !self.filter.is_empty() {
-            let needle = self.filter.clone();
-            v.retain(|e| smart_contains(&e.name, &needle));
+            match self.filter_mode {
+                FilterMode::String => {
+                    let needle = self.filter.clone();
+                    match self.filter_case {
+                        FilterCase::Smart => v.retain(|e| smart_contains(&e.name, &needle)),
+                        FilterCase::Insensitive => {
+                            let needle = needle.to_lowercase();
+                            v.retain(|e| e.name.to_lowercase().contains(&needle));
+                        }
+                        FilterCase::Sensitive => v.retain(|e| e.name.contains(&needle)),
+                    }
+                }
+                FilterMode::Fuzzy => {
+                    let needle = self.filter.clone();
+                    let sensitive = self.filter_case.sensitive();
+                    v.retain(|e| fuzzy_score(&e.name, &needle, sensitive).is_some());
+                }
+                FilterMode::Regex => {
+                    // An invalid pattern leaves the list unfiltered, like nnn
+                    // keeping the previous matches while the regex is typed.
+                    if let Ok(re) = regex::RegexBuilder::new(&self.filter)
+                        .case_insensitive(!self.filter_case.sensitive())
+                        .build()
+                    {
+                        v.retain(|e| re.is_match(&e.name));
+                    }
+                }
+            }
         }
 
         let sort = self.sort;
@@ -3281,6 +3444,28 @@ impl App {
                         order.reverse()
                     } else {
                         order
+                    }
+                })
+            });
+        }
+        // nnn ranks fuzzy matches by score (best first), keeping directories
+        // above files. A stable sort preserves the normal order for ties.
+        if self.filter_mode == FilterMode::Fuzzy && !self.filter.is_empty() {
+            let needle = self.filter.clone();
+            let sensitive = self.filter_case.sensitive();
+            v.sort_by(|a, b| {
+                let dir = if dir_first {
+                    b.is_dir.cmp(&a.is_dir)
+                } else {
+                    std::cmp::Ordering::Equal
+                };
+                dir.then_with(|| {
+                    let sa = fuzzy_score(&a.name, &needle, sensitive).unwrap_or(i64::MAX);
+                    let sb = fuzzy_score(&b.name, &needle, sensitive).unwrap_or(i64::MAX);
+                    if reverse {
+                        sb.cmp(&sa)
+                    } else {
+                        sa.cmp(&sb)
                     }
                 })
             });
@@ -5407,6 +5592,18 @@ impl App {
                             self.mode = Mode::Normal;
                         }
                     }
+                    // nnn cycles string/fuzzy/regex with `/` and toggles case
+                    // handling with `:` while the filter prompt is open.
+                    KeyCode::Char('/') => {
+                        self.filter_mode = self.filter_mode.cycle();
+                        self.reload();
+                        self.type_to_nav_auto_enter();
+                    }
+                    KeyCode::Char(':') => {
+                        self.filter_case = self.filter_case.cycle();
+                        self.reload();
+                        self.type_to_nav_auto_enter();
+                    }
                     KeyCode::Backspace => {
                         if self.type_to_nav && self.filter.is_empty() {
                             self.mode = Mode::Normal;
@@ -6240,9 +6437,11 @@ impl App {
         let direction = if self.sort_reverse { "↓" } else { "↑" };
         let mut text = match self.mode {
             Mode::Filter => format!(
-                "{}{}",
+                "{}{}  {} [/], {} [:]",
                 title_prefix(&self.config.input.filter_title),
-                self.filter
+                self.filter,
+                self.filter_mode.label(),
+                self.filter_case.label()
             ),
             Mode::Find => {
                 let title = if self.find_forward {
@@ -7604,6 +7803,21 @@ mod tests {
     }
 
     #[test]
+    fn fuzzy_filter_matches_in_order_and_normalizes_separators() {
+        assert!(fuzzy_score("foo_bar.txt", "fbt", false).is_some());
+        assert!(fuzzy_score("foo-bar.txt", "f b", false).is_some());
+        assert!(fuzzy_score("foobar", "fbr", false).is_some());
+        assert!(fuzzy_score("foobar", "fro", false).is_none());
+        assert!(fuzzy_score("Foobar", "fb", false).is_some());
+        assert!(fuzzy_score("Foobar", "fb", true).is_none());
+        assert!(fuzzy_score("Foobar", "Fo", true).is_some());
+        // Contiguous, earlier, and word-start matches score better.
+        let prefix = fuzzy_score("report.txt", "rep", false).unwrap();
+        let scattered = fuzzy_score("r_e_p.txt", "rep", false).unwrap();
+        assert!(prefix < scattered);
+    }
+
+    #[test]
     fn natural_sort_honours_case_sensitivity() {
         use std::cmp::Ordering;
         // Numbers compare by value, not as text.
@@ -8238,6 +8452,11 @@ mod tests {
         assert!(parse_cli(args(&["--type-to-nav"])).unwrap().type_to_nav);
         assert!(parse_cli(args(&["-A"])).unwrap().no_autoenter);
         assert!(parse_cli(args(&["--no-autoenter"])).unwrap().no_autoenter);
+        assert!(parse_cli(args(&["-g"])).unwrap().regex_filter);
+        assert!(parse_cli(args(&["--regex"])).unwrap().regex_filter);
+        assert!(parse_cli(args(&["-z"])).unwrap().fuzzy_filter);
+        assert!(parse_cli(args(&["--fuzzy"])).unwrap().fuzzy_filter);
+        assert!(parse_cli(args(&["-g", "-z"])).is_err());
         assert!(parse_cli(args(&["-R"])).is_ok());
         assert!(parse_cli(args(&["--no-rollover"])).is_ok());
         assert_eq!(
