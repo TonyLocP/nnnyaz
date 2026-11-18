@@ -1,5 +1,8 @@
 # nnnyaz
 
+[![CI](https://github.com/TonyLocP/nnnyaz/actions/workflows/ci.yml/badge.svg)](https://github.com/TonyLocP/nnnyaz/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/TonyLocP/nnnyaz)](https://github.com/TonyLocP/nnnyaz/releases)
+
 A small nnn/Yazi-style terminal file manager with a native preview pane.
 
 nnnyaz keeps a Yazi-like feel: modal `mgr` navigation, prefix keymaps
@@ -22,7 +25,20 @@ an `open with` menu. Configuration is declarative TOML, with an optional
 - Picker mode (`--chooser-file` / `-p`, `-0`) for shell pipelines
 - TOML configuration plus an optional `init.lua` API
 
-## Build
+## Install
+
+Prebuilt binaries for Linux (x86_64 and aarch64) and macOS (Intel and Apple
+Silicon) are attached to each
+[release](https://github.com/TonyLocP/nnnyaz/releases). Each archive contains
+the `nnnyaz` binary, the license, and the changelog.
+
+From source with Cargo:
+
+```sh
+cargo install --git https://github.com/TonyLocP/nnnyaz
+```
+
+Or build a local checkout:
 
 ```sh
 cargo build --release
