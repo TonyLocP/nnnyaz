@@ -7,6 +7,10 @@ nnnyaz keeps a Yazi-like feel: modal `mgr` navigation, prefix keymaps
 an `open with` menu. Configuration is declarative TOML, with an optional
 `init.lua` for overrides and small custom actions.
 
+> **AI-built project:** essentially all of the code, tests, and docs were
+> written by AI. I set the direction and test the result — see
+> [AI usage](#ai-usage).
+
 ## Features
 
 - Yazi-style modal navigation and prefix menus, with nnn's startup flags
@@ -505,12 +509,14 @@ schema is nnnyaz-specific, and the plugin API is intentionally minimal.
 
 ## AI usage
 
-Most of nnnyaz was written with **Big Pickle** in OpenCode — because I'm
-broke. <3
+Almost everything in this repository — the code, tests, and documentation —
+was written by **Big Pickle** in OpenCode, because I'm broke. <3
 
-AI writes a lot of the code, tests, and docs here; I set the direction, review
-the diffs, and test everything in a real terminal. If you spot something the
-pair of us missed, an issue is very welcome.
+My role is setting the direction: deciding what to build, describing the
+behavior, reviewing the diffs, and testing everything in a real terminal.
+Please read this as an AI-coded project with a human at the wheel, not as
+hand-written software. If something slipped past the two of us, an issue is
+very welcome.
 
 ## Acknowledgements
 
