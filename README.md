@@ -512,10 +512,9 @@ schema is nnnyaz-specific, and the plugin API is intentionally minimal.
 Almost everything in this repository — the code, tests, and documentation —
 was written by **Big Pickle** in OpenCode, because I'm broke. <3
 
-My role was setting the direction and testing the result — nothing more.
-Please read this as an AI-coded project with a human at the wheel, not as
-hand-written software. If something slipped past us, an issue is very
-welcome.
+My role was setting the direction and testing the result. Please read this as
+an AI-coded project with a human at the wheel, not as hand-written software.
+If something slipped past us, an issue is very welcome.
 
 ## Acknowledgements
 
