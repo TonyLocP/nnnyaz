@@ -92,11 +92,16 @@ are candidates, roughly in priority order.
       CMYK profiles are left alone and images already tagged sRGB skip the
       transform, matching Yazi's adapter. Unsupported bit depths fall back to
       the normal decoder path.
+- [x] **Compressed tarball previews** — when 7z reports a compressed archive as
+      a single inner `.tar` (`.tar.gz`, `.tgz`, `.tar.bz2`, `.tar.xz`,
+      `.tar.zst`, …), rnn pipes `7z e -so` into `7z l -ttar -si` and shows the
+      tar's contents instead of the inner archive file. If the inner listing
+      fails, it falls back to the outer listing.
 
 ## Next
 
-- [ ] List the contents of compressed tarballs (for example `.tar.gz`) in the
-      archive preview instead of treating the archive as a single entry.
+- [ ] Continue the parity audit: compare the remaining Yazi/nnn preview and
+      navigation behavior against rnn, then add concrete items here.
 
 ## Local setup (outside this repo)
 

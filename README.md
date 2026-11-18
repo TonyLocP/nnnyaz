@@ -129,9 +129,11 @@ set -g allow-passthrough on
 Video thumbnails are generated with `ffmpeg`. PDFs are rendered a page at a
 time with `pdftoppm` (poppler), and `J`/`K` or scrolling over the preview
 switches pages. Page counts come from `pdfinfo` when it is installed.
-Archives are listed as an indented tree with sizes using `7z`/`7zz`. Fonts are
-rendered as a glyph sheet with ImageMagick (`magick`, or `convert` on
-ImageMagick 6). JSON is pretty-printed with `jq`.
+Archives are listed as an indented tree with sizes using `7z`/`7zz`.
+Compressed tarballs (`.tar.gz`, `.tgz`, …) are expanded one level so the tar's
+contents are shown instead of the inner `.tar` file. Fonts are rendered as a
+glyph sheet with ImageMagick (`magick`, or `convert` on ImageMagick 6). JSON is
+pretty-printed with `jq`.
 
 Decoded images are cached on disk (shared with Yazi when its cache is
 available), and image/video/PDF neighbours are preloaded in the background, so

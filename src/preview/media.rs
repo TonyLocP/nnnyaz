@@ -33,23 +33,66 @@ fn capture(cmd: &mut Command, cap: u64) -> io::Result<(Vec<u8>, bool)> {
 ///
 /// Uses `-slt` (one `Key = Value` block per entry) rather than the fixed-width
 /// bare listing so paths containing spaces parse correctly. Compressed tarballs
-/// that 7z reports as a single inner `.tar` are listed as that one entry; Yazi
-/// goes one level further by piping through `7z x -so`.
+/// (`.tar.gz`, `.tgz`, …) appear to 7z as a single inner `.tar`; those are
+/// decompressed through `7z e -so` and listed one level further, like Yazi.
 pub fn archive_listing(path: &Path) -> io::Result<String> {
     let mut last: Option<io::Error> = None;
     for prog in ["7zz", "7z"] {
-        let mut c = Command::new(prog);
-        c.args(["l", "-ba", "-slt", "-sccUTF-8", "-xr!__MACOSX"])
-            .arg(path);
-        match capture(&mut c, TEXT_CAP) {
-            Ok((data, _)) => {
-                let text = String::from_utf8_lossy(&data);
-                return Ok(format_archive(&parse_7z_slt(&text)));
+        match list_7z(prog, path) {
+            Ok(entries) => {
+                if is_inner_tar(&entries) {
+                    if let Ok(inner) = list_7z_tar(prog, path) {
+                        return Ok(format_archive(&inner));
+                    }
+                }
+                return Ok(format_archive(&entries));
             }
             Err(e) => last = Some(e),
         }
     }
     Err(last.unwrap_or_else(|| io::Error::other("7z: not found")))
+}
+
+fn list_7z(prog: &str, path: &Path) -> io::Result<Vec<ArchiveEntry>> {
+    let mut c = Command::new(prog);
+    c.args(["l", "-ba", "-slt", "-sccUTF-8", "-xr!__MACOSX"])
+        .arg(path);
+    let (data, _) = capture(&mut c, TEXT_CAP)?;
+    let text = String::from_utf8_lossy(&data);
+    Ok(parse_7z_slt(&text))
+}
+
+/// True when the listing is just the `.tar` inside a compressed tar.
+fn is_inner_tar(entries: &[ArchiveEntry]) -> bool {
+    entries.len() == 1
+        && !entries[0].is_dir
+        && entries[0].path.to_ascii_lowercase().ends_with(".tar")
+}
+
+/// Decompress a compressed tar through `7z e -so` and list the tar it contains.
+fn list_7z_tar(prog: &str, path: &Path) -> io::Result<Vec<ArchiveEntry>> {
+    let mut decomp = Command::new(prog);
+    decomp
+        .args(["e", "-so"])
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut decomp = decomp.spawn()?;
+    let Some(stdout) = decomp.stdout.take() else {
+        let _ = decomp.kill();
+        let _ = decomp.wait();
+        return Err(io::Error::other("7z: no stdout"));
+    };
+
+    let mut list = Command::new(prog);
+    list.args(["l", "-ba", "-slt", "-sccUTF-8", "-ttar", "-si"])
+        .stdin(Stdio::from(stdout));
+    let result = capture(&mut list, TEXT_CAP);
+    let _ = decomp.wait();
+
+    let (data, _) = result?;
+    let text = String::from_utf8_lossy(&data);
+    Ok(parse_7z_slt(&text))
 }
 
 #[derive(Debug, PartialEq)]
@@ -360,6 +403,63 @@ mod tests {
         assert!(text.contains("a.txt  6B"), "{text}");
         assert!(text.contains("sub/"), "{text}");
         assert!(text.contains("  b.txt  1B"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_listing_descends_into_compressed_tar() {
+        use std::process::Command;
+
+        let dir = std::env::temp_dir().join(format!(
+            "rnn-targz-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"hello\n").unwrap();
+        std::fs::write(dir.join("sub/b.txt"), b"x").unwrap();
+
+        let tar = dir.join("test.tar");
+        let created = Command::new("7z")
+            .args(["a", "-bd", "-ttar"])
+            .arg(&tar)
+            .arg("a.txt")
+            .arg("sub")
+            .current_dir(&dir)
+            .output();
+        let Ok(created) = created else {
+            let _ = std::fs::remove_dir_all(&dir);
+            return; // 7z not installed; unit tests cover the parser
+        };
+        if !created.status.success() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let gz = dir.join("test.tar.gz");
+        let compressed = Command::new("7z")
+            .args(["a", "-bd", "-tgzip"])
+            .arg(&gz)
+            .arg("test.tar")
+            .current_dir(&dir)
+            .output();
+        let Ok(compressed) = compressed else {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        if !compressed.status.success() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let text = super::archive_listing(&gz).unwrap();
+        assert!(text.contains("a.txt  6B"), "{text}");
+        assert!(text.contains("sub/"), "{text}");
+        assert!(text.contains("  b.txt  1B"), "{text}");
+        assert!(!text.contains("test.tar"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
