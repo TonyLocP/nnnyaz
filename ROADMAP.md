@@ -207,10 +207,17 @@ are candidates, roughly in priority order.
       opener (after nnnyaz's own `OPENER`), and `-c` runs it attached to the
       terminal and waits, so TUI openers work. `-c` also disables `-e`, like
       nnn.
+- [x] **nnn's `-t` idle lock** — `-t <secs>` locks the terminal after that
+      many idle seconds by running `$NNN_LOCKER` (default `vlock`) attached,
+      then restores the TUI. Any key or mouse event resets the timer, and `0`
+      disables it.
 
 ## Next
 
-- [ ] Consider nnn's `-t <secs>` flag (lock after inactivity).
+- [ ] Yazi `[help]` keymap context — the help overlay is interactive now, so
+      its bindings could be honored instead of ignored.
+- [ ] Yazi `[which]` sort config — `sort_by`, `sort_sensitive`, `sort_reverse`,
+      and `sort_translit` for the prefix menu.
 
 ## Local setup (outside this repo)
 

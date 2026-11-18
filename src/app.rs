@@ -982,6 +982,8 @@ pub struct App {
     page: usize,
     /// Lines moved per mouse-wheel tick (`-l`).
     scroll_lines: usize,
+    /// `-t`: lock the terminal after this many idle seconds.
+    lock_after: Option<u64>,
     /// Move to the next entry after toggling a selection (`-J` disables it).
     auto_advance: bool,
     tabs: Vec<TabSnapshot>,
@@ -1147,6 +1149,30 @@ fn opener_command(opener: Option<&str>, nnn_opener: Option<&str>) -> String {
             } else {
                 "xdg-open".into()
             }
+        })
+}
+
+/// The terminal locker for `-t`: `$NNN_LOCKER`, else nnn's platform default.
+fn locker_command(nnn_locker: Option<&str>) -> String {
+    nnn_locker
+        .filter(|v| !v.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "bashlock"
+            } else if cfg!(any(
+                target_os = "freebsd",
+                target_os = "openbsd",
+                target_os = "netbsd",
+                target_os = "dragonfly"
+            )) {
+                "lock"
+            } else if cfg!(target_os = "haiku") {
+                "peaclock"
+            } else {
+                "vlock"
+            }
+            .into()
         })
 }
 
@@ -2500,6 +2526,8 @@ struct Cli {
     sort: Option<(Sort, bool)>,
     /// `-l n`: lines moved per mouse-wheel scroll.
     scroll_lines: Option<usize>,
+    /// `-t secs`: lock the terminal after this many idle seconds.
+    lock_after: Option<u64>,
     /// `-i`: show `file -b` output for the hovered entry in the status line.
     show_file_info: bool,
     /// `-d`: start in nnn's detail linemode.
@@ -2572,6 +2600,14 @@ fn parse_scroll_lines(value: &str) -> Result<usize, String> {
         .map_err(|_| format!("-l: expected a non-negative number, got '{value}'"))
 }
 
+/// Parse `-t`: a non-negative idle timeout in seconds; 0 disables locking.
+fn parse_lock_after(value: &str) -> Result<Option<u64>, String> {
+    let secs = value
+        .parse::<u64>()
+        .map_err(|_| format!("-t: expected a number of seconds, got '{value}'"))?;
+    Ok((secs > 0).then_some(secs))
+}
+
 /// Print the command-line help that `-h` / `--help` shows.
 fn print_help() {
     println!(
@@ -2614,12 +2650,14 @@ Options:
   -T <KEY>, --sort <KEY>     Sort order: a/d/s size, e extension, t time,
                              v natural; an uppercase key reverses
   -l <N>, --scroll <N>       Lines moved per mouse-wheel scroll [default: 1]
+  -t <N>, --lock-after <N>   Lock the terminal after N idle seconds
 
 Environment:
   NNNYAZ_CWD_FILE      Default for --cwd-file
   NNNYAZ_CHOOSER_FILE  Default for --chooser-file
   NNNYAZ_CONFIG_HOME   Configuration directory (default: $XDG_CONFIG_HOME/nnnyaz)
-  NNNYAZ_IMAGE_PROTOCOL  Force kitty, sixel, or none"
+  NNNYAZ_IMAGE_PROTOCOL  Force kitty, sixel, or none
+  NNN_LOCKER           Terminal locker for -t (default: vlock)"
     );
 }
 
@@ -2733,6 +2771,15 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.scroll_lines = Some(parse_scroll_lines(value)?);
         } else if let Some(value) = text.strip_prefix("--scroll=") {
             cli.scroll_lines = Some(parse_scroll_lines(value)?);
+        } else if text == "-t" || text == "--lock-after" {
+            let value = args
+                .next()
+                .ok_or_else(|| "-t requires a number of seconds".to_string())?;
+            cli.lock_after = parse_lock_after(&value.to_string_lossy())?;
+        } else if let Some(value) = text.strip_prefix("-t") {
+            cli.lock_after = parse_lock_after(value)?;
+        } else if let Some(value) = text.strip_prefix("--lock-after=") {
+            cli.lock_after = parse_lock_after(value)?;
         } else if text == "--cwd-file" {
             let value = args
                 .next()
@@ -3222,6 +3269,7 @@ impl App {
             focus: None,
             page: 10,
             scroll_lines: cli.scroll_lines.unwrap_or(1),
+            lock_after: cli.lock_after,
             auto_advance: !cli.no_auto_advance,
             tabs: Vec::new(),
             tab_index: 0,
@@ -4404,14 +4452,31 @@ impl App {
     }
 
     fn external(&mut self, term: &mut DefaultTerminal, prog: &str, path: &Path) {
+        self.spawn_attached(term, prog, Some(path));
+    }
+
+    /// Run a program with real stdio and wait for it, then restore the TUI.
+    /// Used by editors, `-c` openers, and the `-t` locker.
+    fn spawn_attached(&mut self, term: &mut DefaultTerminal, prog: &str, arg: Option<&Path>) {
         let mut parts = prog.split_whitespace();
         let Some(p) = parts.next() else { return };
         self.restore_terminal();
-        let r = Command::new(p).args(parts).arg(path).status();
+        let mut cmd = Command::new(p);
+        cmd.args(parts);
+        if let Some(arg) = arg {
+            cmd.arg(arg);
+        }
+        let r = cmd.status();
         *term = self.init_terminal();
         if let Err(e) = r {
             self.status = format!("{p}: {e}");
         }
+    }
+
+    /// `-t`: lock the terminal after the idle timeout.
+    fn lock_terminal(&mut self, term: &mut DefaultTerminal) {
+        let locker = locker_command(env::var("NNN_LOCKER").ok().as_deref());
+        self.spawn_attached(term, &locker, None);
     }
 
     /// `A`: edit a temporary file and create every non-empty line in it.
@@ -8299,6 +8364,8 @@ impl App {
         let time = std::env::var_os("NNNYAZ_TIME").is_some();
         let mut last_search_poll = std::time::Instant::now();
         let mut last_task_poll = std::time::Instant::now();
+        let lock_after = self.lock_after.map(Duration::from_secs);
+        let mut idle_since = std::time::Instant::now();
         self.preview.begin_sixel(!self.overlay_open());
         term.draw(|f| self.draw(f))?;
         self.preview.flush_sixel(!self.overlay_open());
@@ -8327,6 +8394,15 @@ impl App {
                         dirty = true;
                     }
                     _ => {}
+                }
+                // Any input resets the `-t` idle timer. Reset after handling
+                // too, so a blocking editor or pager does not count as idle.
+                idle_since = std::time::Instant::now();
+            } else if let Some(limit) = lock_after {
+                if idle_since.elapsed() >= limit {
+                    self.lock_terminal(term);
+                    idle_since = std::time::Instant::now();
+                    dirty = true;
                 }
             }
             if self.quit {
@@ -8522,6 +8598,14 @@ mod tests {
         assert_eq!(pick_internal_editor(true, Some("vis"), None), "vi");
         assert_eq!(pick_internal_editor(false, Some("  "), None), "vi");
         assert_eq!(pick_internal_editor(false, None, None), "vi");
+    }
+
+    #[test]
+    fn locker_prefers_nnn_locker() {
+        assert_eq!(locker_command(Some("mylock")), "mylock");
+        assert!(!locker_command(Some("  ")).trim().is_empty());
+        let default = locker_command(None);
+        assert!(["vlock", "lock", "bashlock", "peaclock"].contains(&default.as_str()));
     }
 
     #[test]
@@ -9324,6 +9408,19 @@ mod tests {
             Some(5)
         );
         assert!(parse_cli(args(&["-l"])).is_err());
+        assert_eq!(parse_cli(args(&["-t", "30"])).unwrap().lock_after, Some(30));
+        assert_eq!(parse_cli(args(&["-t30"])).unwrap().lock_after, Some(30));
+        assert_eq!(
+            parse_cli(args(&["--lock-after", "30"])).unwrap().lock_after,
+            Some(30)
+        );
+        assert_eq!(
+            parse_cli(args(&["--lock-after=30"])).unwrap().lock_after,
+            Some(30)
+        );
+        assert_eq!(parse_cli(args(&["-t", "0"])).unwrap().lock_after, None);
+        assert!(parse_cli(args(&["-t"])).is_err());
+        assert!(parse_cli(args(&["-t", "soon"])).is_err());
         assert!(parse_cli(args(&["-l", "-1"])).is_err());
     }
 

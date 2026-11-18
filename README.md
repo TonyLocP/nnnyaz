@@ -50,7 +50,9 @@ because a longer sequence (such as `g g`) shadows it. `-E` uses `$EDITOR`
 rather than `$VISUAL` for internal undetached edits (bulk rename/create), and
 `r` on a single entry edits its name in that editor instead of the inline
 prompt. `-c` treats `NNN_OPENER` as a terminal program: it runs the opener
-attached and waits for it (so TUI openers work) and disables `-e`. Sessions work like nnn's: `-s <name>` loads a saved session (`@` is the last session)
+attached and waits for it (so TUI openers work) and disables `-e`. `-t <secs>`
+locks the terminal after that many idle seconds with `$NNN_LOCKER` (default
+`vlock`); `0` disables locking. Sessions work like nnn's: `-s <name>` loads a saved session (`@` is the last session)
 and `-S` saves the current tabs on exit, defaulting to `@`. Loading a named
 session first stores the previous state in `@`. Sessions live under
 `<config>/sessions`. Inside nnnyaz, `t S` opens nnn's session menu (`s` save,
