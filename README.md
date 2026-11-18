@@ -214,6 +214,7 @@ wrap = "no"             # "yes" wraps long lines in text previews
 
 [tasks]
 show_progress = true
+suppress_preload = false  # do not preload neighbouring image/video/PDF previews
 
 [confirm]
 quit_with_tasks = true

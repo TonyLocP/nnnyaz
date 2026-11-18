@@ -146,10 +146,14 @@ are candidates, roughly in priority order.
 - [x] **nnn's `-b` bookmark startup** — `-b <key>` (or `-b<key>`) starts in an
       `NNN_BMS` bookmark or a name in nnn's bookmarks directory. Like nnn, an
       explicit path argument wins, and an unknown key exits with an error.
+- [x] **`tasks.suppress_preload`** — disables preloading the previews of
+      neighbouring image/video/PDF/font files, trading instant navigation for
+      less background work.
 
 ## Next
 
-- [ ] Consider nnn's `-Q` to skip the running-task quit warning.
+- [ ] Consider Yazi's `[input]` titles (`cd_title`, `rename_title`, …) for
+      rnn's status-line prompts.
 
 ## Local setup (outside this repo)
 

@@ -152,12 +152,15 @@ impl Default for PreviewConfig {
 #[derive(Clone, Copy, Debug)]
 pub struct TasksConfig {
     pub show_progress: bool,
+    /// Skip preloading neighbouring previews (Yazi's `tasks.suppress_preload`).
+    pub suppress_preload: bool,
 }
 
 impl Default for TasksConfig {
     fn default() -> Self {
         TasksConfig {
             show_progress: true,
+            suppress_preload: false,
         }
     }
 }
@@ -446,6 +449,9 @@ impl Config {
         if let Some(v) = p.tasks.show_progress {
             self.tasks.show_progress = v;
         }
+        if let Some(v) = p.tasks.suppress_preload {
+            self.tasks.suppress_preload = v;
+        }
 
         if let Some(v) = p.confirm.quit_with_tasks {
             self.confirm.quit_with_tasks = v;
@@ -521,6 +527,7 @@ enum WrapValue {
 #[serde(default)]
 struct PartialTasks {
     show_progress: Option<bool>,
+    suppress_preload: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -572,7 +579,12 @@ fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
                 ],
                 warnings,
             ),
-            "tasks" => warn_keys(value, "tasks", &["show_progress"], warnings),
+            "tasks" => warn_keys(
+                value,
+                "tasks",
+                &["show_progress", "suppress_preload"],
+                warnings,
+            ),
             "confirm" => warn_keys(value, "confirm", &["quit_with_tasks"], warnings),
             // openers are validated by openwith.rs.
             "opener" | "open" => {}
@@ -642,6 +654,9 @@ mod tests {
 
             [preview]
             cache_size = 4
+
+            [tasks]
+            suppress_preload = true
             "#,
         )
         .unwrap();
@@ -657,6 +672,7 @@ mod tests {
         assert!(!loaded.config.mgr.show_symlink);
         assert_eq!(loaded.config.mgr.linemode, Linemode::Mtime);
         assert_eq!(loaded.config.preview.cache_size, 4);
+        assert!(loaded.config.tasks.suppress_preload);
         assert!(loaded
             .warnings
             .iter()

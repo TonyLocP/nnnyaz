@@ -2833,7 +2833,7 @@ impl App {
     /// preview's disk + memory caches) so navigating to them is instant, like
     /// yazi's previewer does. PDFs preload their first page.
     fn preload_neighbours(&mut self) {
-        if !self.preview.kitty_enabled() {
+        if self.config.tasks.suppress_preload || !self.preview.kitty_enabled() {
             return;
         }
         let Some(i) = self.state.selected() else {
