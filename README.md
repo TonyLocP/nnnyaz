@@ -20,6 +20,10 @@ Run it in a directory:
 rnn [path]
 ```
 
+`rnn --help` lists the command-line options and `rnn --version` prints the
+version. The main options are `--cwd-file` (see below) and the picker flags
+`--chooser-file` / `-p` and `-0` / `--null`.
+
 ## Quitting and the current directory
 
 `q` quits and leaves the shell where it was. `Q` quits and records rnn's

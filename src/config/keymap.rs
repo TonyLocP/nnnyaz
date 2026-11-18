@@ -728,6 +728,25 @@ impl Default for Keymap {
             km.insert(Mgr, on, run, *desc);
         }
 
+        // Yazi's sort keys also switch to the matching linemode, so the
+        // column being sorted on is visible without a second keystroke.
+        let sort_linemode: &[(&str, &str, &str)] = &[
+            (", m", "sort mtime", "mtime"),
+            (", M", "sort mtime --reverse", "mtime"),
+            (", b", "sort btime", "btime"),
+            (", B", "sort btime --reverse", "btime"),
+            (", s", "sort size", "size"),
+            (", S", "sort size --reverse", "size"),
+        ];
+        for (on, run, mode) in sort_linemode {
+            let seq = parse_seq(on).expect("default sort key parses");
+            let actions = vec![
+                Action::parse(run).expect("default sort action parses"),
+                Action::parse(&format!("linemode {mode}")).expect("default linemode parses"),
+            ];
+            km.mgr.insert(&seq, Action::Chain(actions), None);
+        }
+
         let tasks: &[(&str, &str)] = &[
             ("<C-c>", "close"),
             ("<Esc>", "close"),
@@ -859,6 +878,37 @@ mod tests {
             .walk(&parse_seq("m").unwrap())
             .unwrap()
             .has_children());
+    }
+
+    #[test]
+    fn sort_keys_also_set_the_matching_linemode() {
+        let km = Keymap::default();
+        let action = |seq: &str| {
+            km.mgr
+                .walk(&parse_seq(seq).unwrap())
+                .unwrap()
+                .action()
+                .cloned()
+        };
+        assert_eq!(
+            action(", m"),
+            Some(Action::Chain(vec![
+                Action::parse("sort mtime").unwrap(),
+                Action::SetLinemode(crate::app::Linemode::Mtime),
+            ]))
+        );
+        assert_eq!(
+            action(", S"),
+            Some(Action::Chain(vec![
+                Action::parse("sort size --reverse").unwrap(),
+                Action::SetLinemode(crate::app::Linemode::Size),
+            ]))
+        );
+        assert_eq!(
+            action(", e"),
+            Some(Action::parse("sort ext").unwrap()),
+            "extension sort should not change the linemode"
+        );
     }
 
     #[test]

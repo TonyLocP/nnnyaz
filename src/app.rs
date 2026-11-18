@@ -2127,26 +2127,60 @@ fn run_shell_task(
 // ───────────────────────── app ─────────────────────────
 
 /// Command-line options. rnn has no argument-parser dependency, so this stays
-/// deliberately small: one optional starting path, `--cwd-file`, and the
-/// picker options (`--chooser-file` / `-p`, `-0`).
+/// deliberately small: one optional starting path, `--cwd-file`, the picker
+/// options (`--chooser-file` / `-p`, `-0`), and `--help` / `--version`.
 #[derive(Debug, Default, PartialEq)]
 struct Cli {
     path: Option<PathBuf>,
     cwd_file: Option<PathBuf>,
     chooser_file: Option<PathBuf>,
     chooser_null: bool,
+    help: bool,
+    version: bool,
+}
+
+/// Print the command-line help that `-h` / `--help` shows.
+fn print_help() {
+    println!(
+        "\
+rnn — a small nnn/Yazi-style terminal file manager
+
+Usage: rnn [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]  Starting directory or file [default: .]
+
+Options:
+  -h, --help                 Print this help and exit
+  -V, --version              Print the version and exit
+      --cwd-file <PATH>      Write the current directory here on Q
+      --chooser-file <PATH>  Picker mode: write chosen paths here
+  -p <PATH>                  Alias for --chooser-file (- writes to stdout)
+  -0, --null                 Separate picker paths with NUL instead of newline
+
+Environment:
+  RNN_CWD_FILE      Default for --cwd-file
+  RNN_CHOOSER_FILE  Default for --chooser-file
+  RNN_CONFIG_HOME   Configuration directory (default: $XDG_CONFIG_HOME/rnn)
+  RNN_IMAGE_PROTOCOL  Force kitty, sixel, or none"
+    );
 }
 
 /// Parse rnn's command line. `--cwd-file <path>` and `--cwd-file=<path>` are
 /// accepted; so are `--chooser-file <path>`, `--chooser-file=<path>`, nnn's
-/// `-p <path>` (or `-p<path>`), and `-0` for NUL-separated picker output. The
-/// first non-option argument is the starting path.
+/// `-p <path>` (or `-p<path>`), `-0` for NUL-separated picker output, and
+/// `-h`/`--help` or `-V`/`--version`. The first non-option argument is the
+/// starting path.
 fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
     let mut cli = Cli::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let text = arg.to_string_lossy();
-        if text == "--cwd-file" {
+        if text == "-h" || text == "--help" {
+            cli.help = true;
+        } else if text == "-V" || text == "--version" {
+            cli.version = true;
+        } else if text == "--cwd-file" {
             let value = args
                 .next()
                 .ok_or_else(|| "--cwd-file requires a path".to_string())?;
@@ -2290,6 +2324,14 @@ impl App {
     pub fn new(loaded: config::Loaded) -> io::Result<Self> {
         let cli = parse_cli(env::args_os().skip(1))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        if cli.help {
+            print_help();
+            std::process::exit(0);
+        }
+        if cli.version {
+            println!("rnn {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
         let cwd_file = cli.cwd_file.or_else(|| {
             env::var_os("RNN_CWD_FILE")
                 .filter(|v| !v.is_empty())
@@ -7301,6 +7343,20 @@ mod tests {
         assert!(parse_cli(args(&["--cwd-file="])).is_err());
         assert!(parse_cli(args(&["--nope"])).is_err());
         assert!(parse_cli(args(&["one", "two"])).is_err());
+    }
+
+    #[test]
+    fn cli_parses_help_and_version() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+
+        assert!(parse_cli(args(&["--help"])).unwrap().help);
+        assert!(parse_cli(args(&["-h"])).unwrap().help);
+        assert!(parse_cli(args(&["--version"])).unwrap().version);
+        assert!(parse_cli(args(&["-V"])).unwrap().version);
+        // Help and version win over a starting path without being one.
+        let cli = parse_cli(args(&["--help", "/tmp/start"])).unwrap();
+        assert!(cli.help);
+        assert_eq!(cli.path, Some(PathBuf::from("/tmp/start")));
     }
 
     #[test]

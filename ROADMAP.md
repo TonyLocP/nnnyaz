@@ -97,11 +97,22 @@ are candidates, roughly in priority order.
       `.tar.zst`, …), rnn pipes `7z e -so` into `7z l -ttar -si` and shows the
       tar's contents instead of the inner archive file. If the inner listing
       fails, it falls back to the outer listing.
+- [x] **CLI help and version** — `-h`/`--help` prints usage, options, and the
+      relevant environment variables; `-V`/`--version` prints the version.
+      Previously both were rejected as unknown options.
+- [x] **Sort keys set the matching linemode** — `, m`/`, M` (mtime),
+      `, b`/`, B` (btime), and `, s`/`, S` (size) now switch the linemode as
+      well as sorting, like Yazi's default keymap. `, e` and `, a` still only
+      sort, since Yazi does not have a matching linemode for them.
 
 ## Next
 
-- [ ] Continue the parity audit: compare the remaining Yazi/nnn preview and
-      navigation behavior against rnn, then add concrete items here.
+- [ ] Audit the remaining nnn command-line flags against rnn's config
+      equivalents (`-H` hidden, `-l` scroll lines, `-T` sort order, `-i` info
+      panel) and add the ones that are useful.
+- [ ] Consider a Yazi-style `spot` full-screen preview. rnn currently uses
+      `<Tab>` for nnn's info panel, so this needs a key that does not collide
+      with the existing nnn/Yazi bindings.
 
 ## Local setup (outside this repo)
 
