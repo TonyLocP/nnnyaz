@@ -138,7 +138,9 @@ available), and image/video/PDF neighbours are preloaded in the background, so
 navigating back over a folder is instant. The first view of a very large photo
 is decoded and downscaled once; writing it to the cache happens in the
 background rather than delaying the image. EXIF orientation is applied, so
-photos from phones and cameras are shown upright.
+photos from phones and cameras are shown upright. Embedded non-sRGB ICC
+profiles (Display P3, Adobe RGB, grayscale gamma curves, …) are converted to
+sRGB before display; CMYK profiles are left to the decoder, matching Yazi.
 
 ## Configuration
 

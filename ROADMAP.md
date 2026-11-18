@@ -86,11 +86,15 @@ are candidates, roughly in priority order.
       and quits, `O` still opens the interactive menu, and a plain quit writes
       an existing selection like nnn while leaving the file untouched when
       nothing is selected.
+- [x] **ICC color management** — embedded non-sRGB ICC profiles are converted
+      to sRGB through `moxcms` before resizing and caching, so Display P3,
+      Adobe RGB, and grayscale gamma-tagged images look like they do in Yazi.
+      CMYK profiles are left alone and images already tagged sRGB skip the
+      transform, matching Yazi's adapter. Unsupported bit depths fall back to
+      the normal decoder path.
 
 ## Next
 
-- [ ] ICC color management for image previews (currently only EXIF orientation
-      is applied).
 - [ ] List the contents of compressed tarballs (for example `.tar.gz`) in the
       archive preview instead of treating the archive as a single entry.
 

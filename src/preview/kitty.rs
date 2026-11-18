@@ -23,8 +23,13 @@ use std::{
 
 use image::{
     imageops::{self, FilterType},
-    metadata::Orientation,
-    DynamicImage, ImageDecoder, ImageReader, RgbaImage,
+    metadata::{Cicp, Orientation},
+    ColorType, DynamicImage, GrayAlphaImage, GrayImage, ImageDecoder, ImageReader, RgbImage,
+    RgbaImage,
+};
+use moxcms::{
+    CicpColorPrimaries, ColorProfile, DataColorSpace, Layout, TransferCharacteristics,
+    TransformOptions,
 };
 use ratatui::{
     buffer::Buffer,
@@ -345,11 +350,85 @@ fn decode_source(path: &Path) -> io::Result<DynamicImage> {
     let reader = ImageReader::open(path)?.with_guessed_format()?;
     let mut decoder = reader.into_decoder().map_err(io::Error::other)?;
     let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
-    let mut img = DynamicImage::from_decoder(decoder).map_err(io::Error::other)?;
+    let mut img = decode_with_icc(decoder)?;
     if orientation != Orientation::NoTransforms {
         img.apply_orientation(orientation);
     }
     Ok(img)
+}
+
+/// Decode an image, converting an embedded non-sRGB ICC profile to sRGB like
+/// Yazi's adapter. CMYK profiles and images already tagged as sRGB are left
+/// alone; unsupported bit depths fall back to the normal decoder path.
+fn decode_with_icc(mut decoder: impl ImageDecoder) -> io::Result<DynamicImage> {
+    let Some(layout) = color_type_to_layout(decoder.color_type()) else {
+        return DynamicImage::from_decoder(decoder).map_err(io::Error::other);
+    };
+    let Some(icc) = decoder.icc_profile().unwrap_or_default() else {
+        return DynamicImage::from_decoder(decoder).map_err(io::Error::other);
+    };
+    let Ok(profile) = ColorProfile::new_from_slice(&icc) else {
+        return DynamicImage::from_decoder(decoder).map_err(io::Error::other);
+    };
+    if !requires_icc_transform(&profile) {
+        return DynamicImage::from_decoder(decoder).map_err(io::Error::other);
+    }
+
+    let (width, height) = decoder.dimensions();
+    let mut buf = vec![0u8; decoder.total_bytes() as usize];
+    decoder.read_image(&mut buf).map_err(io::Error::other)?;
+
+    let transformer = profile
+        .create_transform_8bit(
+            layout,
+            &ColorProfile::new_srgb(),
+            layout,
+            TransformOptions::default(),
+        )
+        .map_err(io::Error::other)?;
+    let mut converted = vec![0u8; buf.len()];
+    transformer
+        .transform(&buf, &mut converted)
+        .map_err(io::Error::other)?;
+
+    let mut img: DynamicImage = match layout {
+        Layout::Gray => GrayImage::from_raw(width, height, converted)
+            .ok_or_else(|| io::Error::other("invalid ICC-converted gray image"))?
+            .into(),
+        Layout::GrayAlpha => GrayAlphaImage::from_raw(width, height, converted)
+            .ok_or_else(|| io::Error::other("invalid ICC-converted gray image"))?
+            .into(),
+        Layout::Rgb => RgbImage::from_raw(width, height, converted)
+            .ok_or_else(|| io::Error::other("invalid ICC-converted RGB image"))?
+            .into(),
+        Layout::Rgba => RgbaImage::from_raw(width, height, converted)
+            .ok_or_else(|| io::Error::other("invalid ICC-converted RGBA image"))?
+            .into(),
+        _ => unreachable!("only RGB and gray layouts are selected"),
+    };
+    img.set_rgb_primaries(Cicp::SRGB.primaries);
+    img.set_transfer_function(Cicp::SRGB.transfer);
+    Ok(img)
+}
+
+fn color_type_to_layout(color_type: ColorType) -> Option<Layout> {
+    match color_type {
+        ColorType::L8 => Some(Layout::Gray),
+        ColorType::La8 => Some(Layout::GrayAlpha),
+        ColorType::Rgb8 => Some(Layout::Rgb),
+        ColorType::Rgba8 => Some(Layout::Rgba),
+        _ => None,
+    }
+}
+
+fn requires_icc_transform(profile: &ColorProfile) -> bool {
+    if profile.color_space == DataColorSpace::Cmyk {
+        return false;
+    }
+    profile.cicp.is_none_or(|cicp| {
+        cicp.color_primaries != CicpColorPrimaries::Bt709
+            || cicp.transfer_characteristics != TransferCharacteristics::Srgb
+    })
 }
 
 fn load_from(
@@ -1195,7 +1274,7 @@ fn diacritic(i: usize) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{Rgba, RgbaImage};
+    use image::{ExtendedColorType, ImageEncoder, Luma, Rgba, RgbaImage};
 
     fn make_img(w: u32, h: u32) -> DynamicImage {
         let mut img = RgbaImage::from_pixel(w, h, Rgba([10, 20, 30, 255]));
@@ -1338,6 +1417,81 @@ mod tests {
     /// Orientation 6 (rotate 90° CW) must be applied on source decode so a
     /// portrait phone photo is not shown sideways. Cache entries are written
     /// upright, so `decode` intentionally skips this.
+    /// Build a minimal valid gray ICC profile with a pure gamma-2.2 curve.
+    fn gray_icc_profile() -> Vec<u8> {
+        let size = 158u32;
+        let mut p = vec![0u8; size as usize];
+        p[0..4].copy_from_slice(&size.to_be_bytes());
+        p[8..12].copy_from_slice(&0x0210_0000u32.to_be_bytes()); // v2.1
+        p[12..16].copy_from_slice(b"mntr");
+        p[16..20].copy_from_slice(b"GRAY");
+        p[20..24].copy_from_slice(b"XYZ ");
+        // 2020-01-01 00:00:00
+        p[24..36].copy_from_slice(&[0x07, 0xE4, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0]);
+        p[36..40].copy_from_slice(b"acsp");
+        // D50 illuminant in s15Fixed16.
+        p[68..72].copy_from_slice(&0x0000_F6D6u32.to_be_bytes());
+        p[72..76].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        p[76..80].copy_from_slice(&0x0000_D32Du32.to_be_bytes());
+        p[128..132].copy_from_slice(&1u32.to_be_bytes()); // one tag
+        p[132..136].copy_from_slice(b"kTRC");
+        p[136..140].copy_from_slice(&144u32.to_be_bytes());
+        p[140..144].copy_from_slice(&14u32.to_be_bytes());
+        p[144..148].copy_from_slice(b"curv");
+        p[152..156].copy_from_slice(&1u32.to_be_bytes());
+        p[156..158].copy_from_slice(&0x0233u16.to_be_bytes()); // gamma 2.2
+        p
+    }
+
+    #[test]
+    fn icc_transform_converts_gray_profile_to_srgb() {
+        let base = std::env::temp_dir().join(format!("rnn-icc-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let path = base.join("gray.png");
+
+        let img = GrayImage::from_pixel(2, 2, Luma([128]));
+        let mut png = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut png);
+        encoder.set_icc_profile(gray_icc_profile()).unwrap();
+        encoder
+            .write_image(img.as_raw(), 2, 2, ExtendedColorType::L8)
+            .unwrap();
+        fs::write(&path, &png).unwrap();
+
+        let decoded = decode_source(&path).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (2, 2));
+        assert_eq!(decoded.color(), ColorType::L8);
+        assert_ne!(
+            decoded.to_luma8().get_pixel(0, 0)[0],
+            128,
+            "the gamma-2.2 profile should change the pixel value"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn icc_transform_decision_matches_yazi() {
+        assert!(!requires_icc_transform(&ColorProfile::new_srgb()));
+        let mut gray = ColorProfile::new_srgb();
+        gray.color_space = DataColorSpace::Gray;
+        gray.cicp = None;
+        assert!(requires_icc_transform(&gray));
+        let mut cmyk = ColorProfile::new_srgb();
+        cmyk.color_space = DataColorSpace::Cmyk;
+        cmyk.cicp = None;
+        assert!(!requires_icc_transform(&cmyk));
+
+        assert_eq!(color_type_to_layout(ColorType::Rgb8), Some(Layout::Rgb));
+        assert_eq!(color_type_to_layout(ColorType::Rgba8), Some(Layout::Rgba));
+        assert_eq!(color_type_to_layout(ColorType::L8), Some(Layout::Gray));
+        assert_eq!(
+            color_type_to_layout(ColorType::La8),
+            Some(Layout::GrayAlpha)
+        );
+        assert_eq!(color_type_to_layout(ColorType::Rgb16), None);
+    }
+
     #[test]
     fn decode_source_applies_exif_orientation() {
         let base = std::env::temp_dir().join(format!("rnn-exif-test-{}", std::process::id()));
