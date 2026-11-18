@@ -140,11 +140,16 @@ are candidates, roughly in priority order.
       linemode, and `-J` keeps the cursor on an entry after toggling its
       selection (nnn's "no auto-advance"). `detail` is also accepted by
       `mgr.linemode` and `linemode detail`.
+- [x] **`mgr.sort_translit`** — natural sorting can strip accents and expand
+      ligatures (`é` → `e`, `Æ` → `AE`, `ß` → `ss`) first, using a table
+      ported from Yazi.
+- [x] **nnn's `-b` bookmark startup** — `-b <key>` (or `-b<key>`) starts in an
+      `NNN_BMS` bookmark or a name in nnn's bookmarks directory. Like nnn, an
+      explicit path argument wins, and an unknown key exits with an error.
 
 ## Next
 
-- [ ] Consider Yazi's `mgr.sort_translit` (transliterate accented names before
-      sorting; needs a transliteration table).
+- [ ] Consider nnn's `-Q` to skip the running-task quit warning.
 
 ## Local setup (outside this repo)
 

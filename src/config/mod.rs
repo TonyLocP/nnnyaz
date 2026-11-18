@@ -38,6 +38,9 @@ pub struct MgrConfig {
     /// Tie-break when the primary sort keys are equal (Yazi's
     /// `mgr.sort_fallback`).
     pub sort_fallback: SortFallback,
+    /// Transliterate accented names before natural sorting (Yazi's
+    /// `mgr.sort_translit`).
+    pub sort_translit: bool,
     /// Append `-> target` to symlinks in the file list (Yazi's
     /// `mgr.show_symlink`).
     pub show_symlink: bool,
@@ -97,6 +100,7 @@ impl Default for MgrConfig {
             sort_sensitive: false,
             sort_dir_first: true,
             sort_fallback: SortFallback::Alphabetical,
+            sort_translit: false,
             show_symlink: true,
             linemode: Linemode::Size,
             scrolloff: 5,
@@ -341,6 +345,9 @@ impl Config {
         if let Some(v) = p.mgr.show_symlink {
             self.mgr.show_symlink = v;
         }
+        if let Some(v) = p.mgr.sort_translit {
+            self.mgr.sort_translit = v;
+        }
         if let Some(v) = p.mgr.linemode {
             match parse_linemode(&v) {
                 Ok(linemode) => self.mgr.linemode = linemode,
@@ -481,6 +488,7 @@ struct PartialMgr {
     sort_sensitive: Option<bool>,
     sort_dir_first: Option<bool>,
     sort_fallback: Option<String>,
+    sort_translit: Option<bool>,
     show_symlink: Option<bool>,
     linemode: Option<String>,
     scrolloff: Option<usize>,
@@ -540,6 +548,7 @@ fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
                     "sort_sensitive",
                     "sort_dir_first",
                     "sort_fallback",
+                    "sort_translit",
                     "show_symlink",
                     "linemode",
                     "scrolloff",
@@ -626,6 +635,7 @@ mod tests {
             sort_sensitive = true
             sort_dir_first = false
             sort_fallback = "natural"
+            sort_translit = true
             show_symlink = false
             linemode = "mtime"
             typo = 1
@@ -643,6 +653,7 @@ mod tests {
         assert!(loaded.config.mgr.sort_sensitive);
         assert!(!loaded.config.mgr.sort_dir_first);
         assert_eq!(loaded.config.mgr.sort_fallback, SortFallback::Natural);
+        assert!(loaded.config.mgr.sort_translit);
         assert!(!loaded.config.mgr.show_symlink);
         assert_eq!(loaded.config.mgr.linemode, Linemode::Mtime);
         assert_eq!(loaded.config.preview.cache_size, 4);

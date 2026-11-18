@@ -44,6 +44,7 @@ use crate::{
         detect::{self, Kind},
         kitty, yazi, ImageProtocol, Key as PreviewKey, Preview,
     },
+    translit,
     util::human,
 };
 
@@ -2184,6 +2185,8 @@ struct Cli {
     show_owner: bool,
     /// `-J`: keep the cursor on an entry after toggling its selection.
     no_auto_advance: bool,
+    /// `-b key`: start in a bookmark (ignored when a path is given).
+    bookmark: Option<String>,
 }
 
 /// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
@@ -2243,6 +2246,7 @@ Options:
   -d, --detail               Start with the detail linemode
   -U, --owner                Start with the owner linemode
   -J, --no-auto-advance      Keep the cursor after toggling a selection
+  -b <KEY>, --bookmark <KEY> Start in a bookmark (ignored if PATH is given)
   -T <KEY>, --sort <KEY>     Sort order: a/d/s size, e extension, t time,
                              v natural; an uppercase key reverses
   -l <N>, --scroll <N>       Lines moved per mouse-wheel scroll [default: 1]
@@ -2279,6 +2283,25 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.show_owner = true;
         } else if text == "-J" || text == "--no-auto-advance" {
             cli.no_auto_advance = true;
+        } else if text == "-b" || text == "--bookmark" {
+            let value = args
+                .next()
+                .ok_or_else(|| "-b requires a bookmark key".to_string())?;
+            let value = value.to_string_lossy().into_owned();
+            if value.is_empty() {
+                return Err("-b requires a bookmark key".into());
+            }
+            cli.bookmark = Some(value);
+        } else if let Some(value) = text.strip_prefix("--bookmark=") {
+            if value.is_empty() {
+                return Err("-b requires a bookmark key".into());
+            }
+            cli.bookmark = Some(value.to_string());
+        } else if let Some(value) = text.strip_prefix("-b") {
+            if value.is_empty() {
+                return Err("-b requires a bookmark key".into());
+            }
+            cli.bookmark = Some(value.to_string());
         } else if text == "-T" || text == "--sort" {
             let value = args
                 .next()
@@ -2437,6 +2460,62 @@ fn parse_nnn_bms(raw: &str) -> Vec<(char, String)> {
         .collect()
 }
 
+/// Expand `~` and resolve relative paths against `base`.
+fn expand_path(raw: &str, base: &Path) -> PathBuf {
+    if raw.is_empty() {
+        return base.to_path_buf();
+    }
+    if raw == "~" {
+        if let Some(h) = env::var_os("HOME") {
+            return PathBuf::from(h);
+        }
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(h) = env::var_os("HOME") {
+            return PathBuf::from(h).join(rest);
+        }
+    }
+    let p = PathBuf::from(raw);
+    if p.is_absolute() {
+        p
+    } else {
+        base.join(p)
+    }
+}
+
+/// Resolve a bookmark key (from `NNN_BMS`) or a symlink name in nnn's
+/// bookmarks directory. Relative `NNN_BMS` paths are anchored at `base`.
+fn resolve_bookmark(name: &str, base: &Path) -> Option<PathBuf> {
+    if name.contains('/') || name == "." || name == ".." {
+        return None;
+    }
+    if name.chars().count() == 1 {
+        let key = name.chars().next().unwrap();
+        if let Some((_, raw)) = parse_nnn_bms(&env::var("NNN_BMS").unwrap_or_default())
+            .into_iter()
+            .find(|(k, _)| *k == key)
+        {
+            return Some(expand_path(&raw, base));
+        }
+    }
+
+    let dir = bookmarks_dir()?;
+    let candidate = dir.join(name);
+    let meta = fs::symlink_metadata(&candidate).ok()?;
+    if meta.file_type().is_symlink() {
+        let link = fs::read_link(&candidate).ok()?;
+        let link = if link.is_absolute() {
+            link
+        } else {
+            dir.join(link)
+        };
+        Some(fs::canonicalize(&link).unwrap_or(link))
+    } else if meta.is_dir() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 impl App {
     pub fn new(loaded: config::Loaded) -> io::Result<Self> {
         let cli = parse_cli(env::args_os().skip(1))
@@ -2460,7 +2539,25 @@ impl App {
                 .map(PathBuf::from)
         });
         let chooser_null = cli.chooser_null;
-        let start = cli.path.unwrap_or(env::current_dir()?);
+        let start = match (cli.path, &cli.bookmark) {
+            (Some(path), _) => path,
+            (None, Some(key)) => {
+                let base = env::current_dir()?;
+                let Some(path) = resolve_bookmark(key, &base) else {
+                    eprintln!("rnn: bookmark '{key}' not set");
+                    std::process::exit(1);
+                };
+                if !path.is_dir() {
+                    eprintln!(
+                        "rnn: bookmark '{key}': {} is not a directory",
+                        path.display()
+                    );
+                    std::process::exit(1);
+                }
+                path
+            }
+            (None, None) => env::current_dir()?,
+        };
         let cwd = fs::canonicalize(start)?;
         let config::Loaded { config, warnings } = loaded;
         let status = warnings.join(" · ");
@@ -2799,6 +2896,7 @@ impl App {
         let sensitive = self.config.mgr.sort_sensitive;
         let dir_first = self.config.mgr.sort_dir_first;
         let fallback = self.config.mgr.sort_fallback;
+        let translit = self.config.mgr.sort_translit;
         if matches!(sort, Sort::Random) {
             // Fisher–Yates with a time-seeded xorshift; no extra dependency.
             let mut seed = SystemTime::now()
@@ -2829,7 +2927,17 @@ impl App {
                                 a.name.to_lowercase().cmp(&b.name.to_lowercase())
                             }
                         }
-                        Sort::Natural => natural_cmp(&a.name, &b.name, sensitive),
+                        Sort::Natural => {
+                            if translit {
+                                natural_cmp(
+                                    &translit::transliterate(&a.name),
+                                    &translit::transliterate(&b.name),
+                                    sensitive,
+                                )
+                            } else {
+                                natural_cmp(&a.name, &b.name, sensitive)
+                            }
+                        }
                         Sort::Size => a.size.cmp(&b.size),
                         Sort::Time => a.modified.cmp(&b.modified),
                         Sort::Btime => a.created.cmp(&b.created),
@@ -3100,24 +3208,7 @@ impl App {
 
     /// Resolve a user-typed path, expanding `~` and relative paths.
     fn expand_path(&self, raw: &str) -> PathBuf {
-        if raw.is_empty() {
-            return self.cwd.clone();
-        }
-        if raw == "~" {
-            if let Some(h) = env::var_os("HOME") {
-                return PathBuf::from(h);
-            }
-        } else if let Some(rest) = raw.strip_prefix("~/") {
-            if let Some(h) = env::var_os("HOME") {
-                return PathBuf::from(h).join(rest);
-            }
-        }
-        let p = PathBuf::from(raw);
-        if p.is_absolute() {
-            p
-        } else {
-            self.cwd.join(p)
-        }
+        expand_path(raw, &self.cwd)
     }
 
     /// Split the current `go to` input into `(directory to list, display
@@ -3309,35 +3400,7 @@ impl App {
     /// Resolve a bookmark key (from `NNN_BMS`) or a symlink name in nnn's
     /// bookmarks directory.
     fn bookmark_target(&self, name: &str) -> Option<PathBuf> {
-        if name.contains('/') || name == "." || name == ".." {
-            return None;
-        }
-        if name.chars().count() == 1 {
-            let key = name.chars().next().unwrap();
-            if let Some((_, raw)) = parse_nnn_bms(&env::var("NNN_BMS").unwrap_or_default())
-                .into_iter()
-                .find(|(k, _)| *k == key)
-            {
-                return Some(self.expand_path(&raw));
-            }
-        }
-
-        let dir = bookmarks_dir()?;
-        let candidate = dir.join(name);
-        let meta = fs::symlink_metadata(&candidate).ok()?;
-        if meta.file_type().is_symlink() {
-            let link = fs::read_link(&candidate).ok()?;
-            let link = if link.is_absolute() {
-                link
-            } else {
-                dir.join(link)
-            };
-            Some(fs::canonicalize(&link).unwrap_or(link))
-        } else if meta.is_dir() {
-            Some(candidate)
-        } else {
-            None
-        }
+        resolve_bookmark(name, &self.cwd)
     }
 
     /// Keys shown in the bookmark prompt hint: `NNN_BMS` keys plus the names
@@ -7668,6 +7731,30 @@ mod tests {
                 .unwrap()
                 .no_auto_advance
         );
+        assert_eq!(
+            parse_cli(args(&["-b", "d"])).unwrap().bookmark.as_deref(),
+            Some("d")
+        );
+        assert_eq!(
+            parse_cli(args(&["-bd"])).unwrap().bookmark.as_deref(),
+            Some("d")
+        );
+        assert_eq!(
+            parse_cli(args(&["--bookmark", "docs"]))
+                .unwrap()
+                .bookmark
+                .as_deref(),
+            Some("docs")
+        );
+        assert_eq!(
+            parse_cli(args(&["--bookmark=docs"]))
+                .unwrap()
+                .bookmark
+                .as_deref(),
+            Some("docs")
+        );
+        assert!(parse_cli(args(&["-b"])).is_err());
+        assert!(parse_cli(args(&["--bookmark="])).is_err());
         assert_eq!(
             parse_cli(args(&["-T", "e"])).unwrap().sort,
             Some((Sort::Extension, false))

@@ -29,7 +29,8 @@ how many lines the mouse wheel moves, and `-i` appends the hovered file's
 `file -b` description to the status line. nnn's display flags also work:
 `-d` starts in the detail linemode (time, permissions, owner, size), `-U`
 starts with the owner linemode, and `-J` keeps the cursor on an entry after
-toggling its selection.
+toggling its selection. `-b <key>` starts in a bookmark (an `NNN_BMS` key or a
+name in nnn's bookmarks directory); a path argument takes precedence.
 
 ## Quitting and the current directory
 
@@ -194,6 +195,7 @@ sort_reverse = false
 sort_sensitive = false  # compare names case-sensitively
 sort_dir_first = true   # keep directories above files
 sort_fallback = "alphabetical"  # tie-break: alphabetical | natural
+sort_translit = false   # strip accents before natural sorting (é -> e)
 show_symlink = true     # append " -> target" to symlinks in the list
 linemode = "size"       # size | permissions | btime | mtime | owner | detail | none
 scrolloff = 5           # rows of context kept above/below the cursor (0 disables)

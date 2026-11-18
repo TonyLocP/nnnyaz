@@ -8,6 +8,7 @@ mod app;
 mod config;
 mod openwith;
 mod preview;
+mod translit;
 mod util;
 
 fn main() -> io::Result<()> {
