@@ -632,6 +632,9 @@ impl Default for Keymap {
             ("X", "unyank", None),
             ("d", "trash", None),
             ("D", "delete", None),
+            ("b", "bookmark", Some("bookmarks")),
+            ("B", "add_bookmark", Some("bookmark this dir")),
+            ("'", "mark_jump", Some("jump to mark")),
             ("r", "rename", None),
             ("a", "create", None),
             ("A", "bulk_create", None),
@@ -706,7 +709,7 @@ impl Default for Keymap {
             ("c D", "copy dir_url", Some("directory url")),
             ("c f", "copy filename", Some("filename")),
             ("c n", "copy stem", Some("name without extension")),
-            ("m", "nop", None),
+            ("m", "mark_set", Some("set mark")),
             ("m s", "linemode size", Some("size")),
             ("m p", "linemode permissions", Some("permissions")),
             ("m b", "linemode btime", Some("created")),
@@ -829,6 +832,31 @@ mod tests {
         assert!(km
             .mgr
             .walk(&parse_seq("g").unwrap())
+            .unwrap()
+            .has_children());
+    }
+
+    #[test]
+    fn default_keymap_has_marks_and_bookmarks() {
+        let km = Keymap::default();
+        let action = |seq: &str| {
+            km.mgr
+                .walk(&parse_seq(seq).unwrap())
+                .unwrap()
+                .action()
+                .cloned()
+        };
+        assert_eq!(action("m"), Some(Action::MarkSet));
+        assert_eq!(
+            action("m s"),
+            Some(Action::SetLinemode(crate::app::Linemode::Size))
+        );
+        assert_eq!(action("'"), Some(Action::MarkJump));
+        assert_eq!(action("b"), Some(Action::Bookmark));
+        assert_eq!(action("B"), Some(Action::AddBookmark));
+        assert!(km
+            .mgr
+            .walk(&parse_seq("m").unwrap())
             .unwrap()
             .has_children());
     }

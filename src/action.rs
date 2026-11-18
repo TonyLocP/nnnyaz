@@ -34,6 +34,10 @@ pub enum Action {
     Goto(String),
     GotoTrash,
     Cd,
+    MarkSet,
+    MarkJump,
+    Bookmark,
+    AddBookmark,
 
     // view
     Hidden,
@@ -205,6 +209,10 @@ impl Action {
             Action::Goto(_) => "goto",
             Action::GotoTrash => "goto_trash",
             Action::Cd => "cd",
+            Action::MarkSet => "mark_set",
+            Action::MarkJump => "mark_jump",
+            Action::Bookmark => "bookmark",
+            Action::AddBookmark => "add_bookmark",
             Action::Hidden => "hidden",
             Action::TogglePreview => "toggle_preview",
             Action::Zoom(_) => "zoom",
@@ -336,6 +344,10 @@ impl Action {
             "follow" => Action::Follow,
             "goto" => Action::Goto(arg(0)?.to_string()),
             "goto_trash" => Action::GotoTrash,
+            "mark_set" | "mark" => Action::MarkSet,
+            "mark_jump" | "mark_goto" => Action::MarkJump,
+            "bookmark" | "bookmarks" => Action::Bookmark,
+            "add_bookmark" | "bookmark_add" => Action::AddBookmark,
             "cd" => match args.first() {
                 None | Some(&"--interactive") => Action::Cd,
                 Some(_) => Action::Goto(arg(0)?.to_string()),
@@ -545,6 +557,10 @@ mod tests {
         assert_eq!(parse("open --interactive").unwrap(), Action::OpenWith);
         assert_eq!(parse("open").unwrap(), Action::Open);
         assert_eq!(parse("enter").unwrap(), Action::Enter);
+        assert_eq!(parse("mark_set").unwrap(), Action::MarkSet);
+        assert_eq!(parse("mark_jump").unwrap(), Action::MarkJump);
+        assert_eq!(parse("bookmark").unwrap(), Action::Bookmark);
+        assert_eq!(parse("add_bookmark").unwrap(), Action::AddBookmark);
         assert_eq!(parse("yank --cut").unwrap(), Action::Cut);
         assert_eq!(parse("remove").unwrap(), Action::Trash);
         assert_eq!(parse("remove --permanently").unwrap(), Action::Delete);

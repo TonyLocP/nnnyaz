@@ -1,11 +1,11 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env,
     ffi::{OsStr, OsString},
     fs,
     io::{self, BufRead, Read, Write},
     ops::Range,
-    os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    os::unix::{ffi::OsStrExt, fs::symlink, fs::MetadataExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -83,6 +83,15 @@ enum Prompt {
     SearchRg,
     Shell,
     TabRename,
+    Bookmark,
+    BookmarkName,
+}
+
+/// A pending mark operation waiting for its single-character key.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MarkOp {
+    Set,
+    Jump,
 }
 
 /// A single-line prompt buffer with a cursor and an optional selection.
@@ -719,6 +728,12 @@ pub struct App {
     linemode: Linemode,
     history: Vec<PathBuf>,
     history_pos: usize,
+    /// Saved directory marks, keyed by a single character.
+    marks: BTreeMap<char, PathBuf>,
+    /// Where marks are persisted (`<config>/marks`).
+    marks_path: Option<PathBuf>,
+    /// Set by `mark_set`/`mark_jump` while waiting for the mark key.
+    mark_pending: Option<MarkOp>,
     input: Input,
     shell_block: bool,
     status: String,
@@ -2201,6 +2216,66 @@ fn write_cwd_file(path: &Path, cwd: &Path) {
     }
 }
 
+/// Read directory marks. Each line is `<key><TAB><path>`; unknown lines are
+/// ignored so a partially written file never breaks startup.
+fn load_marks(path: &Path) -> Option<BTreeMap<char, PathBuf>> {
+    let text = fs::read_to_string(path).ok()?;
+    Some(parse_marks(&text))
+}
+
+fn parse_marks(text: &str) -> BTreeMap<char, PathBuf> {
+    let mut marks = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut chars = line.chars();
+        let Some(key) = chars.next() else {
+            continue;
+        };
+        let rest: String = chars.collect();
+        let rest = rest.strip_prefix('\t').unwrap_or(rest.as_str());
+        if rest.is_empty() {
+            continue;
+        }
+        marks.insert(key, PathBuf::from(rest));
+    }
+    marks
+}
+
+fn format_marks(marks: &BTreeMap<char, PathBuf>) -> String {
+    let mut out = String::new();
+    for (key, path) in marks {
+        out.push(*key);
+        out.push('\t');
+        out.push_str(&path.to_string_lossy());
+        out.push('\n');
+    }
+    out
+}
+
+/// nnn's bookmarks directory (`<config>/nnn/bookmarks`), shared with nnn so
+/// symlinked bookmarks work in both file managers.
+fn bookmarks_dir() -> Option<PathBuf> {
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(base.join("nnn").join("bookmarks"))
+}
+
+/// Parse nnn's `NNN_BMS` (`d:$HOME/Docs;u:/tmp`) into key/path pairs.
+fn parse_nnn_bms(raw: &str) -> Vec<(char, String)> {
+    raw.split(';')
+        .filter_map(|item| {
+            let (key, path) = item.split_once(':')?;
+            let key = key.trim().chars().next()?;
+            let path = path.trim();
+            (!path.is_empty()).then(|| (key, path.to_string()))
+        })
+        .collect()
+}
+
 impl App {
     pub fn new(loaded: config::Loaded) -> io::Result<Self> {
         let cli = parse_cli(env::args_os().skip(1))
@@ -2231,6 +2306,11 @@ impl App {
             quality: preview_cfg.image_quality,
         };
         let image_delay = std::time::Duration::from_millis(u64::from(preview_cfg.image_delay));
+        let marks_path = config::config_dir().map(|dir| dir.join("marks"));
+        let marks = marks_path
+            .as_deref()
+            .and_then(load_marks)
+            .unwrap_or_default();
         let mut app = App {
             config,
             cwd: cwd.clone(),
@@ -2258,6 +2338,9 @@ impl App {
             linemode: mgr.linemode,
             history: vec![cwd],
             history_pos: 0,
+            marks,
+            marks_path,
+            mark_pending: None,
             input: Input::default(),
             shell_block: false,
             status,
@@ -2949,6 +3032,198 @@ impl App {
         self.refresh_completions();
     }
 
+    // ─────────────── marks and bookmarks ───────────────
+
+    fn set_mark(&mut self, key: char) {
+        if key.is_control() || key.is_whitespace() {
+            return;
+        }
+        self.marks.insert(key, self.cwd.clone());
+        self.save_marks();
+        self.status = format!("mark '{key}' → {}", self.cwd.display());
+    }
+
+    fn jump_to_mark(&mut self, key: char) {
+        let Some(path) = self.marks.get(&key).cloned() else {
+            self.status = format!("mark '{key}' not set");
+            return;
+        };
+        if !path.is_dir() {
+            self.status = format!("mark '{key}': {} is not a directory", path.display());
+            return;
+        }
+        self.cd(path.clone(), None);
+        if self.cwd == path {
+            self.status = format!("jumped to mark '{key}'");
+        }
+    }
+
+    fn save_marks(&mut self) {
+        let Some(path) = self.marks_path.clone() else {
+            self.status = "marks: no config directory".into();
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                self.status = format!("marks: {e}");
+                return;
+            }
+        }
+        if let Err(e) = fs::write(&path, format_marks(&self.marks)) {
+            self.status = format!("marks: {e}");
+        }
+    }
+
+    fn start_bookmark(&mut self) {
+        self.input.clear();
+        self.completions.clear();
+        self.mode = Mode::Prompt(Prompt::Bookmark);
+    }
+
+    fn start_add_bookmark(&mut self) {
+        let name = self
+            .cwd
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("root");
+        self.input = Input::new(name);
+        self.completions.clear();
+        self.mode = Mode::Prompt(Prompt::BookmarkName);
+    }
+
+    /// Resolve a bookmark key (from `NNN_BMS`) or a symlink name in nnn's
+    /// bookmarks directory.
+    fn bookmark_target(&self, name: &str) -> Option<PathBuf> {
+        if name.contains('/') || name == "." || name == ".." {
+            return None;
+        }
+        if name.chars().count() == 1 {
+            let key = name.chars().next().unwrap();
+            if let Some((_, raw)) = parse_nnn_bms(&env::var("NNN_BMS").unwrap_or_default())
+                .into_iter()
+                .find(|(k, _)| *k == key)
+            {
+                return Some(self.expand_path(&raw));
+            }
+        }
+
+        let dir = bookmarks_dir()?;
+        let candidate = dir.join(name);
+        let meta = fs::symlink_metadata(&candidate).ok()?;
+        if meta.file_type().is_symlink() {
+            let link = fs::read_link(&candidate).ok()?;
+            let link = if link.is_absolute() {
+                link
+            } else {
+                dir.join(link)
+            };
+            Some(fs::canonicalize(&link).unwrap_or(link))
+        } else if meta.is_dir() {
+            Some(candidate)
+        } else {
+            None
+        }
+    }
+
+    /// Keys shown in the bookmark prompt hint: `NNN_BMS` keys plus the names
+    /// of symlinked bookmarks.
+    fn bookmark_keys(&self) -> String {
+        let mut keys: Vec<String> = parse_nnn_bms(&env::var("NNN_BMS").unwrap_or_default())
+            .into_iter()
+            .map(|(key, _)| key.to_string())
+            .collect();
+        if let Some(dir) = bookmarks_dir() {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
+                        if let Some(name) = entry.file_name().to_str() {
+                            keys.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        keys.join(" ")
+    }
+
+    fn open_bookmark(&mut self, name: &str) {
+        if name.is_empty() {
+            let Some(dir) = bookmarks_dir() else {
+                self.status = "bookmarks: no config directory".into();
+                return;
+            };
+            if let Err(e) = fs::create_dir_all(&dir) {
+                self.status = format!("bookmarks: {e}");
+                return;
+            }
+            self.cd(dir, None);
+            return;
+        }
+        let Some(path) = self.bookmark_target(name) else {
+            self.status = format!("bookmark '{name}' not set");
+            return;
+        };
+        if !path.is_dir() {
+            self.status = format!("bookmark '{name}': {} is not a directory", path.display());
+            return;
+        }
+        self.cd(path, None);
+    }
+
+    fn create_bookmark(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        if name.contains('/') || name == "." || name == ".." {
+            self.status = "bookmark name cannot contain '/'".into();
+            return;
+        }
+        let Some(dir) = bookmarks_dir() else {
+            self.status = "bookmarks: no config directory".into();
+            return;
+        };
+        if let Err(e) = fs::create_dir_all(&dir) {
+            self.status = format!("bookmarks: {e}");
+            return;
+        }
+        let target = dir.join(name);
+        let cwd = fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.cwd.clone());
+        match fs::symlink_metadata(&target) {
+            Ok(meta) => {
+                let same = meta.file_type().is_symlink()
+                    && fs::read_link(&target)
+                        .ok()
+                        .map(|link| {
+                            let link = if link.is_absolute() {
+                                link
+                            } else {
+                                dir.join(link)
+                            };
+                            fs::canonicalize(&link).unwrap_or(link) == cwd
+                        })
+                        .unwrap_or(false);
+                self.status = if same {
+                    format!("already bookmarked as {name}")
+                } else {
+                    format!("bookmark '{name}' already exists")
+                };
+                return;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                self.status = format!("bookmark: {e}");
+                return;
+            }
+        }
+        match symlink(&cwd, &target) {
+            Ok(()) => self.status = format!("bookmark {name} → {}", cwd.display()),
+            Err(e) => self.status = format!("bookmark: {e}"),
+        }
+    }
+
     fn external(&mut self, term: &mut DefaultTerminal, prog: &str, path: &Path) {
         let mut parts = prog.split_whitespace();
         let Some(p) = parts.next() else { return };
@@ -3602,7 +3877,17 @@ impl App {
             return;
         }
 
+        if p == Prompt::Bookmark {
+            self.open_bookmark(&name);
+            return;
+        }
+
         if name.is_empty() {
+            return;
+        }
+
+        if p == Prompt::BookmarkName {
+            self.create_bookmark(&name);
             return;
         }
 
@@ -3645,9 +3930,13 @@ impl App {
                 Some(e) => fs::rename(&e.path, self.cwd.join(&name)),
                 None => return,
             },
-            Prompt::Delete | Prompt::Cd | Prompt::SearchFd | Prompt::SearchRg | Prompt::Shell => {
-                return
-            }
+            Prompt::Delete
+            | Prompt::Cd
+            | Prompt::SearchFd
+            | Prompt::SearchRg
+            | Prompt::Shell
+            | Prompt::Bookmark
+            | Prompt::BookmarkName => return,
             Prompt::TabRename => return,
         };
         match r {
@@ -4409,6 +4698,23 @@ impl App {
         let ctrl_c =
             key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c');
 
+        // A mark command is waiting for its single-character key.
+        if let Some(op) = self.mark_pending.take() {
+            if !ctrl_c && key.code != KeyCode::Esc {
+                if let KeyCode::Char(c) = key.code {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        match op {
+                            MarkOp::Set => self.set_mark(c),
+                            MarkOp::Jump => self.jump_to_mark(c),
+                        }
+                    }
+                }
+            }
+            return Ok(false);
+        }
+
         match self.mode {
             Mode::Filter => {
                 if ctrl_c {
@@ -4611,6 +4917,19 @@ impl App {
         Ok(false)
     }
 
+    /// Action attached to the currently pending key sequence, if any.
+    fn pending_action(&self, ctx: Context) -> Option<Action> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        self.config
+            .keymap
+            .node(ctx)
+            .walk(&self.pending)?
+            .action()
+            .cloned()
+    }
+
     /// Feed a key into the active keymap trie. Returns `Some(quit)` when an
     /// action decided to exit rnn.
     fn handle_mapped_key(
@@ -4629,6 +4948,19 @@ impl App {
                 .map(|(chord, child)| (*chord, child.has_children(), child.action().cloned()))
         };
         let Some((chord, has_children, action)) = next else {
+            // `m` is both a prefix (linemode) and the mark command. A key that
+            // isn't a linemode binding after it names the mark to set.
+            if let Some(Action::MarkSet) = self.pending_action(ctx) {
+                if let KeyCode::Char(c) = key.code {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT)
+                    {
+                        self.pending.clear();
+                        self.set_mark(c);
+                        return Ok(None);
+                    }
+                }
+            }
             self.pending.clear();
             return Ok(None);
         };
@@ -4733,6 +5065,10 @@ impl App {
             Action::Goto(path) => self.goto(&path),
             Action::GotoTrash => self.goto_trash(),
             Action::Cd => self.start_cd(),
+            Action::MarkSet => self.mark_pending = Some(MarkOp::Set),
+            Action::MarkJump => self.mark_pending = Some(MarkOp::Jump),
+            Action::Bookmark => self.start_bookmark(),
+            Action::AddBookmark => self.start_add_bookmark(),
             Action::Hidden => {
                 self.show_hidden = !self.show_hidden;
                 self.reload();
@@ -5186,6 +5522,8 @@ impl App {
                     Prompt::SearchRg => "rg",
                     Prompt::Shell => "shell",
                     Prompt::TabRename => "rename tab",
+                    Prompt::Bookmark => "bookmark",
+                    Prompt::BookmarkName => "bookmark name",
                     Prompt::Delete => "",
                 };
                 format!("{label}: {}", self.input.as_str())
@@ -5739,6 +6077,8 @@ impl App {
             Prompt::SearchRg => "rg",
             Prompt::Shell => "shell",
             Prompt::TabRename => "rename tab",
+            Prompt::Bookmark => "bookmark",
+            Prompt::BookmarkName => "bookmark name",
             Prompt::Delete => "",
         };
         let prefix = format!("{label}: ");
@@ -5751,10 +6091,18 @@ impl App {
             return;
         }
         let avail = area.width as usize - prefix_w;
+        let bookmark_hint = (p == Prompt::Bookmark)
+            .then(|| {
+                let keys = self.bookmark_keys();
+                (!keys.is_empty()).then(|| format!("keys: {keys}"))
+            })
+            .flatten();
         let hint = if matches!(p, Prompt::Rename | Prompt::TabRename) {
             RENAME_HINTS
                 .into_iter()
                 .find(|hint| Span::raw(*hint).width() + 16 <= avail)
+        } else if p == Prompt::Bookmark {
+            bookmark_hint.as_deref()
         } else {
             None
         };
@@ -5862,6 +6210,7 @@ impl App {
             "p / P       paste / paste-force",
             "Y / X       cancel yank",
             "d / D       trash / delete (confirm)",
+            "b / B       bookmarks / add this dir",
             "r / a       rename / create",
             "A           bulk create",
             "w           task manager",
@@ -5890,8 +6239,9 @@ impl App {
             "s / S       search fd / rg",
             "z           fzf jump",
             "Z           zoxide jump",
+            "' x         jump to mark x",
             "c …         copy path/url/dir/name",
-            "m …         linemode size/perms/time",
+            "m …         linemode; m x sets mark",
             "_ / Alt+-   symlink relative / absolute",
             "Ctrl+-      hardlink",
             "gh gc gd    home / config / downloads",
@@ -6415,6 +6765,27 @@ mod tests {
         );
         assert_eq!(open_action(false, Vec::new()), OpenAction::Nothing);
         assert_eq!(open_action(true, Vec::new()), OpenAction::Nothing);
+    }
+
+    #[test]
+    fn marks_roundtrip_and_ignore_junk() {
+        let text = "a\t/tmp\n# comment\nb\t/home/u\nc\r\n\n";
+        let marks = parse_marks(text);
+        assert_eq!(marks.get(&'a'), Some(&PathBuf::from("/tmp")));
+        assert_eq!(marks.get(&'b'), Some(&PathBuf::from("/home/u")));
+        assert_eq!(marks.len(), 2);
+
+        let formatted = format_marks(&marks);
+        assert_eq!(parse_marks(&formatted), marks);
+    }
+
+    #[test]
+    fn parses_nnn_bms_pairs() {
+        assert_eq!(
+            parse_nnn_bms("d:$HOME/Docs;u:/tmp; bad; x: "),
+            vec![('d', "$HOME/Docs".into()), ('u', "/tmp".into())]
+        );
+        assert!(parse_nnn_bms("").is_empty());
     }
 
     #[test]

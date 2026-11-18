@@ -64,6 +64,25 @@ rnn() {
 `quit_cwd` is also available as a normal action, so `Q` can be rebound in
 `keymap.toml`.
 
+## Marks and bookmarks
+
+`m` followed by a key saves the current directory as a mark; `'` followed by
+the same key jumps back to it. Marks are stored in `<config>/marks` as one
+`key<TAB>path` line per entry, so they survive restarts. Because `m` is also
+the linemode prefix, the keys already used by linemode (`s`, `p`, `b`, `m`,
+`o`, `n`) keep their linemode meaning; use any other key for a mark.
+
+`b` opens a bookmark prompt. Type an `NNN_BMS` key (for example `d`) or the
+name of a symlinked bookmark and press `Enter`; an empty prompt opens nnn's
+bookmarks directory. `B` bookmarks the current directory by creating a symlink
+under `${XDG_CONFIG_HOME:-~/.config}/nnn/bookmarks`, named after the directory
+by default. The directory is shared with nnn, so bookmarks created in either
+file manager work in both. `NNN_BMS` uses nnn's `key:path;key:path` format:
+
+```sh
+export NNN_BMS='d:~/Documents;u:/home/user/Cam Uploads;D:~/Downloads/'
+```
+
 ## Picker mode
 
 rnn can act as a file picker, like nnn's `-p` or Yazi's `--chooser-file`.

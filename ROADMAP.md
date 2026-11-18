@@ -71,11 +71,17 @@ are candidates, roughly in priority order.
       targets (Yazi's `spread`), and the rest run once per file. Hovered,
       yanked, and tab placeholders expand to empty in an opener's context, as
       in Yazi. Picker `Enter` now picks directories instead of entering them.
+- [x] **Marks and bookmarks** — `m` + key saves a directory mark and `'` + key
+      jumps to it; marks persist in `<config>/marks` and stale or missing
+      marks report a status message instead of changing directory. Keys that
+      are linemode bindings (`m s`, `m p`, `m b`, `m m`, `m o`, `m n`) keep
+      their linemode meaning. `b` opens a bookmark prompt that accepts
+      `NNN_BMS` keys and symlinked bookmark names, with an empty prompt opening
+      nnn's bookmarks directory; `B` creates a symlink bookmark under
+      `${XDG_CONFIG_HOME:-~/.config}/nnn/bookmarks`, shared with nnn.
 
 ## Next
 
-- [ ] Marks and bookmarks: Yazi-style `m`/`'` marks and nnn-style bookmarks
-      for fast navigation between directories.
 - [ ] Audit the remaining picker `--chooser-file` edge cases against Yazi.
 
 ## Local setup (outside this repo)
@@ -90,5 +96,8 @@ are candidates, roughly in priority order.
   this is intentional so the fish wrapper can `cd` on quit.
 - `l`/`→` also open a hovered file; Yazi's `enter` only enters directories.
   `Enter`/`o` follow Yazi's selection-aware `open`.
+- Marks use `m` + key, but `m s`, `m p`, `m b`, `m m`, `m o`, and `m n` stay
+  bound to linemode, so those six keys cannot name a mark. This keeps the
+  default keymap compatible with Yazi's linemode prefix.
 - Yazi `pick` context is not supported; picker behavior is configured with
   `--chooser-file`/`-p` instead.
