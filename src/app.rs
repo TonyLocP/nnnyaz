@@ -5905,16 +5905,12 @@ impl App {
                     KeyCode::Right => self.input.move_right(),
                     KeyCode::Home => self.input.move_home(),
                     KeyCode::End => self.input.move_end(),
-                    // Plain j/k navigate while the filter is empty; J/K and
-                    // Ctrl+j/k keep navigating after you start typing.
-                    KeyCode::Char('j')
-                        if p == Prompt::SessionLoad && (ctrl || self.input.as_str().is_empty()) =>
-                    {
+                    // Plain j/k always type into the filter; J/K and
+                    // Ctrl+j/k move through the list.
+                    KeyCode::Char('j') if ctrl && p == Prompt::SessionLoad => {
                         self.move_completion(1)
                     }
-                    KeyCode::Char('k')
-                        if p == Prompt::SessionLoad && (ctrl || self.input.as_str().is_empty()) =>
-                    {
+                    KeyCode::Char('k') if ctrl && p == Prompt::SessionLoad => {
                         self.move_completion(-1)
                     }
                     KeyCode::Char('J') if p == Prompt::SessionLoad => self.move_completion(1),
@@ -7264,7 +7260,7 @@ impl App {
                 .into_iter()
                 .find(|hint| Span::raw(*hint).width() + 16 <= avail)
         } else if p == Prompt::SessionLoad {
-            (!self.completions.is_empty()).then_some("j/k J/K · Enter load · Ctrl+d delete")
+            (!self.completions.is_empty()).then_some("J/K move · Enter load · Ctrl+d delete")
         } else if p == Prompt::Bookmark {
             bookmark_hint.as_deref()
         } else {
