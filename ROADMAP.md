@@ -184,11 +184,13 @@ are candidates, roughly in priority order.
       `$VISUAL`/`$EDITOR`/`vi` on open (empty files show "empty file" and are
       left alone), while `-u` is a compatibility no-op because rnn already
       uses the selection without prompting.
+- [x] **nnn's `-f` history file** — `-f` loads and saves the last 16 shell
+      commands at `<config>/.history`, and Up/Down in the `;`/`:` prompt
+      recall them with nnn's wrap-around behavior.
 
 ## Next
 
-- [ ] Consider nnn's `-K` (report keymap collisions and exit) and `-f`
-      (persistent history file).
+- [ ] Consider nnn's `-K` (report keymap collisions and exit).
 
 ## Local setup (outside this repo)
 

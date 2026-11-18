@@ -41,8 +41,10 @@ substring match. While the filter prompt is open, `/` cycles string → fuzzy �
 regex (matching nnn) and `:` cycles smart case → case-insensitive →
 case-sensitive; the active mode is shown next to the filter text. `-e` opens
 text files in `$VISUAL`/`$EDITOR`/`vi` instead of the external opener (empty
-files are left alone), and `-u` is accepted for compatibility because rnn
-already acts on the selection without prompting. Sessions work like nnn's: `-s <name>` loads a saved session (`@` is the last session)
+files are left alone), `-u` is accepted for compatibility because rnn
+already acts on the selection without prompting, and `-f` keeps a persistent
+shell-command history at `<config>/.history` (Up/Down in the `;`/`:` prompt
+recall the last 16 commands). Sessions work like nnn's: `-s <name>` loads a saved session (`@` is the last session)
 and `-S` saves the current tabs on exit, defaulting to `@`. Loading a named
 session first stores the previous state in `@`. Sessions live under
 `<config>/sessions`. Inside rnn, `t S` opens nnn's session menu (`s` save,

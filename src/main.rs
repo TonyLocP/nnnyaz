@@ -33,6 +33,7 @@ fn main() -> io::Result<()> {
     app.enable_mouse();
     let res = app.run(&mut terminal);
     app.save_persistent_session();
+    app.save_shell_history();
     app.disable_mouse();
     app.disable_keyboard_protocol();
     ratatui::restore();

@@ -825,6 +825,56 @@ fn load_session(name: &str) -> Option<SessionFile> {
     (file.version == SESSION_VERSION).then_some(file)
 }
 
+/// nnn keeps its command history at `<config>/.history`.
+const SHELL_HISTORY_MAX: usize = 16;
+
+fn shell_history_path() -> Option<PathBuf> {
+    config::config_dir().map(|dir| dir.join(".history"))
+}
+
+/// Read one command per line, keeping at most the newest entries.
+fn load_shell_history(path: &Path) -> Option<Vec<String>> {
+    let text = fs::read_to_string(path).ok()?;
+    let mut history: Vec<String> = text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    if history.len() > SHELL_HISTORY_MAX {
+        history.drain(..history.len() - SHELL_HISTORY_MAX);
+    }
+    Some(history)
+}
+
+/// Append a command, moving a repeat to the end, and cap the list like nnn.
+fn push_shell_history(history: &mut Vec<String>, cmd: &str) {
+    if cmd.is_empty() {
+        return;
+    }
+    if let Some(pos) = history.iter().position(|entry| entry == cmd) {
+        history.remove(pos);
+    }
+    history.push(cmd.to_string());
+    if history.len() > SHELL_HISTORY_MAX {
+        history.drain(..history.len() - SHELL_HISTORY_MAX);
+    }
+}
+
+/// nnn's Up/Down behavior: Up starts at the newest and wraps at the oldest;
+/// Down starts at the oldest and wraps at the newest.
+fn shell_history_step(len: usize, pos: Option<usize>, up: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    match (pos, up) {
+        (None, true) => Some(len - 1),
+        (None, false) => Some(0),
+        (Some(0), true) => Some(len - 1),
+        (Some(i), true) => Some(i.saturating_sub(1)),
+        (Some(i), false) => Some((i + 1) % len),
+    }
+}
+
 /// One row in the `Tab` (spot/info) overlay.
 enum InfoLine {
     Section(&'static str),
@@ -911,6 +961,12 @@ pub struct App {
     mark_pending: Option<MarkOp>,
     input: Input,
     shell_block: bool,
+    /// Shell commands run this session (oldest first, at most 16).
+    shell_history: Vec<String>,
+    /// Index while browsing `shell_history`; `None` when editing a new one.
+    shell_history_pos: Option<usize>,
+    /// `-f`: load and save the shell history at `<config>/.history`.
+    shell_history_file: Option<PathBuf>,
     status: String,
     focus: Option<String>,
     page: usize,
@@ -2431,6 +2487,8 @@ struct Cli {
     fuzzy_filter: bool,
     /// `-e`: open text files in `$VISUAL`/`$EDITOR`/`vi`.
     editor_text: bool,
+    /// `-f`: keep a persistent shell command history.
+    history: bool,
 }
 
 /// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
@@ -2498,6 +2556,7 @@ Options:
   -g, --regex                Use regex filters (default: smart substring)
   -z, --fuzzy                Use fuzzy filters
   -e, --editor               Open text files in $VISUAL/$EDITOR/vi
+  -f, --history              Keep a persistent shell command history
   -u, --use-selection        Accepted for nnn compatibility (rnn always uses the selection)
   -R, --no-rollover          Accepted for nnn compatibility (rnn never rolls over)
   -s <NAME>, --session <NAME> Load a session (@ is the last session)
@@ -2561,6 +2620,8 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.fuzzy_filter = true;
         } else if text == "-e" || text == "--editor" {
             cli.editor_text = true;
+        } else if text == "-f" || text == "--history" {
+            cli.history = true;
         } else if text == "-u" || text == "--use-selection" {
             // rnn already acts on the selection without prompting, so nnn's
             // `-u` is accepted as a compatibility no-op.
@@ -2896,6 +2957,11 @@ impl App {
             .as_deref()
             .and_then(load_marks)
             .unwrap_or_default();
+        let shell_history_file = cli.history.then(shell_history_path).flatten();
+        let shell_history = shell_history_file
+            .as_deref()
+            .and_then(load_shell_history)
+            .unwrap_or_default();
         let mut app = App {
             config,
             cwd: cwd.clone(),
@@ -2944,6 +3010,9 @@ impl App {
             mark_pending: None,
             input: Input::default(),
             shell_block: false,
+            shell_history,
+            shell_history_pos: None,
+            shell_history_file,
             status,
             focus: None,
             page: 10,
@@ -5351,7 +5420,50 @@ impl App {
         self.input.clear();
         self.completions.clear();
         self.shell_block = block;
+        self.shell_history_pos = None;
         self.mode = Mode::Prompt(Prompt::Shell);
+    }
+
+    /// Recall a command with Up/Down in the shell prompt, following nnn's
+    /// wrap-around behavior.
+    fn shell_history_move(&mut self, up: bool) {
+        let Some(pos) = shell_history_step(self.shell_history.len(), self.shell_history_pos, up)
+        else {
+            return;
+        };
+        self.shell_history_pos = Some(pos);
+        self.input.set(self.shell_history[pos].clone());
+    }
+
+    fn record_shell_command(&mut self, cmd: &str) {
+        push_shell_history(&mut self.shell_history, cmd);
+        self.shell_history_pos = None;
+    }
+
+    /// Editing the recalled command leaves history-browsing mode.
+    fn note_prompt_edit(&mut self, p: Prompt) {
+        if p == Prompt::Shell {
+            self.shell_history_pos = None;
+        }
+    }
+
+    /// Persist the shell history on exit when `-f` was given. nnn skips this
+    /// in picker mode, and so do we.
+    pub fn save_shell_history(&self) {
+        if self.chooser_file.is_some() {
+            return;
+        }
+        let Some(path) = self.shell_history_file.as_deref() else {
+            return;
+        };
+        let mut text = self.shell_history.join("\n");
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let _ = fs::write(path, text);
     }
 
     /// Run a shell command in the current directory. Yazi's `;` runs it in the
@@ -5361,6 +5473,7 @@ impl App {
         if cmd.is_empty() {
             return;
         }
+        self.record_shell_command(&cmd);
         if !self.shell_block {
             self.spawn_task(
                 TaskKind::Shell,
@@ -5887,12 +6000,14 @@ impl App {
                     }
                     KeyCode::Backspace => {
                         self.input.backspace();
+                        self.note_prompt_edit(p);
                         if p.completes() {
                             self.refresh_completions();
                         }
                     }
                     KeyCode::Delete => {
                         self.input.delete();
+                        self.note_prompt_edit(p);
                         if p.completes() {
                             self.refresh_completions();
                         }
@@ -5920,13 +6035,19 @@ impl App {
                     {
                         self.start_session_delete()
                     }
-                    KeyCode::Char(c) if ctrl => apply_ctrl_edit(&mut self.input, c, shift),
+                    KeyCode::Char(c) if ctrl => {
+                        apply_ctrl_edit(&mut self.input, c, shift);
+                        self.note_prompt_edit(p);
+                    }
                     KeyCode::Char(c) if !ctrl => {
                         self.input.insert(c);
+                        self.note_prompt_edit(p);
                         if p.completes() {
                             self.refresh_completions();
                         }
                     }
+                    KeyCode::Up if p == Prompt::Shell => self.shell_history_move(true),
+                    KeyCode::Down if p == Prompt::Shell => self.shell_history_move(false),
                     KeyCode::Up if p.completes() => self.move_completion(-1),
                     KeyCode::Down if p.completes() => self.move_completion(1),
                     KeyCode::Tab if p.completes() => self.accept_completion(),
@@ -7970,6 +8091,39 @@ mod tests {
     }
 
     #[test]
+    fn shell_history_moves_repeats_to_the_end() {
+        let mut history = Vec::new();
+        push_shell_history(&mut history, "ls");
+        push_shell_history(&mut history, "pwd");
+        push_shell_history(&mut history, "ls");
+        assert_eq!(history, vec!["pwd", "ls"]);
+        push_shell_history(&mut history, "");
+        assert_eq!(history, vec!["pwd", "ls"]);
+    }
+
+    #[test]
+    fn shell_history_keeps_the_newest_entries() {
+        let mut history = Vec::new();
+        for i in 0..20 {
+            push_shell_history(&mut history, &format!("cmd{i}"));
+        }
+        assert_eq!(history.len(), SHELL_HISTORY_MAX);
+        assert_eq!(history.first().unwrap(), "cmd4");
+        assert_eq!(history.last().unwrap(), "cmd19");
+    }
+
+    #[test]
+    fn shell_history_steps_wrap_like_nnn() {
+        assert_eq!(shell_history_step(0, None, true), None);
+        assert_eq!(shell_history_step(3, None, true), Some(2));
+        assert_eq!(shell_history_step(3, None, false), Some(0));
+        assert_eq!(shell_history_step(3, Some(2), true), Some(1));
+        assert_eq!(shell_history_step(3, Some(0), true), Some(2));
+        assert_eq!(shell_history_step(3, Some(2), false), Some(0));
+        assert_eq!(shell_history_step(3, Some(1), false), Some(2));
+    }
+
+    #[test]
     fn confirm_titles_expand_placeholders() {
         assert_eq!(
             confirm_title("Trash {n} selected file{s}?", 1),
@@ -8647,6 +8801,8 @@ mod tests {
         assert!(parse_cli(args(&["-g", "-z"])).is_err());
         assert!(parse_cli(args(&["-e"])).unwrap().editor_text);
         assert!(parse_cli(args(&["--editor"])).unwrap().editor_text);
+        assert!(parse_cli(args(&["-f"])).unwrap().history);
+        assert!(parse_cli(args(&["--history"])).unwrap().history);
         assert!(parse_cli(args(&["-u"])).is_ok());
         assert!(parse_cli(args(&["--use-selection"])).is_ok());
         assert!(parse_cli(args(&["-R"])).is_ok());
