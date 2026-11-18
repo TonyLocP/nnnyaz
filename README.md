@@ -505,8 +505,8 @@ schema is nnnyaz-specific, and the plugin API is intentionally minimal.
 
 ## AI usage
 
-Most of nnnyaz was written with **Big Pickle** in OpenCode — and, because I'm
-broke, also the one I can afford. <3
+Most of nnnyaz was written with **Big Pickle** in OpenCode — because I'm
+broke. <3
 
 AI writes a lot of the code, tests, and docs here; I set the direction, review
 the diffs, and test everything in a real terminal. If you spot something the
