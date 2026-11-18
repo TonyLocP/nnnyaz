@@ -8892,10 +8892,11 @@ mod tests {
         );
         assert_eq!(
             open_action(false, vec![dir.clone(), file.clone()]),
-            OpenAction::External(vec![dir, file])
+            OpenAction::External(vec![dir.clone(), file])
         );
         assert_eq!(open_action(false, Vec::new()), OpenAction::Nothing);
         assert_eq!(open_action(true, Vec::new()), OpenAction::Nothing);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
