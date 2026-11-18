@@ -161,11 +161,16 @@ are candidates, roughly in priority order.
       the delete prompts, with `{n}` replaced by the count and `{s}` by `"s"`
       for plural targets (an empty string for one). `overwrite_title` is
       accepted but unused because rnn has no overwrite prompt.
+- [x] **nnn sessions** — `-s <name>` loads a session (`@` is the last session)
+      and `-S` saves the current tabs on exit, defaulting to `@`. Tabs, cwd,
+      cursor, filter, hidden files, sort, linemode, selections, and history are
+      restored. Loading a named session stores the previous state in `@`
+      first, matching nnn.
 
 ## Next
 
-- [ ] Consider nnn sessions (`-s <name>`, `-S`) to restore directories and
-      selections between runs.
+- [ ] Consider nnn's session manager (`s` in nnn; a keybinding here) to save
+      or load sessions without restarting.
 
 ## Local setup (outside this repo)
 

@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use serde::{Deserialize, Serialize};
+
 use ratatui::{
     crossterm::{
         event::{
@@ -670,6 +672,88 @@ struct TabSnapshot {
     tab_name: Option<String>,
 }
 
+/// nnn-style sessions: a named list of tabs persisted under
+/// `<config>/sessions`. `@` is the "last session" name nnn uses.
+const SESSION_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize, Default)]
+struct SessionFile {
+    version: u32,
+    active: usize,
+    #[serde(default)]
+    tabs: Vec<SessionTab>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct SessionTab {
+    cwd: String,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    filter: String,
+    #[serde(default)]
+    show_hidden: bool,
+    #[serde(default)]
+    sort: String,
+    #[serde(default)]
+    sort_reverse: bool,
+    #[serde(default)]
+    linemode: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    selected: Vec<String>,
+    #[serde(default)]
+    history: Vec<String>,
+    #[serde(default)]
+    history_pos: usize,
+}
+
+/// The session file's spelling of a sort order.
+fn sort_key(sort: Sort) -> &'static str {
+    match sort {
+        Sort::Name => "name",
+        Sort::Natural => "natural",
+        Sort::Size => "size",
+        Sort::Time => "mtime",
+        Sort::Btime => "btime",
+        Sort::Extension => "extension",
+        Sort::Random => "random",
+    }
+}
+
+/// The session file's spelling of a linemode.
+fn linemode_key(linemode: Linemode) -> &'static str {
+    match linemode {
+        Linemode::Size => "size",
+        Linemode::Permissions => "permissions",
+        Linemode::Btime => "btime",
+        Linemode::Mtime => "mtime",
+        Linemode::Owner => "owner",
+        Linemode::Detail => "detail",
+        Linemode::None => "none",
+    }
+}
+
+fn session_dir() -> Option<PathBuf> {
+    config::config_dir().map(|dir| dir.join("sessions"))
+}
+
+/// Reject names that would escape the sessions directory.
+fn session_path(name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+        return None;
+    }
+    Some(session_dir()?.join(name))
+}
+
+fn load_session(name: &str) -> Option<SessionFile> {
+    let path = session_path(name)?;
+    let text = fs::read_to_string(path).ok()?;
+    let file: SessionFile = toml::from_str(&text).ok()?;
+    (file.version == SESSION_VERSION).then_some(file)
+}
+
 /// One row in the `Tab` (spot/info) overlay.
 enum InfoLine {
     Section(&'static str),
@@ -762,6 +846,8 @@ pub struct App {
     tabs: Vec<TabSnapshot>,
     tab_index: usize,
     tab_name: Option<String>,
+    /// `-S`: save the session under this name when rnn exits.
+    session_name: Option<String>,
     info: Option<Info>,
     info_cursor: usize,
     info_scroll: usize,
@@ -2195,6 +2281,10 @@ struct Cli {
     no_confirm_quit: bool,
     /// `-o`: only Enter opens files; `l`/`→` just enter directories.
     open_on_enter_only: bool,
+    /// `-s name`: load a named session (`@` is the last session).
+    session: Option<String>,
+    /// `-S`: save the session on exit.
+    persistent_session: bool,
 }
 
 /// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
@@ -2257,6 +2347,8 @@ Options:
   -b <KEY>, --bookmark <KEY> Start in a bookmark (ignored if PATH is given)
   -Q, --no-confirm-quit      Quit without warning about running tasks
   -o, --open-on-enter        Only Enter opens files (l/→ just enter directories)
+  -s <NAME>, --session <NAME> Load a session (@ is the last session)
+  -S, --persistent-session   Save the session on exit
   -T <KEY>, --sort <KEY>     Sort order: a/d/s size, e extension, t time,
                              v natural; an uppercase key reverses
   -l <N>, --scroll <N>       Lines moved per mouse-wheel scroll [default: 1]
@@ -2306,6 +2398,27 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.no_confirm_quit = true;
         } else if text == "-o" || text == "--open-on-enter" {
             cli.open_on_enter_only = true;
+        } else if text == "-S" || text == "--persistent-session" {
+            cli.persistent_session = true;
+        } else if text == "-s" || text == "--session" {
+            let value = args
+                .next()
+                .ok_or_else(|| "-s requires a session name".to_string())?;
+            let value = value.to_string_lossy().into_owned();
+            if value.is_empty() {
+                return Err("-s requires a session name".into());
+            }
+            cli.session = Some(value);
+        } else if let Some(value) = text.strip_prefix("--session=") {
+            if value.is_empty() {
+                return Err("-s requires a session name".into());
+            }
+            cli.session = Some(value.to_string());
+        } else if let Some(value) = text.strip_prefix("-s") {
+            if value.is_empty() {
+                return Err("-s requires a session name".into());
+            }
+            cli.session = Some(value.to_string());
         } else if let Some(value) = text.strip_prefix("--bookmark=") {
             if value.is_empty() {
                 return Err("-b requires a bookmark key".into());
@@ -2659,6 +2772,7 @@ impl App {
             tabs: Vec::new(),
             tab_index: 0,
             tab_name: None,
+            session_name: None,
             info: None,
             info_cursor: 0,
             info_scroll: 0,
@@ -2693,6 +2807,27 @@ impl App {
         app.preview.set_cache_size(app.config.preview.cache_size);
         app.reload();
         app.tabs = vec![app.snapshot()];
+        // nnn's `-s name` loads a session (which wins over PATH); `-S` saves
+        // the session back on exit, defaulting to `@` like nnn.
+        let session_name = cli
+            .session
+            .clone()
+            .or_else(|| cli.persistent_session.then(|| "@".to_string()));
+        if let Some(name) = session_name.as_deref() {
+            if name != "@" {
+                // Loading a named session preserves the previous state in `@`.
+                let _ = app.save_session("@");
+            }
+            match load_session(name) {
+                Some(file) => app.restore_session(file),
+                None => app.status = format!("session '{name}' not found"),
+            }
+        }
+        app.session_name = if cli.persistent_session {
+            session_name
+        } else {
+            None
+        };
         Ok(app)
     }
 
@@ -2752,6 +2887,115 @@ impl App {
         self.input.clear();
         self.completions.clear();
         self.list_dirty = true;
+    }
+
+    /// Capture every tab (including the active one) in the on-disk format.
+    fn session_file(&self) -> SessionFile {
+        let mut tabs = self.tabs.clone();
+        if let Some(slot) = tabs.get_mut(self.tab_index) {
+            *slot = self.snapshot();
+        }
+        SessionFile {
+            version: SESSION_VERSION,
+            active: self.tab_index.min(tabs.len().saturating_sub(1)),
+            tabs: tabs
+                .iter()
+                .map(|t| SessionTab {
+                    cwd: t.cwd.to_string_lossy().into_owned(),
+                    cursor: t
+                        .cursor
+                        .and_then(|i| t.entries.get(i))
+                        .map(|e| e.name.clone()),
+                    filter: t.filter.clone(),
+                    show_hidden: t.show_hidden,
+                    sort: sort_key(t.sort).into(),
+                    sort_reverse: t.sort_reverse,
+                    linemode: linemode_key(t.linemode).into(),
+                    name: t.tab_name.clone(),
+                    selected: t
+                        .selected
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                    history: t
+                        .history
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                    history_pos: t.history_pos,
+                })
+                .collect(),
+        }
+    }
+
+    fn save_session(&mut self, name: &str) -> io::Result<()> {
+        let path = session_path(name).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "no config directory available")
+        })?;
+        self.save_active();
+        let text = toml::to_string(&self.session_file()).map_err(io::Error::other)?;
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(path, text)
+    }
+
+    /// Save the session at exit when started with `-S`.
+    pub fn save_persistent_session(&mut self) {
+        let Some(name) = self.session_name.clone() else {
+            return;
+        };
+        let _ = self.save_session(&name);
+    }
+
+    fn restore_session(&mut self, file: SessionFile) {
+        if file.tabs.is_empty() {
+            return;
+        }
+        let fallback = self.cwd.clone();
+        let mut tabs = Vec::with_capacity(file.tabs.len());
+        for t in file.tabs {
+            let cwd = PathBuf::from(&t.cwd);
+            let cwd = if cwd.is_dir() { cwd } else { fallback.clone() };
+            let sort = crate::action::parse_sort(&t.sort).unwrap_or(self.sort);
+            let linemode = crate::action::parse_linemode(&t.linemode).unwrap_or(self.linemode);
+            let selected = t
+                .selected
+                .into_iter()
+                .map(PathBuf::from)
+                .filter(|p| p.exists())
+                .collect();
+            let history: Vec<PathBuf> = if t.history.is_empty() {
+                vec![cwd.clone()]
+            } else {
+                t.history.into_iter().map(PathBuf::from).collect()
+            };
+            let history_pos = t.history_pos.min(history.len().saturating_sub(1));
+            tabs.push(TabSnapshot {
+                cwd,
+                entries: Vec::new(),
+                cursor: None,
+                filter: t.filter,
+                show_hidden: t.show_hidden,
+                sort,
+                sort_reverse: t.sort_reverse,
+                linemode,
+                selected,
+                visual: None,
+                search: None,
+                history,
+                history_pos,
+                focus: t.cursor,
+                tab_name: t.name,
+            });
+        }
+        let active = file.active.min(tabs.len() - 1);
+        self.tabs = tabs;
+        self.tab_index = active;
+        let tab = self.tabs[active].clone();
+        self.restore_tab(tab);
+        self.reload();
+        self.status = format!("session loaded ({} tab(s))", self.tabs.len());
     }
 
     fn new_tab(&mut self, path: PathBuf) {
@@ -7186,6 +7430,53 @@ mod tests {
     }
 
     #[test]
+    fn session_file_round_trips() {
+        let file = SessionFile {
+            version: SESSION_VERSION,
+            active: 1,
+            tabs: vec![
+                SessionTab {
+                    cwd: "/tmp".into(),
+                    cursor: Some("notes.txt".into()),
+                    filter: "note".into(),
+                    show_hidden: true,
+                    sort: "mtime".into(),
+                    sort_reverse: true,
+                    linemode: "detail".into(),
+                    name: Some("work".into()),
+                    selected: vec!["/tmp/a".into(), "/tmp/b".into()],
+                    history: vec!["/tmp".into(), "/home".into()],
+                    history_pos: 1,
+                },
+                SessionTab::default(),
+            ],
+        };
+        let text = toml::to_string(&file).unwrap();
+        let back: SessionFile = toml::from_str(&text).unwrap();
+        assert_eq!(back.version, SESSION_VERSION);
+        assert_eq!(back.active, 1);
+        assert_eq!(back.tabs.len(), 2);
+        assert_eq!(back.tabs[0].cwd, "/tmp");
+        assert_eq!(back.tabs[0].cursor.as_deref(), Some("notes.txt"));
+        assert_eq!(back.tabs[0].filter, "note");
+        assert!(back.tabs[0].show_hidden);
+        assert_eq!(back.tabs[0].sort, "mtime");
+        assert!(back.tabs[0].sort_reverse);
+        assert_eq!(back.tabs[0].linemode, "detail");
+        assert_eq!(back.tabs[0].name.as_deref(), Some("work"));
+        assert_eq!(back.tabs[0].selected.len(), 2);
+        assert_eq!(back.tabs[0].history_pos, 1);
+    }
+
+    #[test]
+    fn session_names_cannot_escape_the_sessions_dir() {
+        assert!(session_path("").is_none());
+        assert!(session_path("..").is_none());
+        assert!(session_path("../x").is_none());
+        assert!(session_path("a/b").is_none());
+    }
+
+    #[test]
     fn confirm_titles_expand_placeholders() {
         assert_eq!(
             confirm_title("Trash {n} selected file{s}?", 1),
@@ -7836,6 +8127,29 @@ mod tests {
             parse_cli(args(&["--open-on-enter"]))
                 .unwrap()
                 .open_on_enter_only
+        );
+        assert_eq!(
+            parse_cli(args(&["-s", "work"])).unwrap().session.as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            parse_cli(args(&["-swork"])).unwrap().session.as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            parse_cli(args(&["--session=work"]))
+                .unwrap()
+                .session
+                .as_deref(),
+            Some("work")
+        );
+        assert!(parse_cli(args(&["-s"])).is_err());
+        assert!(parse_cli(args(&["--session="])).is_err());
+        assert!(parse_cli(args(&["-S"])).unwrap().persistent_session);
+        assert!(
+            parse_cli(args(&["--persistent-session"]))
+                .unwrap()
+                .persistent_session
         );
         assert_eq!(
             parse_cli(args(&["-T", "e"])).unwrap().sort,
