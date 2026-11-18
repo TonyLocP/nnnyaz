@@ -2128,7 +2128,8 @@ fn run_shell_task(
 
 /// Command-line options. rnn has no argument-parser dependency, so this stays
 /// deliberately small: one optional starting path, `--cwd-file`, the picker
-/// options (`--chooser-file` / `-p`, `-0`), and `--help` / `--version`.
+/// options (`--chooser-file` / `-p`, `-0`), `--help` / `--version`, and nnn's
+/// `-H` / `-T` startup overrides.
 #[derive(Debug, Default, PartialEq)]
 struct Cli {
     path: Option<PathBuf>,
@@ -2137,6 +2138,37 @@ struct Cli {
     chooser_null: bool,
     help: bool,
     version: bool,
+    /// `-H`: show hidden files at startup.
+    show_hidden: bool,
+    /// `-T key`: startup sort order and direction.
+    sort: Option<(Sort, bool)>,
+}
+
+/// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
+/// `d` (disk usage) falls back to apparent size because rnn only tracks the
+/// latter.
+fn parse_sort_key(key: &str) -> Result<(Sort, bool), String> {
+    let ch = key
+        .chars()
+        .next()
+        .ok_or_else(|| "-T requires a sort key".to_string())?;
+    if key.chars().count() != 1 {
+        return Err(format!("-T: expected one sort key, got '{key}'"));
+    }
+    let reverse = ch.is_ascii_uppercase();
+    let sort = match ch.to_ascii_lowercase() {
+        'a' | 'd' | 's' => Sort::Size,
+        'e' => Sort::Extension,
+        't' => Sort::Time,
+        'v' => Sort::Natural,
+        'r' => return Err("-T: 'r' is not a sort key; use an uppercase key to reverse".into()),
+        other => {
+            return Err(format!(
+                "-T: unknown sort key '{other}' (expected a, d, e, s, t, or v)"
+            ))
+        }
+    };
+    Ok((sort, reverse))
 }
 
 /// Print the command-line help that `-h` / `--help` shows.
@@ -2157,6 +2189,9 @@ Options:
       --chooser-file <PATH>  Picker mode: write chosen paths here
   -p <PATH>                  Alias for --chooser-file (- writes to stdout)
   -0, --null                 Separate picker paths with NUL instead of newline
+  -H, --hidden               Show hidden files at startup
+  -T <KEY>, --sort <KEY>     Sort order: a/d/s size, e extension, t time,
+                             v natural; an uppercase key reverses
 
 Environment:
   RNN_CWD_FILE      Default for --cwd-file
@@ -2180,6 +2215,17 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.help = true;
         } else if text == "-V" || text == "--version" {
             cli.version = true;
+        } else if text == "-H" || text == "--hidden" {
+            cli.show_hidden = true;
+        } else if text == "-T" || text == "--sort" {
+            let value = args
+                .next()
+                .ok_or_else(|| "-T requires a sort key".to_string())?;
+            cli.sort = Some(parse_sort_key(&value.to_string_lossy())?);
+        } else if let Some(value) = text.strip_prefix("-T") {
+            cli.sort = Some(parse_sort_key(value)?);
+        } else if let Some(value) = text.strip_prefix("--sort=") {
+            cli.sort = Some(parse_sort_key(value)?);
         } else if text == "--cwd-file" {
             let value = args
                 .next()
@@ -2348,6 +2394,8 @@ impl App {
         let config::Loaded { config, warnings } = loaded;
         let status = warnings.join(" · ");
         let mgr = config.mgr;
+        let show_hidden = mgr.show_hidden || cli.show_hidden;
+        let (sort, sort_reverse) = cli.sort.unwrap_or((mgr.sort, mgr.sort_reverse));
         // `time` refuses to read the local offset once the process is
         // multi-threaded, so capture it now (main is still single-threaded).
         let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
@@ -2369,10 +2417,10 @@ impl App {
             entries: vec![],
             state: ListState::default(),
             filter: String::new(),
-            show_hidden: mgr.show_hidden,
+            show_hidden,
             show_preview: mgr.show_preview,
-            sort: mgr.sort,
-            sort_reverse: mgr.sort_reverse,
+            sort,
+            sort_reverse,
             selected: BTreeSet::new(),
             yank: None,
             mode: Mode::Normal,
@@ -7357,6 +7405,37 @@ mod tests {
         let cli = parse_cli(args(&["--help", "/tmp/start"])).unwrap();
         assert!(cli.help);
         assert_eq!(cli.path, Some(PathBuf::from("/tmp/start")));
+    }
+
+    #[test]
+    fn cli_parses_nnn_startup_overrides() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+
+        assert!(parse_cli(args(&["-H"])).unwrap().show_hidden);
+        assert!(parse_cli(args(&["--hidden"])).unwrap().show_hidden);
+        assert_eq!(
+            parse_cli(args(&["-T", "e"])).unwrap().sort,
+            Some((Sort::Extension, false))
+        );
+        assert_eq!(
+            parse_cli(args(&["-TE"])).unwrap().sort,
+            Some((Sort::Extension, true))
+        );
+        assert_eq!(
+            parse_cli(args(&["--sort=t"])).unwrap().sort,
+            Some((Sort::Time, false))
+        );
+        assert_eq!(
+            parse_cli(args(&["--sort", "V"])).unwrap().sort,
+            Some((Sort::Natural, true))
+        );
+        assert_eq!(
+            parse_cli(args(&["-T", "d"])).unwrap().sort,
+            Some((Sort::Size, false))
+        );
+        assert!(parse_cli(args(&["-T"])).is_err());
+        assert!(parse_cli(args(&["-Tz"])).is_err());
+        assert!(parse_cli(args(&["-Tr"])).is_err());
     }
 
     #[test]
