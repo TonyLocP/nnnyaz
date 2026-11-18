@@ -23,8 +23,9 @@ rnn [path]
 `rnn --help` lists the command-line options and `rnn --version` prints the
 version. The main options are `--cwd-file` (see below) and the picker flags
 `--chooser-file` / `-p` and `-0` / `--null`. nnn's startup overrides also work:
-`-H` shows hidden files, and `-T <key>` sets the sort order (`a`/`d`/`s` size,
-`e` extension, `t` time, `v` natural; uppercase reverses).
+`-H` shows hidden files, `-T <key>` sets the sort order (`a`/`d`/`s` size,
+`e` extension, `t` time, `v` natural; uppercase reverses), and `-l <n>` sets
+how many lines the mouse wheel moves.
 
 ## Quitting and the current directory
 

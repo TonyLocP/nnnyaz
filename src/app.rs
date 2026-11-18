@@ -739,6 +739,8 @@ pub struct App {
     status: String,
     focus: Option<String>,
     page: usize,
+    /// Lines moved per mouse-wheel tick (`-l`).
+    scroll_lines: usize,
     tabs: Vec<TabSnapshot>,
     tab_index: usize,
     tab_name: Option<String>,
@@ -2142,6 +2144,8 @@ struct Cli {
     show_hidden: bool,
     /// `-T key`: startup sort order and direction.
     sort: Option<(Sort, bool)>,
+    /// `-l n`: lines moved per mouse-wheel scroll.
+    scroll_lines: Option<usize>,
 }
 
 /// Parse nnn's `-T` sort key. Lowercase sorts ascending, uppercase reverses;
@@ -2171,6 +2175,13 @@ fn parse_sort_key(key: &str) -> Result<(Sort, bool), String> {
     Ok((sort, reverse))
 }
 
+/// Parse nnn's `-l` mouse-wheel line count.
+fn parse_scroll_lines(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .map_err(|_| format!("-l: expected a non-negative number, got '{value}'"))
+}
+
 /// Print the command-line help that `-h` / `--help` shows.
 fn print_help() {
     println!(
@@ -2192,6 +2203,7 @@ Options:
   -H, --hidden               Show hidden files at startup
   -T <KEY>, --sort <KEY>     Sort order: a/d/s size, e extension, t time,
                              v natural; an uppercase key reverses
+  -l <N>, --scroll <N>       Lines moved per mouse-wheel scroll [default: 1]
 
 Environment:
   RNN_CWD_FILE      Default for --cwd-file
@@ -2226,6 +2238,15 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.sort = Some(parse_sort_key(value)?);
         } else if let Some(value) = text.strip_prefix("--sort=") {
             cli.sort = Some(parse_sort_key(value)?);
+        } else if text == "-l" || text == "--scroll" {
+            let value = args
+                .next()
+                .ok_or_else(|| "-l requires a number".to_string())?;
+            cli.scroll_lines = Some(parse_scroll_lines(&value.to_string_lossy())?);
+        } else if let Some(value) = text.strip_prefix("-l") {
+            cli.scroll_lines = Some(parse_scroll_lines(value)?);
+        } else if let Some(value) = text.strip_prefix("--scroll=") {
+            cli.scroll_lines = Some(parse_scroll_lines(value)?);
         } else if text == "--cwd-file" {
             let value = args
                 .next()
@@ -2446,6 +2467,7 @@ impl App {
             status,
             focus: None,
             page: 10,
+            scroll_lines: cli.scroll_lines.unwrap_or(1),
             tabs: Vec::new(),
             tab_index: 0,
             tab_name: None,
@@ -6640,12 +6662,12 @@ impl App {
                 }
                 MouseEventKind::ScrollDown => {
                     self.begin_mouse_action();
-                    self.move_by(1);
+                    self.move_by(self.scroll_lines.min(isize::MAX as usize) as isize);
                     return Ok(true);
                 }
                 MouseEventKind::ScrollUp => {
                     self.begin_mouse_action();
-                    self.move_by(-1);
+                    self.move_by(-(self.scroll_lines.min(isize::MAX as usize) as isize));
                     return Ok(true);
                 }
                 _ => {}
@@ -7436,6 +7458,15 @@ mod tests {
         assert!(parse_cli(args(&["-T"])).is_err());
         assert!(parse_cli(args(&["-Tz"])).is_err());
         assert!(parse_cli(args(&["-Tr"])).is_err());
+
+        assert_eq!(parse_cli(args(&["-l", "3"])).unwrap().scroll_lines, Some(3));
+        assert_eq!(parse_cli(args(&["-l3"])).unwrap().scroll_lines, Some(3));
+        assert_eq!(
+            parse_cli(args(&["--scroll=5"])).unwrap().scroll_lines,
+            Some(5)
+        );
+        assert!(parse_cli(args(&["-l"])).is_err());
+        assert!(parse_cli(args(&["-l", "-1"])).is_err());
     }
 
     #[test]

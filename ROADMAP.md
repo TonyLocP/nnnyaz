@@ -104,17 +104,17 @@ are candidates, roughly in priority order.
       `, b`/`, B` (btime), and `, s`/`, S` (size) now switch the linemode as
       well as sorting, like Yazi's default keymap. `, e` and `, a` still only
       sort, since Yazi does not have a matching linemode for them.
-
-- [x] **nnn startup overrides** — `-H` shows hidden files and `-T <key>`
-      selects the startup sort order (`a`/`d`/`s` size, `e` extension,
-      `t` time, `v` natural; an uppercase key reverses). `d` maps to apparent
-      size because rnn does not track disk blocks.
+- [x] **nnn startup overrides** — `-H` shows hidden files, `-T <key>` selects
+      the startup sort order (`a`/`d`/`s` size, `e` extension, `t` time,
+      `v` natural; an uppercase key reverses), and `-l <n>` sets the number of
+      lines moved per mouse-wheel tick. `d` maps to apparent size because rnn
+      does not track disk blocks.
 
 ## Next
 
-- [ ] Consider nnn's `-l` (mouse-wheel lines) and `-i` (info panel). rnn's
-      info view is a full-screen overlay rather than nnn's info bar, so `-i`
-      needs a decision before it is worth adding.
+- [ ] Consider nnn's `-i` (info panel). rnn's info view is a full-screen
+      overlay rather than nnn's info bar, so `-i` needs a decision before it is
+      worth adding.
 - [ ] Consider a Yazi-style `spot` full-screen preview. rnn currently uses
       `<Tab>` for nnn's info panel, so this needs a key that does not collide
       with the existing nnn/Yazi bindings.
