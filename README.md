@@ -7,6 +7,17 @@ nnnyaz keeps a Yazi-like feel: modal `mgr` navigation, prefix keymaps
 an `open with` menu. Configuration is declarative TOML, with an optional
 `init.lua` for overrides and small custom actions.
 
+## Features
+
+- Yazi-style modal navigation and prefix menus, with nnn's startup flags
+- Tabs, marks, nnn bookmarks, trash, bulk rename, and a task manager
+- Preview pane for text, images (Kitty/Sixel), PDFs, fonts, archives, and
+  media, with a shared on-disk cache
+- Yazi-compatible `keymap.toml`, `[opener]`/`[open]` rules, sessions, and
+  `[help]`/`[which]` configuration
+- Picker mode (`--chooser-file` / `-p`, `-0`) for shell pipelines
+- TOML configuration plus an optional `init.lua` API
+
 ## Build
 
 ```sh
@@ -22,44 +33,58 @@ nnnyaz [path]
 
 `nnnyaz --help` lists the command-line options and `nnnyaz --version` prints the
 version. The main options are `--cwd-file` (see below) and the picker flags
-`--chooser-file` / `-p` and `-0` / `--null`. nnn's startup overrides also work:
-`-H` shows hidden files, `-T <key>` sets the sort order (`a`/`d`/`s` size,
-`e` extension, `t` time, `v` natural; uppercase reverses), `-l <n>` sets
-how many lines the mouse wheel moves, and `-i` appends the hovered file's
-`file -b` description to the status line. nnn's display flags also work:
-`-d` starts in the detail linemode (time, permissions, owner, size), `-U`
-starts with the owner linemode, and `-J` keeps the cursor on an entry after
-toggling its selection. `-b <key>` starts in a bookmark (an `NNN_BMS` key or a
-name in nnn's bookmarks directory); a path argument takes precedence. `-Q`
-skips the warning about running tasks on quit, and `-o` makes `l`/`→` open
-only directories, so files open with Enter alone. `-n` starts in nnn's
-type-to-nav mode (persistent filtering; Enter opens the match), `-A` disables
-auto-entering a lone matching directory, and `-R` is accepted for nnn
-compatibility even though nnnyaz never rolls over at the list edges. `-g` and
-`-z` select regex and fuzzy filtering instead of the default smart-case
-substring match. While the filter prompt is open, `/` cycles string → fuzzy →
-regex (matching nnn) and `:` cycles smart case → case-insensitive →
-case-sensitive; the active mode is shown next to the filter text. `-e` opens
-text files in `$VISUAL`/`$EDITOR`/`vi` instead of the external opener (empty
-files are left alone), `-u` is accepted for compatibility because nnnyaz
-already acts on the selection without prompting, and `-f` keeps a persistent
-shell-command history at `<config>/.history` (Up/Down in the `;`/`:` prompt
-recall the last 16 commands). `-K` reports keymap collisions and exits: a
-binding that can never fire because another binding claims the same key or
-because a longer sequence (such as `g g`) shadows it. `-E` uses `$EDITOR`
-rather than `$VISUAL` for internal undetached edits (bulk rename/create), and
-`r` on a single entry edits its name in that editor instead of the inline
-prompt. `-c` treats `NNN_OPENER` as a terminal program: it runs the opener
-attached and waits for it (so TUI openers work) and disables `-e`. `-t <secs>`
-locks the terminal after that many idle seconds with `$NNN_LOCKER` (default
-`vlock`); `0` disables locking. Sessions work like nnn's: `-s <name>` loads a saved session (`@` is the last session)
-and `-S` saves the current tabs on exit, defaulting to `@`. Loading a named
-session first stores the previous state in `@`. Sessions live under
-`<config>/sessions`. Inside nnnyaz, `t S` opens nnn's session menu (`s` save,
-`l` load, `r` restore `@`); `l` lists the saved sessions and filters them as
-you type. `j`/`k` always edit the filter text; `J`/`K`, `Ctrl+j`/`Ctrl+k`, or
-`↑`/`↓` move through the list, and Enter loads. `Ctrl+d` in the list deletes
-the highlighted session after a `y/N` confirmation.
+`--chooser-file` / `-p` and `-0` / `--null`.
+
+nnn's startup and display flags are also supported:
+
+- `-H` — show hidden files.
+- `-T <key>` — set the sort order (`a`/`d`/`s` size, `e` extension, `t` time,
+  `v` natural; uppercase reverses).
+- `-l <n>` — how many rows the mouse wheel moves.
+- `-i` — append the hovered file's `file -b` description to the status line.
+- `-d` / `-U` — start in the detail linemode (time, permissions, owner, size)
+  or the owner linemode.
+- `-J` — keep the cursor on an entry after toggling its selection.
+- `-b <key>` — start in a bookmark (an `NNN_BMS` key or a name in nnn's
+  bookmarks directory); a path argument takes precedence.
+- `-Q` — skip the warning about running tasks on quit.
+- `-o` — make `l`/`→` open only directories, so files open with Enter alone.
+- `-n` — nnn's type-to-nav mode (persistent filtering; Enter opens the match).
+- `-A` — don't auto-enter a lone matching directory.
+- `-R` — accepted for nnn compatibility; nnnyaz never rolls over at the list
+  edges.
+- `-g` / `-z` — regex / fuzzy filtering instead of the default smart-case
+  substring match.
+- `-e` — open text files in `$VISUAL`/`$EDITOR`/`vi` instead of the external
+  opener (empty files are left alone).
+- `-u` — accepted for compatibility; nnnyaz already acts on the selection
+  without prompting.
+- `-f` — keep a persistent shell-command history at `<config>/.history`
+  (Up/Down in the `;`/`:` prompt recall the last 16 commands).
+- `-K` — report keymap collisions and exit: a binding that can never fire
+  because another binding claims the same key, or because a longer sequence
+  (such as `g g`) shadows it.
+- `-E` — use `$EDITOR` rather than `$VISUAL` for internal undetached edits
+  (bulk rename/create); `r` on a single entry edits its name in that editor
+  instead of the inline prompt.
+- `-c` — treat `NNN_OPENER` as a terminal program: run the opener attached and
+  wait for it (so TUI openers work) and disable `-e`.
+- `-t <secs>` — lock the terminal after that many idle seconds with
+  `$NNN_LOCKER` (default `vlock`); `0` disables locking.
+- `-s <name>` / `-S` — load a saved session / save the current tabs on exit
+  (`@` is the last session; saving defaults to `@`). Loading a named session
+  first stores the previous state in `@`. Sessions live under
+  `<config>/sessions`.
+
+While the filter prompt is open, `/` cycles string → fuzzy → regex (matching
+nnn) and `:` cycles smart case → case-insensitive → case-sensitive; the active
+mode is shown next to the filter text.
+
+Inside nnnyaz, `t S` opens nnn's session menu (`s` save, `l` load, `r` restore
+`@`). `l` lists the saved sessions and filters them as you type: `j`/`k` always
+edit the filter text, while `J`/`K`, `Ctrl+j`/`Ctrl+k`, or `↑`/`↓` move through
+the list. Enter loads the highlighted session, and `Ctrl+d` deletes it after a
+`y/N` confirmation.
 
 ## Quitting and the current directory
 
@@ -477,3 +502,22 @@ nnnyaz deliberately mirrors Yazi where it has an equivalent feature: default
 keybindings, prefix menus, open-with rules, trash, tasks, and zoxide. It does
 not try to be a drop-in Yazi replacement: config lives under `nnnyaz`, the theme
 schema is nnnyaz-specific, and the plugin API is intentionally minimal.
+
+## AI usage
+
+Most of nnnyaz was written with **Big Pickle** in OpenCode. It's my favourite
+model — and, because I'm broke, also the one I can afford. <3
+
+AI writes a lot of the code, tests, and docs here; I set the direction, review
+the diffs, and test everything in a real terminal. If you spot something the
+pair of us missed, an issue is very welcome.
+
+## Acknowledgements
+
+nnnyaz stands on the shoulders of [nnn](https://github.com/jarun/nnn) (whose
+keymap and command line it emulates) and
+[Yazi](https://github.com/sxyazi/yazi) (whose configuration and UX it
+follows). It is built with [ratatui](https://github.com/ratatui/ratatui),
+[image](https://github.com/image-rs/image), and the other crates listed in
+`Cargo.toml`.
+
