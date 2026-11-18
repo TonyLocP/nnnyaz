@@ -21,7 +21,7 @@ static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_new
 static THEMES: LazyLock<EmbeddedLazyThemeSet> = LazyLock::new(two_face::theme::extra);
 
 /// Read up to `TEXT_LIMIT` bytes of a file and syntax-highlight them.
-pub fn preview(path: &Path) -> std::io::Result<Vec<Line<'static>>> {
+pub fn preview(path: &Path, tab_size: usize) -> std::io::Result<Vec<Line<'static>>> {
     let mut buf = Vec::new();
     fs::File::open(path)?
         .take(TEXT_LIMIT)
@@ -44,12 +44,12 @@ pub fn preview(path: &Path) -> std::io::Result<Vec<Line<'static>>> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    Ok(highlight(&content, ext, &name))
+    Ok(highlight(&content, ext, &name, tab_size))
 }
 
 /// Syntax-highlight `content` as if it came from a file with the given
 /// extension and name. Used for plain files and for pretty-printed JSON.
-pub fn highlight(content: &str, ext: &str, name: &str) -> Vec<Line<'static>> {
+pub fn highlight(content: &str, ext: &str, name: &str, tab_size: usize) -> Vec<Line<'static>> {
     let syntax = SYNTAXES
         .find_syntax_by_extension(ext)
         .or_else(|| {
@@ -71,7 +71,8 @@ pub fn highlight(content: &str, ext: &str, name: &str) -> Vec<Line<'static>> {
     let mut hl = HighlightLines::new(syntax, theme);
     let mut out = Vec::new();
     for line in LinesWithEndings::from(content) {
-        match hl.highlight_line(line, &SYNTAXES) {
+        let line = expand_tabs(line, tab_size);
+        match hl.highlight_line(&line, &SYNTAXES) {
             Ok(regions) => {
                 let mut spans: Vec<Span> = Vec::new();
                 for (st, text) in regions {
@@ -82,7 +83,32 @@ pub fn highlight(content: &str, ext: &str, name: &str) -> Vec<Line<'static>> {
                 }
                 out.push(Line::from(spans));
             }
-            Err(_) => out.push(Line::raw(sanitize(line))),
+            Err(_) => out.push(Line::raw(sanitize(&line))),
+        }
+    }
+    out
+}
+
+/// Expand tabs to the next multiple of `tab_size` columns. A size of zero
+/// leaves tabs alone for the caller to sanitize.
+fn expand_tabs(line: &str, tab_size: usize) -> String {
+    if tab_size == 0 || !line.contains('\t') {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut col = 0usize;
+    for ch in line.chars() {
+        if ch == '\t' {
+            let spaces = tab_size - (col % tab_size);
+            for _ in 0..spaces {
+                out.push(' ');
+            }
+            col += spaces;
+        } else {
+            out.push(ch);
+            if ch != '\n' && ch != '\r' {
+                col += 1;
+            }
         }
     }
     out
@@ -100,4 +126,29 @@ fn convert(s: SynStyle) -> Style {
         st = st.add_modifier(Modifier::UNDERLINED);
     }
     st
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expand_tabs, highlight};
+
+    #[test]
+    fn tabs_expand_to_stops() {
+        assert_eq!(expand_tabs("\tx", 4), "    x");
+        assert_eq!(expand_tabs("a\tb", 4), "a   b");
+        assert_eq!(expand_tabs("abcd\te", 4), "abcd    e");
+        assert_eq!(expand_tabs("a\tb", 2), "a b");
+        assert_eq!(expand_tabs("a\tb", 0), "a\tb");
+    }
+
+    #[test]
+    fn highlighting_expands_tabs() {
+        let lines = highlight("a\tb\n", "txt", "", 4);
+        let text: String = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert_eq!(text, "a   b");
+    }
 }

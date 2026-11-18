@@ -109,6 +109,10 @@ are candidates, roughly in priority order.
       `v` natural; an uppercase key reverses), and `-l <n>` sets the number of
       lines moved per mouse-wheel tick. `d` maps to apparent size because rnn
       does not track disk blocks.
+- [x] **Tab expansion in text previews** — tabs expand to the next multiple of
+      `preview.tab_size` (default 2, like Yazi) before syntax highlighting, so
+      tab-indented source keeps its shape. Previously each tab collapsed to a
+      single space.
 
 ## Next
 

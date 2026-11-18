@@ -118,7 +118,7 @@ const DIR_LIST_MAX: usize = 5000;
 const ZOOM_LEVELS: [u32; 5] = [100, 150, 200, 300, 400];
 
 impl Preview {
-    pub fn new(settings: Settings, image_delay: Duration) -> Self {
+    pub fn new(settings: Settings, image_delay: Duration, tab_size: usize) -> Self {
         let (tx, req_rx) = mpsc::channel::<Request>();
         let (preload_tx, preload_rx) = mpsc::channel::<Request>();
         let (res_tx, rx) = mpsc::channel::<(Key, usize, Artifact)>();
@@ -128,7 +128,7 @@ impl Preview {
         let worker_tx = res_tx.clone();
         let _ = thread::Builder::new()
             .name("preview-worker".into())
-            .spawn(move || worker(req_rx, worker_tx, settings, image_delay));
+            .spawn(move || worker(req_rx, worker_tx, settings, image_delay, tab_size));
         let preload_activity = Arc::clone(&activity);
         let preload_showing = Arc::clone(&showing);
         let _ = thread::Builder::new()
@@ -140,6 +140,7 @@ impl Preview {
                     preload_activity,
                     preload_showing,
                     settings,
+                    tab_size,
                 )
             });
 
@@ -649,6 +650,7 @@ fn worker(
     tx: Sender<(Key, usize, Artifact)>,
     settings: Settings,
     image_delay: Duration,
+    tab_size: usize,
 ) {
     while let Ok(mut req) = rx.recv() {
         // Debounce like yazi's `image_delay`: a newer target resets the wait,
@@ -661,7 +663,7 @@ fn worker(
             }
         }
         let start = std::time::Instant::now();
-        let art = generate(&req.key, req.page, &settings);
+        let art = generate(&req.key, req.page, &settings, tab_size);
         if std::env::var_os("RNN_DEBUG").is_some() {
             eprintln!(
                 "preview: show {} in {:?} (t={}ms)",
@@ -686,6 +688,7 @@ fn preload_worker(
     activity: Arc<AtomicU64>,
     showing: Arc<Mutex<Option<Key>>>,
     settings: Settings,
+    tab_size: usize,
 ) {
     loop {
         let Ok(first) = rx.recv() else { return };
@@ -719,7 +722,7 @@ fn preload_worker(
                 continue;
             }
             let start = std::time::Instant::now();
-            let art = generate(&req.key, req.page, &settings);
+            let art = generate(&req.key, req.page, &settings, tab_size);
             if std::env::var_os("RNN_DEBUG").is_some() {
                 eprintln!(
                     "preview: preload {} in {:?} (t={}ms)",
@@ -735,7 +738,7 @@ fn preload_worker(
     }
 }
 
-fn generate(key: &Key, page: usize, settings: &Settings) -> Artifact {
+fn generate(key: &Key, page: usize, settings: &Settings, tab_size: usize) -> Artifact {
     let path = &key.0;
     let err = |msg: String| Artifact {
         kind: "error",
@@ -754,7 +757,7 @@ fn generate(key: &Key, page: usize, settings: &Settings) -> Artifact {
     }
 
     match detect::detect(path) {
-        detect::Kind::Text => match text::preview(path) {
+        detect::Kind::Text => match text::preview(path, tab_size) {
             Ok(lines) => Artifact {
                 kind: "text",
                 data: lines,
@@ -766,11 +769,11 @@ fn generate(key: &Key, page: usize, settings: &Settings) -> Artifact {
         detect::Kind::Json => match media::json_pretty(path) {
             Ok(s) => Artifact {
                 kind: "json",
-                data: text::highlight(&s, "json", ""),
+                data: text::highlight(&s, "json", "", tab_size),
                 img: None,
                 pages: None,
             },
-            Err(_) => match text::preview(path) {
+            Err(_) => match text::preview(path, tab_size) {
                 Ok(lines) => Artifact {
                     kind: "json",
                     data: lines,

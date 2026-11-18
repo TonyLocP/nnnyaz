@@ -2487,7 +2487,11 @@ impl App {
             chooser_null,
             chooser_stdout: None,
             local_offset,
-            preview: Preview::new(preview_settings, image_delay),
+            preview: Preview::new(
+                preview_settings,
+                image_delay,
+                usize::from(preview_cfg.tab_size),
+            ),
             list: List::new(Vec::<ListItem>::new()),
             list_dirty: true,
             list_width: 0,

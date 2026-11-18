@@ -140,7 +140,8 @@ Archives are listed as an indented tree with sizes using `7z`/`7zz`.
 Compressed tarballs (`.tar.gz`, `.tgz`, …) are expanded one level so the tar's
 contents are shown instead of the inner `.tar` file. Fonts are rendered as a
 glyph sheet with ImageMagick (`magick`, or `convert` on ImageMagick 6). JSON is
-pretty-printed with `jq`.
+pretty-printed with `jq`. Tabs in text previews expand to `preview.tab_size`
+spaces (2 by default), so indented source lines keep their shape.
 
 Decoded images are cached on disk (shared with Yazi when its cache is
 available), and image/video/PDF neighbours are preloaded in the background, so
@@ -192,6 +193,7 @@ max_height = 1080       # cap on decoded preview height, in pixels
 image_filter = "box"    # box | nearest | triangle | catmull-rom | gaussian | lanczos3
 image_quality = 90      # JPEG quality for cached previews (1-100)
 image_delay = 30        # ms to wait before decoding a newly selected image
+tab_size = 2            # spaces per tab in text previews (1-16)
 
 [tasks]
 show_progress = true

@@ -104,6 +104,8 @@ pub struct PreviewConfig {
     pub image_quality: u8,
     /// Debounce before decoding a newly selected image, in milliseconds.
     pub image_delay: u8,
+    /// Spaces a tab expands to in text previews (Yazi's `preview.tab_size`).
+    pub tab_size: u8,
 }
 
 impl Default for PreviewConfig {
@@ -115,6 +117,7 @@ impl Default for PreviewConfig {
             image_filter: Filter::Box,
             image_quality: 90,
             image_delay: 30,
+            tab_size: 2,
         }
     }
 }
@@ -345,6 +348,13 @@ impl Config {
                 self.preview.image_delay = v as u8;
             }
         }
+        if let Some(v) = p.preview.tab_size {
+            if !(1..=16).contains(&v) {
+                warnings.push("config.toml: preview.tab_size must be 1-16".into());
+            } else {
+                self.preview.tab_size = v as u8;
+            }
+        }
 
         if let Some(v) = p.tasks.show_progress {
             self.tasks.show_progress = v;
@@ -402,6 +412,7 @@ struct PartialPreview {
     image_filter: Option<String>,
     image_quality: Option<u32>,
     image_delay: Option<u32>,
+    tab_size: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]
