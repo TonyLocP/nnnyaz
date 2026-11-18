@@ -211,13 +211,19 @@ are candidates, roughly in priority order.
       many idle seconds by running `$NNN_LOCKER` (default `vlock`) attached,
       then restores the TUI. Any key or mouse event resets the timer, and `0`
       disables it.
+- [x] **Yazi `[help]` keymap context** — `keymap.toml`'s `[help]` section is
+      honored for the help overlay (`close`, `escape`, `arrow …`), including
+      `prepend_keymap` / `append_keymap` / full replacement. Unbound keys keep
+      nnnyaz's built-in search and paging keys, and which-key prefixes work
+      inside help.
+- [x] **Yazi `[which]` sort config** — `sort_by` (`none` / `key` / `desc`),
+      `sort_sensitive`, `sort_reverse`, and `sort_translit` order the prefix
+      menu using the same natural-sort and transliteration rules as file
+      names.
 
 ## Next
 
-- [ ] Yazi `[help]` keymap context — the help overlay is interactive now, so
-      its bindings could be honored instead of ignored.
-- [ ] Yazi `[which]` sort config — `sort_by`, `sort_sensitive`, `sort_reverse`,
-      and `sort_translit` for the prefix menu.
+- [ ] Nothing queued; keep polishing parity as new Yazi/nnn behavior comes up.
 
 ## Local setup (outside this repo)
 

@@ -261,6 +261,13 @@ filter_title = "filter"
 find_title = [ "find→", "find←" ]
 shell_title = [ "shell", "shell (block)" ]
 
+# Ordering for the which-key prefix menu (Yazi's [which]).
+[which]
+sort_by = "none"        # none | key | desc
+sort_sensitive = false  # compare keys/descriptions case-sensitively
+sort_reverse = false
+sort_translit = false   # strip accents before comparing (é -> e)
+
 # Open-with rules use Yazi's [opener] and [open] schema.
 [opener]
 myedit = { run = "nvim %s", desc = "Edit with Neovim", block = true }
@@ -296,9 +303,9 @@ context, matching Yazi.
 ### `keymap.toml`
 
 Bindings map a key sequence to an action command. Contexts are `mgr`, `tasks`,
-and `info` (Yazi's `spot` context is accepted as an alias for `info`, so Yazi's
-spot bindings also drive the `F` full-screen view). The `spot` action opens
-that view.
+`info`, and `help` (Yazi's `spot` context is accepted as an alias for `info`,
+so Yazi's spot bindings also drive the `F` full-screen view). The `spot` action
+opens that view.
 
 ```toml
 [mgr]
@@ -315,6 +322,13 @@ prepend_keymap = [
   { on = "x", run = "task_cancel" },
 ]
 ```
+
+`[help]` accepts Yazi's help-menu actions: `close`, `escape`, `arrow prev` /
+`arrow next`, `arrow N`, `arrow top` / `arrow bot`, and Yazi's page steps
+(`arrow -50%`, `arrow 50%`, `arrow -100%`, `arrow 100%`). Keys you
+leave unbound keep nnnyaz's built-in help keys, including `/` search and
+`n`/`N`, half/full-page jumps, and `q`/`~` to close — so a Yazi `[help]` block
+that only binds `j`/`k` still gets the extra navigation.
 
 `prepend_keymap` overrides existing bindings, while `append_keymap` adds new
 ones. A `keymap` array replaces the whole context:
@@ -336,8 +350,8 @@ A shorthand table form is also accepted:
 ```
 
 Key sequences are written like `<C-d>`, `<A-->`, `<S-Enter>`, `<Space>`, `g g`.
-Unsupported Yazi contexts (`input`, `confirm`, `pick`, `cmp`, `help`, `which`)
-are ignored.
+Unsupported Yazi contexts (`input`, `confirm`, `pick`, `cmp`, `which`) are
+ignored.
 
 Run `~` inside nnnyaz for the built-in key list.
 

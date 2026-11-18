@@ -193,6 +193,36 @@ impl Default for InputConfig {
     }
 }
 
+/// Yazi's `which.sort_by` values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WhichSortBy {
+    /// Keep the configured binding order.
+    #[default]
+    None,
+    Key,
+    Desc,
+}
+
+/// Prefix-menu ordering (Yazi's `[which]` section).
+#[derive(Clone, Debug)]
+pub struct WhichConfig {
+    pub sort_by: WhichSortBy,
+    pub sort_sensitive: bool,
+    pub sort_reverse: bool,
+    pub sort_translit: bool,
+}
+
+impl Default for WhichConfig {
+    fn default() -> Self {
+        WhichConfig {
+            sort_by: WhichSortBy::None,
+            sort_sensitive: false,
+            sort_reverse: false,
+            sort_translit: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ConfirmConfig {
     pub quit_with_tasks: bool,
@@ -219,6 +249,8 @@ pub struct Config {
     pub tasks: TasksConfig,
     pub confirm: ConfirmConfig,
     pub input: InputConfig,
+    /// Yazi's `[which]` prefix-menu ordering.
+    pub which: WhichConfig,
     /// `[opener]` / `[open]` from `config.toml`; `None` means "use Yazi's".
     pub open: Option<toml::Value>,
     pub keymap: Keymap,
@@ -523,6 +555,26 @@ impl Config {
             }
         }
 
+        if let Some(v) = &p.which.sort_by {
+            match v.as_str() {
+                "none" => self.which.sort_by = WhichSortBy::None,
+                "key" => self.which.sort_by = WhichSortBy::Key,
+                "desc" => self.which.sort_by = WhichSortBy::Desc,
+                _ => warnings.push(format!(
+                    "config.toml: which.sort_by '{v}' is not 'none', 'key', or 'desc'"
+                )),
+            }
+        }
+        if let Some(v) = p.which.sort_sensitive {
+            self.which.sort_sensitive = v;
+        }
+        if let Some(v) = p.which.sort_reverse {
+            self.which.sort_reverse = v;
+        }
+        if let Some(v) = p.which.sort_translit {
+            self.which.sort_translit = v;
+        }
+
         let mut open = toml::value::Table::new();
         if let Some(v) = p.opener {
             open.insert("opener".into(), v);
@@ -546,6 +598,7 @@ struct PartialConfig {
     tasks: PartialTasks,
     confirm: PartialConfirm,
     input: PartialInput,
+    which: PartialWhich,
     opener: Option<toml::Value>,
     open: Option<toml::Value>,
 }
@@ -614,6 +667,15 @@ struct PartialInput {
     filter_title: Option<TitleValue>,
     find_title: Option<TitleValue>,
     shell_title: Option<TitleValue>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PartialWhich {
+    sort_by: Option<String>,
+    sort_sensitive: Option<bool>,
+    sort_reverse: Option<bool>,
+    sort_translit: Option<bool>,
 }
 
 /// A prompt title: Yazi accepts a string, or an array of strings for prompts
@@ -738,6 +800,12 @@ fn warn_unknown_config(value: &toml::Value, warnings: &mut Vec<String>) {
             ),
             // openers are validated by openwith.rs.
             "opener" | "open" => {}
+            "which" => warn_keys(
+                value,
+                "which",
+                &["sort_by", "sort_sensitive", "sort_reverse", "sort_translit"],
+                warnings,
+            ),
             other => warnings.push(format!("config.toml: unknown section '{other}'")),
         }
     }
@@ -816,6 +884,12 @@ mod tests {
             [confirm]
             trash_title = "Bin {n} item{s}"
             delete_title = "Erase {n} item{s}"
+
+            [which]
+            sort_by = "desc"
+            sort_sensitive = true
+            sort_reverse = true
+            sort_translit = true
             "#,
         )
         .unwrap();
@@ -837,10 +911,39 @@ mod tests {
         assert_eq!(loaded.config.input.find_title, ["next", "prev"]);
         assert_eq!(loaded.config.confirm.trash_title, "Bin {n} item{s}");
         assert_eq!(loaded.config.confirm.delete_title, "Erase {n} item{s}");
+        assert_eq!(loaded.config.which.sort_by, WhichSortBy::Desc);
+        assert!(loaded.config.which.sort_sensitive);
+        assert!(loaded.config.which.sort_reverse);
+        assert!(loaded.config.which.sort_translit);
         assert!(loaded
             .warnings
             .iter()
             .any(|w| w.contains("unknown key 'typo'")));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn which_defaults_and_validation() {
+        let dir = temp_dir("which");
+        fs::write(
+            dir.join("config.toml"),
+            r#"
+            [which]
+            sort_by = "bogus"
+            extra = 1
+            "#,
+        )
+        .unwrap();
+        let loaded = load_from(&dir);
+        assert_eq!(loaded.config.which.sort_by, WhichSortBy::None);
+        assert!(!loaded.config.which.sort_sensitive);
+        assert!(!loaded.config.which.sort_reverse);
+        assert!(!loaded.config.which.sort_translit);
+        assert!(loaded.warnings.iter().any(|w| w.contains("which.sort_by")));
+        assert!(loaded
+            .warnings
+            .iter()
+            .any(|w| w.contains("unknown key 'extra'")));
         let _ = fs::remove_dir_all(dir);
     }
 

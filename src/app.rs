@@ -39,7 +39,7 @@ use crate::{
     config::{
         self,
         keymap::{Context, KeyChord},
-        Config, MOUSE_CLICK, MOUSE_DRAG, MOUSE_MOVE, MOUSE_SCROLL, MOUSE_TOUCH,
+        Config, WhichSortBy, MOUSE_CLICK, MOUSE_DRAG, MOUSE_MOVE, MOUSE_SCROLL, MOUSE_TOUCH,
     },
     openwith,
     preview::{
@@ -1332,6 +1332,45 @@ fn entry_for(path: PathBuf, name: String) -> Option<Entry> {
         uid: md.uid(),
         gid: md.gid(),
     })
+}
+
+/// Order the which-key entries according to Yazi's `[which]` settings.
+///
+/// Yazi compares keys/descriptions with its natural-sort comparator, applies
+/// transliteration when configured, and leaves the original order alone for
+/// `sort_by = "none"` (including `sort_reverse`).
+fn sort_which_items(
+    items: &mut [(String, String)],
+    by: WhichSortBy,
+    sensitive: bool,
+    reverse: bool,
+    translit: bool,
+) {
+    if by == WhichSortBy::None {
+        return;
+    }
+    let field = |item: &(String, String)| match by {
+        WhichSortBy::Key => item.0.clone(),
+        WhichSortBy::Desc => item.1.clone(),
+        WhichSortBy::None => String::new(),
+    };
+    items.sort_by(|a, b| {
+        let (a, b) = (field(a), field(b));
+        let order = if translit {
+            natural_cmp(
+                &translit::transliterate(&a),
+                &translit::transliterate(&b),
+                sensitive,
+            )
+        } else {
+            natural_cmp(&a, &b, sensitive)
+        };
+        if reverse {
+            order.reverse()
+        } else {
+            order
+        }
+    });
 }
 
 fn natural_cmp(a: &str, b: &str, sensitive: bool) -> std::cmp::Ordering {
@@ -3067,7 +3106,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("g / G", "top / bottom"),
     ("/", "search keys and descriptions"),
     ("n / N", "next / previous match"),
-    ("q / Esc", "close"),
+    ("q / Esc / Enter", "close"),
 ];
 
 /// Split `text` into spans, reversing every case-insensitive occurrence of
@@ -5731,6 +5770,7 @@ impl App {
         self.mode = Mode::Normal;
         self.help_search = false;
         self.input.clear();
+        self.pending.clear();
     }
 
     fn handle_help_key(&mut self, key: KeyEvent) {
@@ -5783,6 +5823,9 @@ impl App {
             }
             return;
         }
+        if self.handle_help_mapped_key(key) {
+            return;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('~') | KeyCode::F(1) => {
                 self.close_help()
@@ -5804,6 +5847,58 @@ impl App {
             KeyCode::PageUp => self.help_scroll_by(-(self.help_page as isize)),
             KeyCode::Char('g') | KeyCode::Home => self.help_scroll = 0,
             KeyCode::Char('G') | KeyCode::End => {
+                self.help_scroll = HELP_ROWS.len().saturating_sub(self.help_page.max(1));
+            }
+            _ => {}
+        }
+    }
+
+    /// Feed a key into Yazi's `[help]` keymap. Returns `true` when the key was
+    /// consumed; unbound keys fall through to nnnyaz's built-in help keys.
+    fn handle_help_mapped_key(&mut self, key: KeyEvent) -> bool {
+        // Esc cancels a pending `[help]` prefix instead of closing the overlay.
+        if !self.pending.is_empty() && key.code == KeyCode::Esc {
+            self.pending.clear();
+            return true;
+        }
+        let next = {
+            let root = self.config.keymap.node(Context::Help);
+            let Some(node) = root.walk(&self.pending) else {
+                self.pending.clear();
+                return false;
+            };
+            node.child(&key)
+                .map(|(chord, child)| (*chord, child.has_children(), child.action().cloned()))
+        };
+        let Some((chord, has_children, action)) = next else {
+            self.pending.clear();
+            return false;
+        };
+        if has_children {
+            self.pending.push(chord);
+            return true;
+        }
+        self.pending.clear();
+        if let Some(action) = action {
+            self.run_help_action(action);
+        }
+        true
+    }
+
+    /// Run a Yazi help-menu action (`close`, `escape`, `arrow …`).
+    fn run_help_action(&mut self, action: Action) {
+        match action {
+            Action::Chain(actions) => {
+                for action in actions {
+                    self.run_help_action(action);
+                }
+            }
+            Action::Close | Action::Escape => self.close_help(),
+            Action::Move(n) => self.help_scroll_by(n),
+            Action::HalfPage(n) => self.help_scroll_by(n as isize * self.help_page as isize / 2),
+            Action::Page(n) => self.help_scroll_by(n as isize * self.help_page as isize),
+            Action::Top => self.help_scroll = 0,
+            Action::Bottom => {
                 self.help_scroll = HELP_ROWS.len().saturating_sub(self.help_page.max(1));
             }
             _ => {}
@@ -7402,9 +7497,6 @@ impl App {
             _ => f.render_widget(Paragraph::new(text).style(status_style), rows[1]),
         }
         self.draw_completions(f);
-        if !self.pending.is_empty() {
-            self.draw_prefix_menu(f);
-        }
 
         if matches!(self.mode, Mode::Help) {
             self.draw_help(f);
@@ -7418,6 +7510,11 @@ impl App {
         if matches!(self.mode, Mode::Tasks) {
             self.draw_tasks(f);
         }
+        // Which-key is drawn last so it stays visible over the help/tasks/info
+        // overlays, including `[help]` prefixes.
+        if !self.pending.is_empty() {
+            self.draw_prefix_menu(f);
+        }
     }
 
     fn draw_prefix_menu(&self, f: &mut Frame) {
@@ -7427,13 +7524,14 @@ impl App {
         let ctx = match self.mode {
             Mode::Tasks => Context::Tasks,
             Mode::Info | Mode::Spot => Context::Info,
+            Mode::Help => Context::Help,
             _ => Context::Mgr,
         };
         let root = self.config.keymap.node(ctx);
         let Some(node) = root.walk(&self.pending) else {
             return;
         };
-        let items: Vec<(String, String)> = node
+        let mut items: Vec<(String, String)> = node
             .children()
             .iter()
             .map(|(chord, child)| {
@@ -7454,6 +7552,13 @@ impl App {
         if items.is_empty() {
             return;
         }
+        sort_which_items(
+            &mut items,
+            self.config.which.sort_by,
+            self.config.which.sort_sensitive,
+            self.config.which.sort_reverse,
+            self.config.which.sort_translit,
+        );
         let area = f.area();
         if area.width < 16 || area.height < 5 {
             return;
@@ -8690,6 +8795,56 @@ mod tests {
         let prefix = fuzzy_score("report.txt", "rep", false).unwrap();
         let scattered = fuzzy_score("r_e_p.txt", "rep", false).unwrap();
         assert!(prefix < scattered);
+    }
+
+    #[test]
+    fn which_menu_sorts_like_yazi() {
+        let item = |k: &str, d: &str| (k.to_string(), d.to_string());
+        let mut items = vec![
+            item("b", "zebra"),
+            item("a10", "apple"),
+            item("a2", "Banana"),
+        ];
+
+        // `none` keeps the configured order, even with reverse set.
+        sort_which_items(&mut items, WhichSortBy::None, false, true, false);
+        assert_eq!(
+            items.iter().map(|i| i.0.as_str()).collect::<Vec<_>>(),
+            ["b", "a10", "a2"]
+        );
+
+        // Keys use natural, case-insensitive comparison by default.
+        sort_which_items(&mut items, WhichSortBy::Key, false, false, false);
+        assert_eq!(
+            items.iter().map(|i| i.0.as_str()).collect::<Vec<_>>(),
+            ["a2", "a10", "b"]
+        );
+
+        sort_which_items(&mut items, WhichSortBy::Key, false, true, false);
+        assert_eq!(
+            items.iter().map(|i| i.0.as_str()).collect::<Vec<_>>(),
+            ["b", "a10", "a2"]
+        );
+
+        sort_which_items(&mut items, WhichSortBy::Desc, false, false, false);
+        assert_eq!(
+            items.iter().map(|i| i.1.as_str()).collect::<Vec<_>>(),
+            ["apple", "Banana", "zebra"]
+        );
+
+        // Case-sensitive ordering puts uppercase first.
+        sort_which_items(&mut items, WhichSortBy::Desc, true, false, false);
+        assert_eq!(
+            items.iter().map(|i| i.1.as_str()).collect::<Vec<_>>(),
+            ["Banana", "apple", "zebra"]
+        );
+
+        // Transliteration lets accented descriptions sort under their base letter.
+        let mut accented = vec![item("a", "Éclair"), item("b", "Eddy")];
+        sort_which_items(&mut accented, WhichSortBy::Desc, false, false, false);
+        assert_eq!(accented[0].1, "Eddy");
+        sort_which_items(&mut accented, WhichSortBy::Desc, false, false, true);
+        assert_eq!(accented[0].1, "Éclair");
     }
 
     #[test]

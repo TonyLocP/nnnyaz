@@ -219,6 +219,7 @@ pub enum Context {
     Mgr,
     Tasks,
     Info,
+    Help,
 }
 
 impl Context {
@@ -227,6 +228,7 @@ impl Context {
             Context::Mgr => "mgr",
             Context::Tasks => "tasks",
             Context::Info => "info",
+            Context::Help => "help",
         }
     }
 }
@@ -357,6 +359,7 @@ pub struct Keymap {
     pub mgr: Node,
     pub tasks: Node,
     pub info: Node,
+    pub help: Node,
 }
 
 impl Keymap {
@@ -365,6 +368,7 @@ impl Keymap {
             Context::Mgr => &self.mgr,
             Context::Tasks => &self.tasks,
             Context::Info => &self.info,
+            Context::Help => &self.help,
         }
     }
 
@@ -373,6 +377,7 @@ impl Keymap {
             Context::Mgr => &mut self.mgr,
             Context::Tasks => &mut self.tasks,
             Context::Info => &mut self.info,
+            Context::Help => &mut self.help,
         }
     }
 
@@ -391,7 +396,7 @@ impl Keymap {
     /// nnn's `-K`.
     pub fn collisions(&self) -> Vec<String> {
         let mut out = Vec::new();
-        for node in [&self.mgr, &self.tasks, &self.info] {
+        for node in [&self.mgr, &self.tasks, &self.info, &self.help] {
             node.collect_collisions(&mut Vec::new(), &mut out);
         }
         out
@@ -425,8 +430,9 @@ impl Keymap {
                 "mgr" => Context::Mgr,
                 "tasks" => Context::Tasks,
                 "info" | "spot" => Context::Info,
+                "help" => Context::Help,
                 // Yazi contexts that nnnyaz does not keymap yet.
-                "input" | "confirm" | "pick" | "cmp" | "help" | "which" => continue,
+                "input" | "confirm" | "pick" | "cmp" | "which" => continue,
                 other => {
                     warnings.push(format!("keymap.toml: unknown context '{other}'"));
                     continue;
@@ -520,6 +526,7 @@ impl Keymap {
         walk(&self.mgr, &mut out);
         walk(&self.tasks, &mut out);
         walk(&self.info, &mut out);
+        walk(&self.help, &mut out);
         out.sort();
         out.dedup();
         out
@@ -632,6 +639,7 @@ impl Default for Keymap {
             mgr: Node::default(),
             tasks: Node::default(),
             info: Node::default(),
+            help: Node::default(),
         };
         use Context::*;
 
@@ -853,6 +861,24 @@ impl Default for Keymap {
             km.insert(Info, on, run, *desc);
         }
 
+        // Yazi's `[help]` defaults. nnnyaz adds search, paging and `q`/`~`
+        // as built-in fallbacks in `handle_help_key`.
+        let help: &[(&str, &str)] = &[
+            ("<Esc>", "escape"),
+            ("<C-[>", "escape"),
+            ("<C-c>", "close"),
+            ("<Enter>", "close"),
+            ("k", "arrow prev"),
+            ("j", "arrow next"),
+            ("<Up>", "arrow prev"),
+            ("<Down>", "arrow next"),
+            ("<C-p>", "arrow prev"),
+            ("<C-n>", "arrow next"),
+        ];
+        for (on, run) in help {
+            km.insert(Help, on, run, None);
+        }
+
         km
     }
 }
@@ -1070,6 +1096,32 @@ mod tests {
             km.mgr.walk(&parse_seq("X").unwrap()).unwrap().action(),
             Some(&Action::Delete)
         );
+    }
+
+    #[test]
+    fn help_keymap_is_honoured() {
+        let km = Keymap::default();
+        assert_eq!(
+            km.help.walk(&parse_seq("j").unwrap()).unwrap().action(),
+            Some(&Action::Move(1))
+        );
+
+        let mut km = Keymap::default();
+        let mut warnings = Vec::new();
+        let doc: toml::Value = toml::from_str(
+            r#"
+            [help]
+            keymap = [ { on = "x", run = "close" } ]
+            "#,
+        )
+        .unwrap();
+        km.apply(&doc, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            km.help.walk(&parse_seq("x").unwrap()).unwrap().action(),
+            Some(&Action::Close)
+        );
+        assert!(km.help.walk(&parse_seq("j").unwrap()).is_none());
     }
 
     #[test]
