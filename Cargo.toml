@@ -1,5 +1,5 @@
 [package]
-name = "yannni"
+name = "nnnyaz"
 version = "0.1.0"
 edition = "2021"
 description = "A small nnn-style terminal file manager with a native preview pane"

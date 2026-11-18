@@ -10,7 +10,7 @@ use std::{
 };
 
 /// Create a named POSIX shared memory object holding `data` and return the
-/// name (`/yannni-...`) plus its byte length. The name is handed to the terminal,
+/// name (`/nnnyaz-...`) plus its byte length. The name is handed to the terminal,
 /// which `shm_open`s then `shm_unlink`s it. Returns an error when shared memory
 /// is unavailable (non-Linux, unsupported filesystem, no permission).
 pub fn create(data: &[u8]) -> io::Result<String> {
@@ -52,7 +52,7 @@ fn unique_name() -> String {
     static N: AtomicU32 = AtomicU32::new(0);
     let pid = std::process::id();
     let n = N.fetch_add(1, Ordering::Relaxed);
-    format!("/yannni-{pid}-{n}")
+    format!("/nnnyaz-{pid}-{n}")
 }
 
 #[cfg(target_os = "linux")]

@@ -425,7 +425,7 @@ impl Keymap {
                 "mgr" => Context::Mgr,
                 "tasks" => Context::Tasks,
                 "info" | "spot" => Context::Info,
-                // Yazi contexts that yannni does not keymap yet.
+                // Yazi contexts that nnnyaz does not keymap yet.
                 "input" | "confirm" | "pick" | "cmp" | "help" | "which" => continue,
                 other => {
                     warnings.push(format!("keymap.toml: unknown context '{other}'"));

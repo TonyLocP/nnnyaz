@@ -1,10 +1,10 @@
 //! Optional `init.lua` overrides and named custom actions.
 //!
 //! The chunk may return a table using the same schema as the TOML files, and
-//! it may call the small `yannni` API while it runs:
+//! it may call the small `nnnyaz` API while it runs:
 //!
 //! ```lua
-//! yannni.keymap.set("mgr", "<C-s>", "search fd", "search")
+//! nnnyaz.keymap.set("mgr", "<C-s>", "search fd", "search")
 //! return { mgr = { show_hidden = true }, theme = { directory = "red" } }
 //! ```
 
@@ -15,20 +15,20 @@ use mlua::{Lua, Table, Value};
 use super::{keymap::Context, Config};
 
 const BOOTSTRAP: &str = r#"
-yannni = {
+nnnyaz = {
   _sets = {},
   _notify = {},
   _actions = {},
   keymap = {},
 }
-function yannni.notify(msg)
-  table.insert(yannni._notify, tostring(msg))
+function nnnyaz.notify(msg)
+  table.insert(nnnyaz._notify, tostring(msg))
 end
-function yannni.keymap.set(ctx, on, run, desc)
-  table.insert(yannni._sets, { ctx = ctx, on = on, run = run, desc = desc })
+function nnnyaz.keymap.set(ctx, on, run, desc)
+  table.insert(nnnyaz._sets, { ctx = ctx, on = on, run = run, desc = desc })
 end
-function yannni.register_action(name, fn)
-  yannni._actions[name] = fn
+function nnnyaz.register_action(name, fn)
+  nnnyaz._actions[name] = fn
 end
 "#;
 
@@ -44,7 +44,7 @@ pub fn apply(config: &mut Config, dir: &Path, warnings: &mut Vec<String>) {
     };
 
     let lua = Lua::new();
-    if let Err(e) = lua.load(BOOTSTRAP).set_name("@yannni-bootstrap").exec() {
+    if let Err(e) = lua.load(BOOTSTRAP).set_name("@nnnyaz-bootstrap").exec() {
         warnings.push(format!("init.lua: cannot initialize Lua: {e}"));
         return;
     }
@@ -69,10 +69,10 @@ pub fn apply(config: &mut Config, dir: &Path, warnings: &mut Vec<String>) {
 }
 
 fn set_snapshot(lua: &Lua, config: &Config) {
-    let Ok(yannni) = lua.globals().get::<Table>("yannni") else {
+    let Ok(nnnyaz) = lua.globals().get::<Table>("nnnyaz") else {
         return;
     };
-    let _ = yannni.set("version", env!("CARGO_PKG_VERSION"));
+    let _ = nnnyaz.set("version", env!("CARGO_PKG_VERSION"));
     let Ok(snapshot) = lua.create_table() else {
         return;
     };
@@ -88,14 +88,14 @@ fn set_snapshot(lua: &Lua, config: &Config) {
         crate::config::mouse_event_names(config.mgr.mouse_events),
     );
     let _ = snapshot.set("mgr", mgr);
-    let _ = yannni.set("config", snapshot);
+    let _ = nnnyaz.set("config", snapshot);
 }
 
 fn apply_calls(lua: &Lua, config: &mut Config, warnings: &mut Vec<String>) {
-    let Ok(yannni) = lua.globals().get::<Table>("yannni") else {
+    let Ok(nnnyaz) = lua.globals().get::<Table>("nnnyaz") else {
         return;
     };
-    let Ok(sets) = yannni.get::<Table>("_sets") else {
+    let Ok(sets) = nnnyaz.get::<Table>("_sets") else {
         return;
     };
     for pair in sets.pairs::<Value, Value>() {
@@ -115,7 +115,7 @@ fn apply_calls(lua: &Lua, config: &mut Config, warnings: &mut Vec<String>) {
                 None => warnings.push(format!("init.lua: unknown keymap context '{name}'")),
             },
             _ => warnings
-                .push("init.lua: yannni.keymap.set(ctx, on, run) expects string arguments".into()),
+                .push("init.lua: nnnyaz.keymap.set(ctx, on, run) expects string arguments".into()),
         }
     }
 }
@@ -130,10 +130,10 @@ fn context_by_name(name: &str) -> Option<Context> {
 }
 
 fn collect_notices(lua: &Lua, warnings: &mut Vec<String>) {
-    let Ok(yannni) = lua.globals().get::<Table>("yannni") else {
+    let Ok(nnnyaz) = lua.globals().get::<Table>("nnnyaz") else {
         return;
     };
-    let Ok(notices) = yannni.get::<Table>("_notify") else {
+    let Ok(notices) = nnnyaz.get::<Table>("_notify") else {
         return;
     };
     for notice in notices.sequence_values::<String>().flatten() {
@@ -216,12 +216,12 @@ fn to_toml(value: &Value) -> Result<toml::Value, String> {
     })
 }
 
-/// Names registered with `yannni.register_action`, for keymap validation.
+/// Names registered with `nnnyaz.register_action`, for keymap validation.
 pub fn registered_actions(lua: &Lua) -> Vec<String> {
-    let Ok(yannni) = lua.globals().get::<Table>("yannni") else {
+    let Ok(nnnyaz) = lua.globals().get::<Table>("nnnyaz") else {
         return Vec::new();
     };
-    let Ok(actions) = yannni.get::<Table>("_actions") else {
+    let Ok(actions) = nnnyaz.get::<Table>("_actions") else {
         return Vec::new();
     };
     actions
@@ -231,20 +231,20 @@ pub fn registered_actions(lua: &Lua) -> Vec<String> {
         .collect()
 }
 
-/// Run a named action registered from Lua. Returns the last `yannni.notify`
+/// Run a named action registered from Lua. Returns the last `nnnyaz.notify`
 /// message, if any.
 pub fn run_action(lua: &Lua, name: &str) -> Result<Option<String>, String> {
-    let yannni = lua
+    let nnnyaz = lua
         .globals()
-        .get::<Table>("yannni")
+        .get::<Table>("nnnyaz")
         .map_err(|e| e.to_string())?;
-    let actions = yannni.get::<Table>("_actions").map_err(|e| e.to_string())?;
+    let actions = nnnyaz.get::<Table>("_actions").map_err(|e| e.to_string())?;
     let function = actions
         .get::<mlua::Function>(name)
         .map_err(|_| format!("unknown action '{name}'"))?;
     function.call::<()>(()).map_err(|e| e.to_string())?;
 
-    let notices = yannni.get::<Table>("_notify").map_err(|e| e.to_string())?;
+    let notices = nnnyaz.get::<Table>("_notify").map_err(|e| e.to_string())?;
     let last = notices.sequence_values::<String>().flatten().last();
     let _ = notices.clear();
     Ok(last)
@@ -258,7 +258,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "yannni-lua-{tag}-{}-{}",
+            "nnnyaz-lua-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -275,7 +275,7 @@ mod tests {
         fs::write(
             dir.join("init.lua"),
             r#"
-            yannni.keymap.set("mgr", "<C-s>", "search fd")
+            nnnyaz.keymap.set("mgr", "<C-s>", "search fd")
             return {
               mgr = {
                 show_hidden = true,

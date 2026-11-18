@@ -126,7 +126,7 @@ mod tests {
 
     fn temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "yannni-detect-{}-{}-{name}",
+            "nnnyaz-detect-{}-{}-{name}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
