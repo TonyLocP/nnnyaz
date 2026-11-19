@@ -110,6 +110,11 @@ impl Prompt {
     }
 }
 
+/// Confirmation prompts treat `y` and Enter as yes; anything else cancels.
+fn confirm_yes(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('y') | KeyCode::Enter)
+}
+
 /// A pending mark operation waiting for its single-character key.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum MarkOp {
@@ -6505,7 +6510,7 @@ impl App {
                     return Ok(false);
                 }
                 if p == Prompt::Delete {
-                    if key.code == KeyCode::Char('y') {
+                    if confirm_yes(&key) {
                         self.confirm_delete();
                     } else {
                         self.pending_delete = None;
@@ -6514,7 +6519,7 @@ impl App {
                     return Ok(false);
                 }
                 if p == Prompt::SessionDelete {
-                    if key.code == KeyCode::Char('y') {
+                    if confirm_yes(&key) {
                         self.confirm_session_delete();
                     } else {
                         self.pending_session_delete = None;
@@ -7361,20 +7366,20 @@ impl App {
                 let n = self.targets().len();
                 match self.pending_delete {
                     Some(DeleteMode::Trash) => format!(
-                        "{} (y/N)",
+                        "{} (y/Enter/N)",
                         confirm_title(&self.config.confirm.trash_title, n)
                     ),
                     Some(DeleteMode::Permanent) | Some(DeleteMode::FromTrash) => format!(
-                        "{} (y/N)",
+                        "{} (y/Enter/N)",
                         confirm_title(&self.config.confirm.delete_title, n)
                     ),
-                    Some(DeleteMode::EmptyTrash) => "empty trash? (y/N)".into(),
-                    None => "delete? (y/N)".into(),
+                    Some(DeleteMode::EmptyTrash) => "empty trash? (y/Enter/N)".into(),
+                    None => "delete? (y/Enter/N)".into(),
                 }
             }
             Mode::Prompt(Prompt::SessionDelete) => match &self.pending_session_delete {
-                Some(name) => format!("delete session '{name}'? (y/N)"),
-                None => "delete session? (y/N)".into(),
+                Some(name) => format!("delete session '{name}'? (y/Enter/N)"),
+                None => "delete session? (y/Enter/N)".into(),
             },
             Mode::Prompt(p) => {
                 format!("{}{}", self.prompt_prefix(p), self.input.as_str())
@@ -8627,6 +8632,15 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn enter_confirms_prompts() {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        assert!(confirm_yes(&key(KeyCode::Enter)));
+        assert!(confirm_yes(&key(KeyCode::Char('y'))));
+        assert!(!confirm_yes(&key(KeyCode::Char('n'))));
+        assert!(!confirm_yes(&key(KeyCode::Esc)));
     }
 
     #[test]

@@ -104,7 +104,7 @@ Inside nnnyaz, `t S` opens nnn's session menu (`s` save, `l` load, `r` restore
 `@`). `l` lists the saved sessions and filters them as you type: `j`/`k` always
 edit the filter text, while `J`/`K`, `Ctrl+j`/`Ctrl+k`, or `↑`/`↓` move through
 the list. Enter loads the highlighted session, and `Ctrl+d` deletes it after a
-`y/N` confirmation.
+`y`/Enter confirmation.
 
 ## Quitting and the current directory
 
