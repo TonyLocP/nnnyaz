@@ -215,6 +215,11 @@ are candidates, roughly in priority order.
       many idle seconds by running `$NNN_LOCKER` (default `vlock`) attached,
       then restores the TUI. Any key or mouse event resets the timer, and `0`
       disables it.
+- [x] **Help-search editing keys** — the `/` query in the help overlay now
+      supports the rename prompt's `Ctrl+W` word delete, `Ctrl+U`/`Ctrl+K`
+      kills, `Ctrl+Z` undo, `Ctrl+A`/`Ctrl+E` movement, and shift-based
+      selection, with a compact hint line showing what fits.
+
 - [x] **Yazi `[help]` keymap context** — `keymap.toml`'s `[help]` section is
       honored for the help overlay (`close`, `escape`, `arrow …`), including
       `prepend_keymap` / `append_keymap` / full replacement. Unbound keys keep

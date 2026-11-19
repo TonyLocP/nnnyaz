@@ -397,22 +397,58 @@ impl Input {
 /// Terminals disagree on Ctrl+Shift+letter: some set the SHIFT modifier, others
 /// just send an uppercase char. Treat an uppercase letter as shifted so
 /// Ctrl+Shift+H/L extends the selection either way.
-fn apply_ctrl_edit(input: &mut Input, c: char, shift: bool) {
+fn apply_ctrl_edit(input: &mut Input, c: char, shift: bool) -> bool {
     let shift = shift || c.is_ascii_uppercase();
     match c.to_ascii_lowercase() {
-        'h' if shift => input.select_left(),
-        'l' if shift => input.select_right(),
-        'a' if shift => input.select_all(),
-        's' if shift => input.select_all(),
-        'h' => input.move_left(),
-        'l' => input.move_right(),
-        'a' => input.move_home(),
-        'e' => input.move_end(),
-        'u' => input.kill_to_start(),
-        'k' => input.kill_to_end(),
-        'w' => input.delete_word(),
-        'z' => input.undo(),
-        _ => {}
+        'h' if shift => {
+            input.select_left();
+            false
+        }
+        'l' if shift => {
+            input.select_right();
+            false
+        }
+        'a' if shift => {
+            input.select_all();
+            false
+        }
+        's' if shift => {
+            input.select_all();
+            false
+        }
+        'h' => {
+            input.move_left();
+            false
+        }
+        'l' => {
+            input.move_right();
+            false
+        }
+        'a' => {
+            input.move_home();
+            false
+        }
+        'e' => {
+            input.move_end();
+            false
+        }
+        'u' => {
+            input.kill_to_start();
+            true
+        }
+        'k' => {
+            input.kill_to_end();
+            true
+        }
+        'w' => {
+            input.delete_word();
+            true
+        }
+        'z' => {
+            input.undo();
+            true
+        }
+        _ => false,
     }
 }
 
@@ -453,6 +489,13 @@ const RENAME_HINTS: [&str; 5] = [
     "^H/^L move · ⇧ select · ^A/^E start/end · ^Z undo · Enter save · Esc",
     "^H/^L move · ⇧ select · ^Z undo · Enter save · Esc",
     "Enter save · Esc",
+];
+
+/// Help-search editing hints, longest first.
+const HELP_SEARCH_HINTS: [&str; 3] = [
+    "^W word · ^U/^K kill · ⇧ select · ^Z undo · ^A/^E · Enter keep · Esc",
+    "⇧ select · ^W word · ^Z undo · Enter keep · Esc",
+    "Enter keep · Esc cancel",
 ];
 
 /// Display width of one character in terminal cells.
@@ -5794,6 +5837,7 @@ impl App {
 
     fn handle_help_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         if self.help_search {
             match key.code {
                 KeyCode::Esc => {
@@ -5823,17 +5867,21 @@ impl App {
                     self.input.delete();
                     self.help_sync_query();
                 }
+                KeyCode::Left if shift => self.input.select_left(),
+                KeyCode::Right if shift => self.input.select_right(),
+                KeyCode::Home if shift => self.input.select_home(),
+                KeyCode::End if shift => self.input.select_end(),
                 KeyCode::Left => self.input.move_left(),
                 KeyCode::Right => self.input.move_right(),
                 KeyCode::Home => self.input.move_home(),
                 KeyCode::End => self.input.move_end(),
                 KeyCode::Up => self.help_jump(false),
                 KeyCode::Down => self.help_jump(true),
-                KeyCode::Char(c) if ctrl => apply_ctrl_edit(
-                    &mut self.input,
-                    c,
-                    key.modifiers.contains(KeyModifiers::SHIFT),
-                ),
+                KeyCode::Char(c) if ctrl => {
+                    if apply_ctrl_edit(&mut self.input, c, shift) {
+                        self.help_sync_query();
+                    }
+                }
                 KeyCode::Char(c) => {
                     self.input.insert(c);
                     self.help_sync_query();
@@ -7513,6 +7561,7 @@ impl App {
                 f.render_widget(Paragraph::new(text).style(status_style), rows[1]);
             }
             Mode::Prompt(p) => self.draw_prompt_status(f, rows[1], p),
+            Mode::Help if self.help_search => self.draw_help_search_status(f, rows[1]),
             _ => f.render_widget(Paragraph::new(text).style(status_style), rows[1]),
         }
         self.draw_completions(f);
@@ -7970,15 +8019,7 @@ impl App {
     /// and placing the terminal cursor so the caret stays visible.
     fn draw_prompt_status(&self, f: &mut Frame, area: Rect, p: Prompt) {
         let prefix = self.prompt_prefix(p);
-        let prefix_w = Span::raw(prefix.as_str()).width();
-        if prefix_w >= area.width as usize {
-            f.render_widget(
-                Paragraph::new(prefix).style(self.config.theme.status_info),
-                area,
-            );
-            return;
-        }
-        let avail = area.width as usize - prefix_w;
+        let avail = (area.width as usize).saturating_sub(Span::raw(prefix.as_str()).width());
         let bookmark_hint = (p == Prompt::Bookmark)
             .then(|| {
                 let keys = self.bookmark_keys();
@@ -7996,18 +8037,56 @@ impl App {
         } else {
             None
         };
+        self.draw_input_status(f, area, &prefix, hint, &self.input);
+    }
+
+    /// Render the help search line with the same editing affordances as the
+    /// rename prompt.
+    fn draw_help_search_status(&self, f: &mut Frame, area: Rect) {
+        let total = self.help_matches().len();
+        let prefix = if self.input.as_str().is_empty() {
+            "help search: ".to_string()
+        } else {
+            format!("help search [{total}]: ")
+        };
+        let avail = (area.width as usize).saturating_sub(Span::raw(prefix.as_str()).width());
+        let hint = HELP_SEARCH_HINTS
+            .into_iter()
+            .find(|hint| Span::raw(*hint).width() + 12 <= avail);
+        self.draw_input_status(f, area, &prefix, hint, &self.input);
+    }
+
+    /// Render a label and editable buffer, highlighting the selection and
+    /// placing the terminal cursor so the caret stays visible.
+    fn draw_input_status(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        prefix: &str,
+        hint: Option<&str>,
+        input: &Input,
+    ) {
+        let prefix_w = Span::raw(prefix).width();
+        if prefix_w >= area.width as usize {
+            f.render_widget(
+                Paragraph::new(prefix).style(self.config.theme.status_info),
+                area,
+            );
+            return;
+        }
+        let avail = area.width as usize - prefix_w;
         let hint_w = hint.map_or(0, |hint| Span::raw(hint).width());
         let hint_gap = usize::from(hint_w > 0) * 2;
         let avail = avail.saturating_sub(hint_w + hint_gap).max(1);
-        let text = self.input.as_str();
-        let cursor_col = Span::raw(&text[..self.input.cursor]).width();
+        let text = input.as_str();
+        let cursor_col = Span::raw(&text[..input.cursor]).width();
         let scroll = cursor_col.saturating_sub(avail.saturating_sub(1));
         let start = byte_at_col(text, scroll);
         let end = byte_at_col(text, scroll + avail);
 
         let mut spans = vec![Span::raw(prefix)];
         let mut pos = start;
-        if let Some(sel) = self.input.selection() {
+        if let Some(sel) = input.selection() {
             let sel_start = sel.start.max(start).min(end);
             let sel_end = sel.end.min(end).max(sel_start);
             if sel_start > pos {
@@ -9213,6 +9292,19 @@ mod tests {
         apply_ctrl_edit(&mut input, 'h', false);
         assert_eq!(input.cursor, 0);
         assert_eq!(input.selection(), None);
+    }
+
+    #[test]
+    fn ctrl_edit_reports_when_help_query_needs_sync() {
+        let mut input = Input::new("alpha beta");
+        assert!(apply_ctrl_edit(&mut input, 'w', false));
+        assert_eq!(input.as_str(), "alpha ");
+        assert!(!apply_ctrl_edit(&mut input, 'a', false));
+        assert_eq!(input.cursor, 0);
+        assert!(!apply_ctrl_edit(&mut input, 's', true));
+        assert_eq!(input.selection(), Some(0..6));
+        assert!(apply_ctrl_edit(&mut input, 'u', false));
+        assert_eq!(input.as_str(), "");
     }
 
     #[test]

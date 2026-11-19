@@ -375,6 +375,12 @@ leave unbound keep nnnyaz's built-in help keys, including `/` search and
 `n`/`N`, half/full-page jumps, and `q`/`~` to close — so a Yazi `[help]` block
 that only binds `j`/`k` still gets the extra navigation.
 
+Once `/` search is open, the query uses the same editing keys as the rename
+prompt: `Ctrl+H`/`Ctrl+L` move, `Shift+←/→` (or `Ctrl+Shift+H/L`) select,
+`Ctrl+W` deletes the previous word, `Ctrl+U`/`Ctrl+K` kill to the start/end,
+`Ctrl+Z` undoes, `Ctrl+A`/`Ctrl+E` jump to the start/end, and `Ctrl+Shift+S`
+selects all. `Enter` keeps the query, `Esc` cancels it.
+
 `prepend_keymap` overrides existing bindings, while `append_keymap` adds new
 ones. A `keymap` array replaces the whole context:
 
