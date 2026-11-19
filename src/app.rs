@@ -452,18 +452,30 @@ fn apply_ctrl_edit(input: &mut Input, c: char, shift: bool) -> bool {
     }
 }
 
+/// Styles used to draw an inline input line.
+struct InputStyle {
+    cursor: Style,
+    selection: Style,
+    /// When set, a solid block is inserted at the caret instead of styling
+    /// the character under it.
+    caret_glyph: Option<&'static str>,
+}
+
 /// Build the visible spans for an input line. `start`/`end` are the visible
-/// byte range; overlays are clipped to it. The caret style wins over the
-/// selection style so the insertion point stays obvious inside a selection.
+/// byte range; overlays are clipped to it.
 fn input_spans<'a>(
     text: &'a str,
     cursor: usize,
     selection: Option<Range<usize>>,
     start: usize,
     end: usize,
-    cursor_style: Style,
-    selection_style: Style,
+    style: InputStyle,
 ) -> Vec<Span<'a>> {
+    let InputStyle {
+        cursor: cursor_style,
+        selection: selection_style,
+        caret_glyph,
+    } = style;
     let cursor_end = if cursor < text.len() {
         text[cursor..]
             .chars()
@@ -483,7 +495,9 @@ fn input_spans<'a>(
         marks.push(sel_start);
         marks.push(sel_end);
     }
-    if cursor_visible {
+    if caret_glyph.is_some() {
+        marks.push(cursor);
+    } else if cursor_visible {
         marks.push(cursor);
         marks.push(cursor_end);
     }
@@ -491,9 +505,16 @@ fn input_spans<'a>(
     marks.dedup();
 
     let mut spans = Vec::new();
+    let mut glyph_placed = false;
     for pair in marks.windows(2) {
         let (a, b) = (pair[0], pair[1]);
-        let style = if cursor_visible && a >= cursor && b <= cursor_end {
+        if let Some(glyph) = caret_glyph {
+            if !glyph_placed && a >= cursor {
+                spans.push(Span::styled(glyph, cursor_style));
+                glyph_placed = true;
+            }
+        }
+        let style = if caret_glyph.is_none() && cursor_visible && a >= cursor && b <= cursor_end {
             cursor_style
         } else if selection.is_some_and(|(sel_start, sel_end)| a >= sel_start && b <= sel_end) {
             selection_style
@@ -502,7 +523,11 @@ fn input_spans<'a>(
         };
         spans.push(Span::styled(&text[a..b], style));
     }
-    if !cursor_visible {
+    if let Some(glyph) = caret_glyph {
+        if !glyph_placed {
+            spans.push(Span::styled(glyph, cursor_style));
+        }
+    } else if !cursor_visible {
         // Caret past the final character: draw an inverted space so the
         // insertion point still stands out.
         spans.push(Span::styled(" ", cursor_style));
@@ -8138,12 +8163,16 @@ impl App {
         let avail = avail.saturating_sub(hint_w + hint_gap).max(1);
         let text = input.as_str();
         let cursor_col = Span::raw(&text[..input.cursor]).width();
-        let scroll = cursor_col.saturating_sub(avail.saturating_sub(1));
+        // A solid block is much easier to spot than the terminal's thin caret;
+        // reserve one cell for it and scroll the text around it.
+        let caret_glyph = (avail >= 2).then_some("█");
+        let text_avail = avail
+            .saturating_sub(usize::from(caret_glyph.is_some()))
+            .max(1);
+        let scroll = cursor_col.saturating_sub(text_avail.saturating_sub(1));
         let start = byte_at_col(text, scroll);
-        let end = byte_at_col(text, scroll + avail);
+        let end = byte_at_col(text, scroll + text_avail);
 
-        // Terminal carets are often a thin, blinking bar that is easy to lose
-        // in a long query, so the character under the caret gets its own style.
         let mut spans = vec![Span::raw(prefix)];
         spans.extend(input_spans(
             text,
@@ -8151,8 +8180,11 @@ impl App {
             input.selection(),
             start,
             end,
-            self.config.theme.cursor,
-            self.config.theme.selection,
+            InputStyle {
+                cursor: self.config.theme.cursor,
+                selection: self.config.theme.selection,
+                caret_glyph,
+            },
         ));
 
         f.render_widget(
@@ -9362,7 +9394,12 @@ mod tests {
     fn input_spans_style_the_caret_character() {
         let caret = Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD);
         let selected = Style::new().add_modifier(Modifier::REVERSED);
-        let spans = input_spans("notes.txt", 5, Some(0..9), 0, 9, caret, selected);
+        let style = |glyph| InputStyle {
+            cursor: caret,
+            selection: selected,
+            caret_glyph: glyph,
+        };
+        let spans = input_spans("notes.txt", 5, Some(0..9), 0, 9, style(None));
         let dot = spans
             .iter()
             .find(|span| span.content.as_ref() == ".")
@@ -9372,9 +9409,42 @@ mod tests {
         assert_eq!(first.content.as_ref(), "notes");
         assert_eq!(first.style, selected);
 
-        let at_end = input_spans("abc", 3, None, 0, 3, caret, selected);
+        let at_end = input_spans("abc", 3, None, 0, 3, style(None));
         assert_eq!(at_end.last().unwrap().content.as_ref(), " ");
         assert_eq!(at_end.last().unwrap().style, caret);
+    }
+
+    #[test]
+    fn input_spans_insert_a_visible_caret_block() {
+        let caret = Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        let selected = Style::new().add_modifier(Modifier::REVERSED);
+        let style = InputStyle {
+            cursor: caret,
+            selection: selected,
+            caret_glyph: Some("█"),
+        };
+        let contents: Vec<_> = input_spans("notes.txt", 5, Some(0..9), 0, 9, style)
+            .into_iter()
+            .map(|span| (span.content.into_owned(), span.style))
+            .collect();
+        assert_eq!(contents[0].0, "notes");
+        assert_eq!(contents[1], ("█".to_string(), caret));
+        assert_eq!(contents[2].0, ".txt");
+        assert_eq!(contents[2].1, selected);
+
+        let at_end = input_spans(
+            "abc",
+            3,
+            None,
+            0,
+            3,
+            InputStyle {
+                cursor: caret,
+                selection: selected,
+                caret_glyph: Some("█"),
+            },
+        );
+        assert_eq!(at_end.last().unwrap().content.as_ref(), "█");
     }
 
     #[test]

@@ -34,7 +34,7 @@ impl Default for Theme {
             fg: Style::new(),
             dim: Style::new().fg(Color::DarkGray),
             selection: Style::new().add_modifier(Modifier::REVERSED),
-            cursor: Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            cursor: Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             directory: Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
             tab_active: Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD),
             tab_inactive: Style::new().fg(Color::DarkGray),

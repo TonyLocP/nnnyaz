@@ -219,7 +219,7 @@ are candidates, roughly in priority order.
       supports the rename prompt's `Ctrl+W` word delete, `Ctrl+U`/`Ctrl+K`
       kills, `Ctrl+Z` undo, `Ctrl+A`/`Ctrl+E` movement, and shift-based
       selection, with a compact hint line showing what fits. The character
-      under the caret is highlighted via the new `cursor` theme role.
+      insertion point is a solid `█` block via the new `cursor` theme role.
 
 - [x] **Yazi `[help]` keymap context** — `keymap.toml`'s `[help]` section is
       honored for the help overlay (`close`, `escape`, `arrow …`), including

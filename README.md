@@ -431,8 +431,8 @@ Mouse support mirrors Yazi and is controlled by `mgr.mouse_events` (default
 
 Prompts share a single-line editing buffer. Rename starts with the stem selected
 and the cursor before the extension, so typing replaces the stem; dotfiles
-select the whole name. The character under the caret is highlighted so the
-insertion point is easy to spot; its style is the `cursor` theme role.
+select the whole name. A solid `█` block marks the insertion point so it is
+easy to spot; its color is the `cursor` theme role.
 
 | Keys | Action |
 | --- | --- |

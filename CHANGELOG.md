@@ -12,7 +12,7 @@ All notable changes to nnnyaz are documented here. The format follows
   delete, `Ctrl+U`/`Ctrl+K` kills, `Ctrl+Z` undo, `Ctrl+A`/`Ctrl+E` movement,
   and shift-based selection.
 - Confirmation prompts accept `Enter` as well as `y`.
-- Inline prompts highlight the character under the caret, with a configurable
+- Inline prompts show a solid `█` caret block, styled by the configurable
   `cursor` theme role.
 
 ## [0.1.0] - 2026-11-18
