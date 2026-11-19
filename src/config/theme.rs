@@ -7,6 +7,8 @@ pub struct Theme {
     pub fg: Style,
     pub dim: Style,
     pub selection: Style,
+    /// Style for the character under the caret in inline prompts.
+    pub cursor: Style,
     pub directory: Style,
     pub tab_active: Style,
     pub tab_inactive: Style,
@@ -32,6 +34,7 @@ impl Default for Theme {
             fg: Style::new(),
             dim: Style::new().fg(Color::DarkGray),
             selection: Style::new().add_modifier(Modifier::REVERSED),
+            cursor: Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD),
             directory: Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
             tab_active: Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD),
             tab_inactive: Style::new().fg(Color::DarkGray),
@@ -77,6 +80,7 @@ impl Theme {
                 "fg" => self.fg = style,
                 "dim" => self.dim = style,
                 "selection" => self.selection = style,
+                "cursor" => self.cursor = style,
                 "directory" => self.directory = style,
                 "tab_active" => self.tab_active = style,
                 "tab_inactive" => self.tab_inactive = style,
@@ -244,6 +248,7 @@ mod tests {
             [theme]
             directory = "red"
             selection = { reversed = true, bold = true }
+            cursor = { underline = true }
             nope = "blue"
             "#,
         )
@@ -253,6 +258,7 @@ mod tests {
         assert_eq!(theme.directory.add_modifier, Modifier::empty());
         assert!(theme.selection.add_modifier.contains(Modifier::REVERSED));
         assert!(theme.selection.add_modifier.contains(Modifier::BOLD));
+        assert!(theme.cursor.add_modifier.contains(Modifier::UNDERLINED));
         assert_eq!(warnings.len(), 1);
     }
 }

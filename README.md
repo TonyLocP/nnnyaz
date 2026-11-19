@@ -431,7 +431,8 @@ Mouse support mirrors Yazi and is controlled by `mgr.mouse_events` (default
 
 Prompts share a single-line editing buffer. Rename starts with the stem selected
 and the cursor before the extension, so typing replaces the stem; dotfiles
-select the whole name.
+select the whole name. The character under the caret is highlighted so the
+insertion point is easy to spot; its style is the `cursor` theme role.
 
 | Keys | Action |
 | --- | --- |
@@ -480,7 +481,7 @@ status_info = { fg = "yellow", bold = true }
 border = "darkgray"
 ```
 
-Roles: `fg`, `dim`, `selection`, `directory`, `tab_active`, `tab_inactive`,
+Roles: `fg`, `dim`, `selection`, `cursor`, `directory`, `tab_active`, `tab_inactive`,
 `prefix_key`, `prefix_desc`, `info_section`, `info_label`, `status`,
 `status_error`, `status_info`, `task_running`, `task_done`, `task_failed`,
 `task_cancelled`, `task_percent`, `preview_title`, `border`.

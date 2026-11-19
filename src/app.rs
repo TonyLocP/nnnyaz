@@ -452,6 +452,64 @@ fn apply_ctrl_edit(input: &mut Input, c: char, shift: bool) -> bool {
     }
 }
 
+/// Build the visible spans for an input line. `start`/`end` are the visible
+/// byte range; overlays are clipped to it. The caret style wins over the
+/// selection style so the insertion point stays obvious inside a selection.
+fn input_spans<'a>(
+    text: &'a str,
+    cursor: usize,
+    selection: Option<Range<usize>>,
+    start: usize,
+    end: usize,
+    cursor_style: Style,
+    selection_style: Style,
+) -> Vec<Span<'a>> {
+    let cursor_end = if cursor < text.len() {
+        text[cursor..]
+            .chars()
+            .next()
+            .map_or(cursor, |c| cursor + c.len_utf8())
+    } else {
+        cursor
+    };
+    let cursor_visible = cursor_end > cursor && cursor >= start && cursor_end <= end;
+    let selection = selection.map(|range| {
+        let sel_start = range.start.max(start).min(end);
+        (sel_start, range.end.min(end).max(sel_start))
+    });
+
+    let mut marks = vec![start, end];
+    if let Some((sel_start, sel_end)) = selection {
+        marks.push(sel_start);
+        marks.push(sel_end);
+    }
+    if cursor_visible {
+        marks.push(cursor);
+        marks.push(cursor_end);
+    }
+    marks.sort_unstable();
+    marks.dedup();
+
+    let mut spans = Vec::new();
+    for pair in marks.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let style = if cursor_visible && a >= cursor && b <= cursor_end {
+            cursor_style
+        } else if selection.is_some_and(|(sel_start, sel_end)| a >= sel_start && b <= sel_end) {
+            selection_style
+        } else {
+            Style::new()
+        };
+        spans.push(Span::styled(&text[a..b], style));
+    }
+    if !cursor_visible {
+        // Caret past the final character: draw an inverted space so the
+        // insertion point still stands out.
+        spans.push(Span::styled(" ", cursor_style));
+    }
+    spans
+}
+
 /// tmux's mode-2 output is only parseable by crossterm when tmux reports
 /// modified keys in CSI-u form. With `extended-keys-format xterm` it emits
 /// `CSI 27;…~` instead, so leave the legacy encoding alone in that case.
@@ -8084,25 +8142,18 @@ impl App {
         let start = byte_at_col(text, scroll);
         let end = byte_at_col(text, scroll + avail);
 
+        // Terminal carets are often a thin, blinking bar that is easy to lose
+        // in a long query, so the character under the caret gets its own style.
         let mut spans = vec![Span::raw(prefix)];
-        let mut pos = start;
-        if let Some(sel) = input.selection() {
-            let sel_start = sel.start.max(start).min(end);
-            let sel_end = sel.end.min(end).max(sel_start);
-            if sel_start > pos {
-                spans.push(Span::raw(&text[pos..sel_start]));
-            }
-            if sel_end > sel_start {
-                spans.push(Span::styled(
-                    &text[sel_start..sel_end],
-                    self.config.theme.selection,
-                ));
-            }
-            pos = sel_end.max(pos);
-        }
-        if end > pos {
-            spans.push(Span::raw(&text[pos..end]));
-        }
+        spans.extend(input_spans(
+            text,
+            input.cursor,
+            input.selection(),
+            start,
+            end,
+            self.config.theme.cursor,
+            self.config.theme.selection,
+        ));
 
         f.render_widget(
             Paragraph::new(Line::from(spans)).style(self.config.theme.status_info),
@@ -9305,6 +9356,25 @@ mod tests {
         assert_eq!(input.selection(), Some(0..6));
         assert!(apply_ctrl_edit(&mut input, 'u', false));
         assert_eq!(input.as_str(), "");
+    }
+
+    #[test]
+    fn input_spans_style_the_caret_character() {
+        let caret = Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        let selected = Style::new().add_modifier(Modifier::REVERSED);
+        let spans = input_spans("notes.txt", 5, Some(0..9), 0, 9, caret, selected);
+        let dot = spans
+            .iter()
+            .find(|span| span.content.as_ref() == ".")
+            .unwrap();
+        assert_eq!(dot.style, caret);
+        let first = spans.first().unwrap();
+        assert_eq!(first.content.as_ref(), "notes");
+        assert_eq!(first.style, selected);
+
+        let at_end = input_spans("abc", 3, None, 0, 3, caret, selected);
+        assert_eq!(at_end.last().unwrap().content.as_ref(), " ");
+        assert_eq!(at_end.last().unwrap().style, caret);
     }
 
     #[test]
