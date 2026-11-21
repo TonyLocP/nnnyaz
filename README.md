@@ -540,6 +540,20 @@ closures. Custom actions are referenced by name:
 prepend_keymap = [ { on = "H", run = "hello" } ]
 ```
 
+## Development
+
+Run the unit and CLI tests with `cargo test`. For a quick end-to-end check of
+the help overlay and picker against a real terminal, build first and then run
+the manual pty smoke test:
+
+```sh
+cargo build
+python3 scripts/pty-smoke.py
+```
+
+It uses only the Python standard library. It is deliberately not part of CI
+because pty timing varies between platforms.
+
 ## Yazi compatibility
 
 nnnyaz deliberately mirrors Yazi where it has an equivalent feature: default

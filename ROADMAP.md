@@ -245,8 +245,9 @@ are candidates, roughly in priority order.
 - [ ] **Deferred metadata** — build the list eagerly but move per-entry
       metadata off the first-paint path; nnnyaz is ~2× slower than Yazi at
       50k entries, though key latency is already sub-millisecond.
-- [ ] **More integration coverage** — pty-driven key sequences for help,
-      picker, and confirmations; the new CLI test is the first step.
+- [ ] **More integration coverage** — a manual `scripts/pty-smoke.py` now
+      covers help/search and picker; CI-wired pty tests and confirmation flows
+      remain (kept out of CI to avoid platform-dependent flakiness).
 - [ ] **Divergence review** — re-check the "Intentional divergences" list below
       when upstream Yazi/nnn behavior changes.
 

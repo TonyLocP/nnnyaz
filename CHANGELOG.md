@@ -17,6 +17,7 @@ All notable changes to nnnyaz are documented here. The format follows
   archives.
 - `--generate-config` prints a commented default `config.toml` to stdout.
 - CI checks the declared MSRV (1.89) and audits dependencies with `cargo audit`.
+- A manual `scripts/pty-smoke.py` checks the help overlay and picker end to end.
 
 ### Changed
 
