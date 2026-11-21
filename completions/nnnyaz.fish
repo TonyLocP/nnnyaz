@@ -5,6 +5,7 @@
 complete -c nnnyaz -s h -l help -d 'Print help and exit'
 complete -c nnnyaz -s V -l version -d 'Print the version and exit'
 complete -c nnnyaz -l generate-config -d 'Print a commented default config.toml and exit'
+complete -c nnnyaz -l check-config -d 'Report config warnings and exit (1 if any)'
 complete -c nnnyaz -l cwd-file -r -a '(__fish_complete_path)' -d 'Write cwd here on Q'
 complete -c nnnyaz -l chooser-file -r -a '(__fish_complete_path)' -d 'Write chosen paths here'
 complete -c nnnyaz -s p -r -a '(__fish_complete_path)' -d 'Alias for --chooser-file'

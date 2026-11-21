@@ -16,7 +16,7 @@ _nnnyaz() {
             ;;
     esac
 
-    opts='-h --help -V --version --generate-config --cwd-file --chooser-file -p -0 --null
+    opts='-h --help -V --version --generate-config --check-config --cwd-file --chooser-file -p -0 --null
           -H --hidden -i --file-info -d --detail -U --owner
           -J --no-auto-advance -b --bookmark -Q --no-confirm-quit
           -o --open-on-enter -n --type-to-nav -A --no-autoenter

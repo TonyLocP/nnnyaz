@@ -13,6 +13,7 @@ fn help_and_version_exit_before_terminal_setup() {
     let help = String::from_utf8_lossy(&help.stdout);
     assert!(help.contains("Usage: nnnyaz [OPTIONS] [PATH]"));
     assert!(help.contains("--chooser-file"));
+    assert!(help.contains("--check-config"));
 
     let version = nnnyaz().arg("--version").output().unwrap();
     assert!(version.status.success());
@@ -20,6 +21,40 @@ fn help_and_version_exit_before_terminal_setup() {
         String::from_utf8_lossy(&version.stdout).trim(),
         format!("nnnyaz {}", env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[test]
+fn check_config_reports_warnings_and_exit_status() {
+    let dir = std::env::temp_dir().join(format!(
+        "nnnyaz-check-config-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(dir.join("config.toml"), "[mgr]\nshow_hidden = true\n").unwrap();
+    let ok = nnnyaz()
+        .arg("--check-config")
+        .env("NNNYAZ_CONFIG_HOME", &dir)
+        .output()
+        .unwrap();
+    assert!(ok.status.success());
+    assert_eq!(String::from_utf8_lossy(&ok.stdout).trim(), "config: OK");
+
+    std::fs::write(dir.join("config.toml"), "[mgr]\ntypo = 1\n").unwrap();
+    let bad = nnnyaz()
+        .arg("--check-config")
+        .env("NNNYAZ_CONFIG_HOME", &dir)
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(stderr.contains("unknown key 'typo'"), "{stderr}");
+
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

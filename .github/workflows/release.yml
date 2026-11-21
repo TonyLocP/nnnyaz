@@ -42,7 +42,7 @@ jobs:
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/nnnyaz" "dist/$name/"
           cp LICENSE README.md CHANGELOG.md THIRD_PARTY_LICENSES.md "dist/$name/"
-          cp -R completions man "dist/$name/"
+          cp -R completions man wrappers "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           if command -v sha256sum >/dev/null 2>&1; then
             (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")

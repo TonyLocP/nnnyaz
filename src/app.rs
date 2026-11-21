@@ -1366,6 +1366,52 @@ fn fuzzy_score(haystack: &str, needle: &str, sensitive: bool) -> Option<i64> {
     Some((gaps * 1000 + first * 100 + (span - consec) * 10) as i64 - word_starts as i64 * 5)
 }
 
+/// Collect metadata for a directory in parallel when it is large. Each worker
+/// handles a contiguous chunk and the results are concatenated in readdir
+/// order, so the list is identical to the sequential path. Below the threshold
+/// we stay sequential to avoid thread startup cost on small directories.
+fn entries_for(paths: Vec<(PathBuf, String)>) -> Vec<Entry> {
+    const PARALLEL_THRESHOLD: usize = 512;
+    if paths.len() < PARALLEL_THRESHOLD {
+        return paths
+            .into_iter()
+            .filter_map(|(path, name)| entry_for(path, name))
+            .collect();
+    }
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 16);
+    let chunk_size = paths.len().div_ceil(threads);
+    let mut remaining = paths.into_iter();
+    let chunks: Vec<Vec<_>> = std::iter::repeat_with(|| {
+        remaining
+            .by_ref()
+            .take(chunk_size)
+            .collect::<Vec<(PathBuf, String)>>()
+    })
+    .take_while(|chunk| !chunk.is_empty())
+    .collect();
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .into_iter()
+                        .filter_map(|(path, name)| entry_for(path, name))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut out = Vec::new();
+        for worker in workers {
+            out.extend(worker.join().expect("entry worker panicked"));
+        }
+        out
+    })
+}
+
 fn entry_for(path: PathBuf, name: String) -> Option<Entry> {
     let lmd = fs::symlink_metadata(&path).ok();
     let is_symlink = lmd
@@ -2620,6 +2666,8 @@ struct Cli {
     version: bool,
     /// `--generate-config`: print a commented default config and exit.
     generate_config: bool,
+    /// `--check-config`: report config warnings without starting the TUI.
+    check_config: bool,
     /// `-H`: show hidden files at startup.
     show_hidden: bool,
     /// `-T key`: startup sort order and direction.
@@ -2723,6 +2771,7 @@ Options:
   -h, --help                 Print this help and exit
   -V, --version              Print the version and exit
       --generate-config      Print a commented default config.toml and exit
+      --check-config         Report config warnings and exit (1 if any)
       --cwd-file <PATH>      Write the current directory here on Q
       --chooser-file <PATH>  Picker mode: write chosen paths here
   -p <PATH>                  Alias for --chooser-file (- writes to stdout)
@@ -2778,6 +2827,8 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.version = true;
         } else if text == "--generate-config" {
             cli.generate_config = true;
+        } else if text == "--check-config" {
+            cli.check_config = true;
         } else if text == "-H" || text == "--hidden" {
             cli.show_hidden = true;
         } else if text == "-i" || text == "--file-info" {
@@ -3280,6 +3331,18 @@ impl App {
         });
         let chooser_null = cli.chooser_null;
         let config::Loaded { config, warnings } = loaded;
+        if cli.check_config {
+            if warnings.is_empty() {
+                println!("config: OK");
+            } else {
+                for warning in &warnings {
+                    eprintln!("nnnyaz: {warning}");
+                }
+                println!("config: {} warning(s)", warnings.len());
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
         if cli.key_collisions {
             for warning in &warnings {
                 eprintln!("nnnyaz: {warning}");
@@ -3822,10 +3885,10 @@ impl App {
             .take()
             .or_else(|| self.current().map(|e| e.name.clone()));
 
-        let mut v: Vec<Entry> = Vec::new();
-        if let Some(search) = &self.search {
-            v = search.results.clone();
+        let mut v: Vec<Entry> = if let Some(search) = &self.search {
+            search.results.clone()
         } else {
+            let mut paths = Vec::new();
             match fs::read_dir(&self.cwd) {
                 Ok(rd) => {
                     for e in rd.flatten() {
@@ -3833,14 +3896,14 @@ impl App {
                         if !self.show_hidden && name.starts_with('.') {
                             continue;
                         }
-                        if let Some(entry) = entry_for(e.path(), name) {
-                            v.push(entry);
-                        }
+                        paths.push((e.path(), name));
                     }
                 }
                 Err(e) => self.status = format!("{}: {e}", self.cwd.display()),
             }
-        }
+            entries_for(paths)
+        };
+        let collected = std::time::Instant::now();
 
         if !self.filter.is_empty() {
             match self.filter_mode {
@@ -3973,6 +4036,7 @@ impl App {
                 })
             });
         }
+        let sorted = std::time::Instant::now();
         self.entries = v;
 
         if self.entries.is_empty() {
@@ -3986,9 +4050,11 @@ impl App {
         self.list_dirty = true;
         if std::env::var_os("NNNYAZ_DEBUG").is_some() {
             eprintln!(
-                "reload: {} entries in {:?}",
+                "reload: {} entries in {:?} (collect {:?}, sort {:?})",
                 self.entries.len(),
-                started.elapsed()
+                started.elapsed(),
+                collected.duration_since(started),
+                sorted.duration_since(collected),
             );
         }
     }
@@ -8736,6 +8802,32 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn parallel_entry_collection_preserves_order_and_metadata() {
+        let dir = tmp_dir("parallel-entries");
+        let paths: Vec<(PathBuf, String)> = (0..1200)
+            .map(|i| {
+                let name = format!("file-{i:04}.txt");
+                let path = dir.join(&name);
+                fs::write(&path, b"x").unwrap();
+                (path, name)
+            })
+            .collect();
+        let entries = entries_for(paths.clone());
+        assert_eq!(entries.len(), paths.len());
+        for (entry, (path, name)) in entries.iter().zip(&paths) {
+            assert_eq!(&entry.name, name);
+            assert_eq!(&entry.path, path);
+            assert!(!entry.is_dir);
+            assert_eq!(entry.size, 1);
+        }
+        // Entries that vanished before the stat are skipped, as before.
+        let missing = dir.join("gone.txt");
+        let before = entries_for(vec![(missing.clone(), "gone.txt".into())]);
+        assert!(before.is_empty());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -15,6 +15,15 @@ are candidates, roughly in priority order.
       and a CLI test.
 - [x] **MSRV and dependency audit** — `Cargo.toml` declares Rust 1.89, CI checks
       that floor, and a `cargo audit` job runs on every push.
+- [x] **`--check-config`** — reports config warnings without starting the TUI,
+      exits 1 on warnings, and is wired into help, completions, the man page,
+      and a CLI test.
+- [x] **Reload performance** — bounded parallel metadata collection for large
+      directories (up to 16 workers above 512 entries) preserves ordering and
+      behavior; `scripts/bench-reload.py` measures reload, collect, and sort
+      phases. A 20k-file release reload went from ~24 ms to ~14 ms here.
+- [x] **Fish wrapper** — `wrappers/nnnyaz.fish` ships with the release archives
+      and provides cd-on-quit plus the `f` alias (`y` remains yazi).
 - [x] **CI and releases** — GitHub Actions runs formatting, clippy, tests, and
       a release build on Linux and macOS. Tagged releases publish archives for
       Linux (x86_64/aarch64) and macOS (Intel/Apple Silicon) with SHA-256
@@ -242,20 +251,22 @@ are candidates, roughly in priority order.
 
 ## Next
 
-- [ ] **Deferred metadata** — build the list eagerly but move per-entry
-      metadata off the first-paint path; nnnyaz is ~2× slower than Yazi at
-      50k entries, though key latency is already sub-millisecond.
+- [ ] **Deferred metadata** — partially addressed by parallel collection, but
+      metadata is still gathered for every entry before first paint. The
+      remaining ~2× gap to Yazi at 50k entries needs a lazy-metadata layer with
+      cache invalidation; key latency is already sub-millisecond.
 - [ ] **More integration coverage** — a manual `scripts/pty-smoke.py` now
       covers help/search and picker; CI-wired pty tests and confirmation flows
       remain (kept out of CI to avoid platform-dependent flakiness).
-- [ ] **Divergence review** — re-check the "Intentional divergences" list below
-      when upstream Yazi/nnn behavior changes.
+- [x] **Divergence review** — the "Intentional divergences" list below was
+      reviewed and kept on purpose; revisit only when upstream Yazi/nnn changes.
 
 ## Local setup (outside this repo)
 
 - `~/.local/bin/set-default-browser` chooses the default browser, moves
   browser-owned document types to it, and keeps browser-owned audio/video on
-  `mpv`. `--dry-run` previews the changes.
+  `mpv`. `--dry-run` previews the changes. nnnyaz now ships the fish wrapper
+  that used to live only in the local setup.
 
 ## Intentional divergences
 
