@@ -637,6 +637,11 @@ fn spawn_search(search: Search, show_hidden: bool) -> (Receiver<SearchMsg>, mpsc
     let (tx, rx) = mpsc::channel();
     let (cancel_tx, cancel_rx) = mpsc::channel();
     std::thread::spawn(move || {
+        let hidden_flag = if show_hidden {
+            "--hidden"
+        } else {
+            "--no-hidden"
+        };
         let prog = match search.kind {
             SearchKind::Fd => "fd",
             SearchKind::Rg => "rg",
@@ -649,20 +654,12 @@ fn spawn_search(search: Search, show_hidden: bool) -> (Receiver<SearchMsg>, mpsc
         match search.kind {
             SearchKind::Fd => {
                 cmd.args(["--color", "never"]);
-                cmd.arg(if show_hidden {
-                    "--hidden"
-                } else {
-                    "--no-hidden"
-                });
+                cmd.arg(hidden_flag);
                 cmd.arg("--").arg(&search.query);
             }
             SearchKind::Rg => {
                 cmd.args(["--color=never", "--files-with-matches", "--smart-case"]);
-                cmd.arg(if show_hidden {
-                    "--hidden"
-                } else {
-                    "--no-hidden"
-                });
+                cmd.arg(hidden_flag);
                 cmd.arg("--").arg(&search.query);
             }
         }
@@ -876,6 +873,13 @@ fn load_session(name: &str) -> Option<SessionFile> {
 /// nnn keeps its command history at `<config>/.history`.
 const SHELL_HISTORY_MAX: usize = 16;
 
+/// Drop the oldest commands so the history stays at `SHELL_HISTORY_MAX`.
+fn cap_shell_history(history: &mut Vec<String>) {
+    if history.len() > SHELL_HISTORY_MAX {
+        history.drain(..history.len() - SHELL_HISTORY_MAX);
+    }
+}
+
 fn shell_history_path() -> Option<PathBuf> {
     config::config_dir().map(|dir| dir.join(".history"))
 }
@@ -888,9 +892,7 @@ fn load_shell_history(path: &Path) -> Option<Vec<String>> {
         .filter(|line| !line.is_empty())
         .map(str::to_string)
         .collect();
-    if history.len() > SHELL_HISTORY_MAX {
-        history.drain(..history.len() - SHELL_HISTORY_MAX);
-    }
+    cap_shell_history(&mut history);
     Some(history)
 }
 
@@ -903,9 +905,7 @@ fn push_shell_history(history: &mut Vec<String>, cmd: &str) {
         history.remove(pos);
     }
     history.push(cmd.to_string());
-    if history.len() > SHELL_HISTORY_MAX {
-        history.drain(..history.len() - SHELL_HISTORY_MAX);
-    }
+    cap_shell_history(history);
 }
 
 /// nnn's Up/Down behavior: Up starts at the newest and wraps at the oldest;
@@ -1100,14 +1100,21 @@ fn remove(p: &Path) -> io::Result<()> {
     }
 }
 
+/// A directory cannot be copied into itself.
+fn check_copy_recursion(src: &Path, dst: &Path) -> io::Result<()> {
+    if dst.starts_with(src) {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot copy a directory into itself",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn copy_rec(src: &Path, dst: &Path) -> io::Result<()> {
     if fs::symlink_metadata(src)?.is_dir() {
-        if dst.starts_with(src) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "cannot copy a directory into itself",
-            ));
-        }
+        check_copy_recursion(src, dst)?;
         fs::create_dir_all(dst)?;
         for e in fs::read_dir(src)? {
             let e = e?;
@@ -1173,14 +1180,18 @@ fn bulk_rename_plan(
         .collect())
 }
 
+/// Ignore unset or whitespace-only environment values.
+fn nonblank(value: Option<&str>) -> Option<String> {
+    value.filter(|v| !v.trim().is_empty()).map(str::to_string)
+}
+
 /// Pick the editor for internal edits. `-E` prefers `$EDITOR`; otherwise
 /// `$VISUAL` wins, then `$EDITOR`, then `vi` (nnn's order).
 fn pick_internal_editor(internal: bool, visual: Option<&str>, editor: Option<&str>) -> String {
-    let pick = |value: Option<&str>| value.filter(|v| !v.trim().is_empty()).map(str::to_string);
     if internal {
-        pick(editor)
+        nonblank(editor)
     } else {
-        pick(visual).or_else(|| pick(editor))
+        nonblank(visual).or_else(|| nonblank(editor))
     }
     .unwrap_or_else(|| "vi".into())
 }
@@ -1188,9 +1199,8 @@ fn pick_internal_editor(internal: bool, visual: Option<&str>, editor: Option<&st
 /// The external opener: nnnyaz's `OPENER`, then nnn's `NNN_OPENER`, then the
 /// platform default. Blank values are ignored.
 fn opener_command(opener: Option<&str>, nnn_opener: Option<&str>) -> String {
-    let pick = |value: Option<&str>| value.filter(|v| !v.trim().is_empty()).map(str::to_string);
-    pick(opener)
-        .or_else(|| pick(nnn_opener))
+    nonblank(opener)
+        .or_else(|| nonblank(nnn_opener))
         .unwrap_or_else(|| {
             if cfg!(target_os = "macos") {
                 "open".into()
@@ -2218,12 +2228,7 @@ fn copy_task(
     }
     let md = fs::symlink_metadata(src)?;
     if md.is_dir() {
-        if dst.starts_with(src) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "cannot copy a directory into itself",
-            ));
-        }
+        check_copy_recursion(src, dst)?;
         fs::create_dir_all(dst)?;
         task_add(state, 1);
         for entry in fs::read_dir(src)? {
@@ -5547,20 +5552,24 @@ impl App {
         self.status = format!("{} {n} item(s)…", if cut { "moving" } else { "copying" });
     }
 
-    /// Symlink yanked files into the cwd (Yazi's `-` and `_`).
-    fn link(&mut self, relative: bool) {
+    /// Destination paths for symlink/hardlink tasks from the current yank.
+    fn link_pairs(&self) -> Vec<(PathBuf, PathBuf)> {
         let Some((paths, _)) = self.yank.clone() else {
-            self.status = "nothing to link".into();
-            return;
+            return Vec::new();
         };
-        let pairs: Vec<(PathBuf, PathBuf)> = paths
+        paths
             .into_iter()
             .filter_map(|src| {
                 let name = src.file_name()?;
                 let dst = unique(self.cwd.join(name));
                 Some((src, dst))
             })
-            .collect();
+            .collect()
+    }
+
+    /// Symlink yanked files into the cwd (Yazi's `-` and `_`).
+    fn link(&mut self, relative: bool) {
+        let pairs = self.link_pairs();
         if pairs.is_empty() {
             self.status = "nothing to link".into();
             return;
@@ -5576,18 +5585,7 @@ impl App {
 
     /// Hardlink yanked files into the cwd (Yazi's `Ctrl+-`).
     fn hardlink(&mut self) {
-        let Some((paths, _)) = self.yank.clone() else {
-            self.status = "nothing to link".into();
-            return;
-        };
-        let pairs: Vec<(PathBuf, PathBuf)> = paths
-            .into_iter()
-            .filter_map(|src| {
-                let name = src.file_name()?;
-                let dst = unique(self.cwd.join(name));
-                Some((src, dst))
-            })
-            .collect();
+        let pairs = self.link_pairs();
         if pairs.is_empty() {
             self.status = "nothing to link".into();
             return;
