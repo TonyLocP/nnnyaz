@@ -2618,6 +2618,8 @@ struct Cli {
     chooser_null: bool,
     help: bool,
     version: bool,
+    /// `--generate-config`: print a commented default config and exit.
+    generate_config: bool,
     /// `-H`: show hidden files at startup.
     show_hidden: bool,
     /// `-T key`: startup sort order and direction.
@@ -2720,6 +2722,7 @@ Arguments:
 Options:
   -h, --help                 Print this help and exit
   -V, --version              Print the version and exit
+      --generate-config      Print a commented default config.toml and exit
       --cwd-file <PATH>      Write the current directory here on Q
       --chooser-file <PATH>  Picker mode: write chosen paths here
   -p <PATH>                  Alias for --chooser-file (- writes to stdout)
@@ -2773,6 +2776,8 @@ fn parse_cli<I: IntoIterator<Item = OsString>>(args: I) -> Result<Cli, String> {
             cli.help = true;
         } else if text == "-V" || text == "--version" {
             cli.version = true;
+        } else if text == "--generate-config" {
+            cli.generate_config = true;
         } else if text == "-H" || text == "--hidden" {
             cli.show_hidden = true;
         } else if text == "-i" || text == "--file-info" {
@@ -3256,6 +3261,11 @@ impl App {
         }
         if cli.version {
             println!("nnnyaz {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        if cli.generate_config {
+            print!("{}", config::DEFAULT_CONFIG);
+            let _ = io::stdout().flush();
             std::process::exit(0);
         }
         let cwd_file = cli.cwd_file.or_else(|| {

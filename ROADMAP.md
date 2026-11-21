@@ -10,6 +10,11 @@ are candidates, roughly in priority order.
       and `--version`.
 - [x] **Shell completions and man page** — bash, zsh, and fish completions and
       `man/nnnyaz.1` ship in the source tree and release archives.
+- [x] **`--generate-config`** — prints a commented default `config.toml` that
+      round-trips with no warnings; wired into help, completions, the man page,
+      and a CLI test.
+- [x] **MSRV and dependency audit** — `Cargo.toml` declares Rust 1.89, CI checks
+      that floor, and a `cargo audit` job runs on every push.
 - [x] **CI and releases** — GitHub Actions runs formatting, clippy, tests, and
       a release build on Linux and macOS. Tagged releases publish archives for
       Linux (x86_64/aarch64) and macOS (Intel/Apple Silicon) with SHA-256
@@ -242,9 +247,8 @@ are candidates, roughly in priority order.
       50k entries, though key latency is already sub-millisecond.
 - [ ] **More integration coverage** — pty-driven key sequences for help,
       picker, and confirmations; the new CLI test is the first step.
-- [ ] **Distribution polish** — `--generate-config` and an
-      MSRV/dependency-audit CI job. Completions and the man page are done.
-- [ ] Review the “Known divergences” section and decide which to close.
+- [ ] **Divergence review** — re-check the "Intentional divergences" list below
+      when upstream Yazi/nnn behavior changes.
 
 ## Local setup (outside this repo)
 
@@ -252,7 +256,10 @@ are candidates, roughly in priority order.
   browser-owned document types to it, and keeps browser-owned audio/video on
   `mpv`. `--dry-run` previews the changes.
 
-## Known divergences
+## Intentional divergences
+
+Reviewed and kept on purpose — each one is a deliberate decision, not pending
+work. Revisit only if upstream Yazi/nnn behavior changes.
 
 - `Q` quits and writes the cwd file (Yazi uses `Q` for `quit --no-cwd-file`);
   this is intentional so the fish wrapper can `cd` on quit.

@@ -7,6 +7,7 @@
 _arguments -s \
   '(-h --help)'{-h,--help}'[Print help and exit]' \
   '(-V --version)'{-V,--version}'[Print the version and exit]' \
+  '--generate-config[Print a commented default config.toml and exit]' \
   '--cwd-file=[Write the current directory here on Q]:file:_files' \
   '--chooser-file=[Picker mode: write chosen paths here]:file:_files' \
   '-p[Alias for --chooser-file (- writes to stdout)]:file:_files' \

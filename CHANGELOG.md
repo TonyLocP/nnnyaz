@@ -15,6 +15,8 @@ All notable changes to nnnyaz are documented here. The format follows
 - A CLI smoke test for `--help` and `--version`.
 - Bash, zsh, and fish completions plus a man page, included in release
   archives.
+- `--generate-config` prints a commented default `config.toml` to stdout.
+- CI checks the declared MSRV (1.89) and audits dependencies with `cargo audit`.
 
 ### Changed
 

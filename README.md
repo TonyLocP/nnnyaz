@@ -67,9 +67,11 @@ Run it in a directory:
 nnnyaz [path]
 ```
 
-`nnnyaz --help` lists the command-line options and `nnnyaz --version` prints the
-version. The main options are `--cwd-file` (see below) and the picker flags
-`--chooser-file` / `-p` and `-0` / `--null`.
+`nnnyaz --help` lists the command-line options, `nnnyaz --version` prints the
+version, and `nnnyaz --generate-config` prints a commented default `config.toml`
+to stdout (redirect it into your config directory to get started). The main
+options are `--cwd-file` (see below) and the picker flags `--chooser-file` / `-p`
+and `-0` / `--null`.
 
 nnn's startup and display flags are also supported:
 
