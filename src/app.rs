@@ -7461,11 +7461,12 @@ impl App {
                     let total = self.help_matches().len();
                     let plural = if total == 1 { "match" } else { "matches" };
                     if self.input.as_str().is_empty() {
-                        "help search: type to filter · Esc cancel".into()
+                        format!("help search: type to filter · {}", HELP_SEARCH_HINTS[1])
                     } else {
                         format!(
-                            "help search: {}  [{total} {plural}] · Enter keep · Esc cancel",
-                            self.input.as_str()
+                            "help search: {}  [{total} {plural}] · {}",
+                            self.input.as_str(),
+                            HELP_SEARCH_HINTS[1]
                         )
                     }
                 } else if !self.help_query.is_empty() {
@@ -7644,7 +7645,6 @@ impl App {
                 f.render_widget(Paragraph::new(text).style(status_style), rows[1]);
             }
             Mode::Prompt(p) => self.draw_prompt_status(f, rows[1], p),
-            Mode::Help if self.help_search => self.draw_help_search_status(f, rows[1]),
             _ => f.render_widget(Paragraph::new(text).style(status_style), rows[1]),
         }
         self.draw_completions(f);
@@ -8123,20 +8123,10 @@ impl App {
         self.draw_input_status(f, area, &prefix, hint, &self.input);
     }
 
-    /// Render the help search line with the same editing affordances as the
-    /// rename prompt.
+    /// Render the help query inside the overlay itself, where it is obvious
+    /// that typing goes into the search rather than the status line.
     fn draw_help_search_status(&self, f: &mut Frame, area: Rect) {
-        let total = self.help_matches().len();
-        let prefix = if self.input.as_str().is_empty() {
-            "help search: ".to_string()
-        } else {
-            format!("help search [{total}]: ")
-        };
-        let avail = (area.width as usize).saturating_sub(Span::raw(prefix.as_str()).width());
-        let hint = HELP_SEARCH_HINTS
-            .into_iter()
-            .find(|hint| Span::raw(*hint).width() + 12 <= avail);
-        self.draw_input_status(f, area, &prefix, hint, &self.input);
+        self.draw_input_status(f, area, " search: ", None, &self.input);
     }
 
     /// Render a label and editable buffer, highlighting the selection and
@@ -8273,7 +8263,18 @@ impl App {
             rect.width.saturating_sub(2),
             rect.height.saturating_sub(2),
         );
-        self.help_page = inner.height.max(1) as usize;
+        // While searching, put the query line inside the overlay so the caret
+        // is impossible to miss; the status line only carries the key hints.
+        let search_area = self.help_search.then_some(Rect { height: 1, ..inner });
+        let list_area = match search_area {
+            Some(row) => Rect {
+                y: row.y + 1,
+                height: inner.height.saturating_sub(1),
+                ..inner
+            },
+            None => inner,
+        };
+        self.help_page = list_area.height.max(1) as usize;
         let max_scroll = HELP_ROWS.len().saturating_sub(self.help_page);
         self.help_scroll = self.help_scroll.min(max_scroll);
         let start = self.help_scroll;
@@ -8308,13 +8309,15 @@ impl App {
         }
         f.render_widget(Clear, rect);
         f.render_widget(
-            Paragraph::new(lines).block(
-                Block::bordered()
-                    .title(title)
-                    .border_style(self.config.theme.border),
-            ),
+            Block::bordered()
+                .title(title)
+                .border_style(self.config.theme.border),
             rect,
         );
+        if let Some(row) = search_area {
+            self.draw_help_search_status(f, row);
+        }
+        f.render_widget(Paragraph::new(lines), list_area);
     }
 
     fn draw_preview(&mut self, f: &mut Frame, area: Rect) {

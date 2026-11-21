@@ -8,6 +8,8 @@ All notable changes to nnnyaz are documented here. The format follows
 
 ### Added
 
+- Help search is drawn inside the overlay with a visible caret block, instead
+  of only in the status line.
 - Help-search queries now use the rename prompt's editing keys: `Ctrl+W` word
   delete, `Ctrl+U`/`Ctrl+K` kills, `Ctrl+Z` undo, `Ctrl+A`/`Ctrl+E` movement,
   and shift-based selection.

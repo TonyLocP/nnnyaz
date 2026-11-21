@@ -215,6 +215,8 @@ are candidates, roughly in priority order.
       many idle seconds by running `$NNN_LOCKER` (default `vlock`) attached,
       then restores the TUI. Any key or mouse event resets the timer, and `0`
       disables it.
+- [x] **Visible help-search prompt** — `/` draws a ` search: ` line inside the
+      overlay with a solid caret block, so the insertion point is easy to see.
 - [x] **Help-search editing keys** — the `/` query in the help overlay now
       supports the rename prompt's `Ctrl+W` word delete, `Ctrl+U`/`Ctrl+K`
       kills, `Ctrl+Z` undo, `Ctrl+A`/`Ctrl+E` movement, and shift-based
