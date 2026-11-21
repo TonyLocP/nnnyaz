@@ -27,7 +27,8 @@ are candidates, roughly in priority order.
 - [x] **CI and releases** — GitHub Actions runs formatting, clippy, tests, and
       a release build on Linux and macOS. Tagged releases publish archives for
       Linux (x86_64/aarch64) and macOS (Intel/Apple Silicon) with SHA-256
-      checksums; `v0.1.0` is the first release. `CHANGELOG.md` tracks changes.
+      checksums; `v0.1.0` was the first release and `v0.1.1` is the current one.
+      `CHANGELOG.md` tracks changes.
 - [x] nnn-style status line: cursor position (`3/12`), local mtime, mode,
       size, and extension or symlink target.
 - [x] Find match counter in the `/` and `?` prompt and while cycling with

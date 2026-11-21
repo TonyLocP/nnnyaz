@@ -6,6 +6,8 @@ All notable changes to nnnyaz are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-20
+
 ### Added
 
 - Help-search queries now use the rename prompt's editing keys: `Ctrl+W` word
@@ -30,6 +32,7 @@ All notable changes to nnnyaz are documented here. The format follows
 - The crate forbids `unsafe` code.
 - Large directories collect entry metadata in parallel (bounded to 16 workers),
   preserving readdir order and all existing metadata-dependent behavior.
+- The crate version is now 0.1.1.
 
 ## [0.1.0] - 2026-11-18
 
@@ -51,5 +54,6 @@ Initial release.
 - Picker mode for shell pipelines (`--chooser-file`, `-p`, `-0`).
 - MIT license and third-party notices.
 
-[Unreleased]: https://github.com/TonyLocP/nnnyaz/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/TonyLocP/nnnyaz/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/TonyLocP/nnnyaz/releases/tag/v0.1.1
 [0.1.0]: https://github.com/TonyLocP/nnnyaz/releases/tag/v0.1.0
