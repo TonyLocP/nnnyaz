@@ -375,9 +375,8 @@ leave unbound keep nnnyaz's built-in help keys, including `/` search and
 `n`/`N`, half/full-page jumps, and `q`/`~` to close — so a Yazi `[help]` block
 that only binds `j`/`k` still gets the extra navigation.
 
-Pressing `/` opens a ` search: ` line at the top of the overlay; the query and
-its solid caret block are drawn there rather than in the status line. It uses
-the same editing keys as the rename prompt: `Ctrl+H`/`Ctrl+L` move, `Shift+←/→` (or `Ctrl+Shift+H/L`) select,
+Once `/` search is open, the query uses the same editing keys as the rename
+prompt: `Ctrl+H`/`Ctrl+L` move, `Shift+←/→` (or `Ctrl+Shift+H/L`) select,
 `Ctrl+W` deletes the previous word, `Ctrl+U`/`Ctrl+K` kill to the start/end,
 `Ctrl+Z` undoes, `Ctrl+A`/`Ctrl+E` jump to the start/end, and `Ctrl+Shift+S`
 selects all. `Enter` keeps the query, `Esc` cancels it.
@@ -432,8 +431,7 @@ Mouse support mirrors Yazi and is controlled by `mgr.mouse_events` (default
 
 Prompts share a single-line editing buffer. Rename starts with the stem selected
 and the cursor before the extension, so typing replaces the stem; dotfiles
-select the whole name. A solid `█` block marks the insertion point so it is
-easy to spot; its color is the `cursor` theme role.
+select the whole name.
 
 | Keys | Action |
 | --- | --- |
@@ -482,7 +480,7 @@ status_info = { fg = "yellow", bold = true }
 border = "darkgray"
 ```
 
-Roles: `fg`, `dim`, `selection`, `cursor`, `directory`, `tab_active`, `tab_inactive`,
+Roles: `fg`, `dim`, `selection`, `directory`, `tab_active`, `tab_inactive`,
 `prefix_key`, `prefix_desc`, `info_section`, `info_label`, `status`,
 `status_error`, `status_info`, `task_running`, `task_done`, `task_failed`,
 `task_cancelled`, `task_percent`, `preview_title`, `border`.

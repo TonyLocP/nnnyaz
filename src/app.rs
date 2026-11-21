@@ -452,89 +452,6 @@ fn apply_ctrl_edit(input: &mut Input, c: char, shift: bool) -> bool {
     }
 }
 
-/// Styles used to draw an inline input line.
-struct InputStyle {
-    cursor: Style,
-    selection: Style,
-    /// When set, a solid block is inserted at the caret instead of styling
-    /// the character under it.
-    caret_glyph: Option<&'static str>,
-}
-
-/// Build the visible spans for an input line. `start`/`end` are the visible
-/// byte range; overlays are clipped to it.
-fn input_spans<'a>(
-    text: &'a str,
-    cursor: usize,
-    selection: Option<Range<usize>>,
-    start: usize,
-    end: usize,
-    style: InputStyle,
-) -> Vec<Span<'a>> {
-    let InputStyle {
-        cursor: cursor_style,
-        selection: selection_style,
-        caret_glyph,
-    } = style;
-    let cursor_end = if cursor < text.len() {
-        text[cursor..]
-            .chars()
-            .next()
-            .map_or(cursor, |c| cursor + c.len_utf8())
-    } else {
-        cursor
-    };
-    let cursor_visible = cursor_end > cursor && cursor >= start && cursor_end <= end;
-    let selection = selection.map(|range| {
-        let sel_start = range.start.max(start).min(end);
-        (sel_start, range.end.min(end).max(sel_start))
-    });
-
-    let mut marks = vec![start, end];
-    if let Some((sel_start, sel_end)) = selection {
-        marks.push(sel_start);
-        marks.push(sel_end);
-    }
-    if caret_glyph.is_some() {
-        marks.push(cursor);
-    } else if cursor_visible {
-        marks.push(cursor);
-        marks.push(cursor_end);
-    }
-    marks.sort_unstable();
-    marks.dedup();
-
-    let mut spans = Vec::new();
-    let mut glyph_placed = false;
-    for pair in marks.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        if let Some(glyph) = caret_glyph {
-            if !glyph_placed && a >= cursor {
-                spans.push(Span::styled(glyph, cursor_style));
-                glyph_placed = true;
-            }
-        }
-        let style = if caret_glyph.is_none() && cursor_visible && a >= cursor && b <= cursor_end {
-            cursor_style
-        } else if selection.is_some_and(|(sel_start, sel_end)| a >= sel_start && b <= sel_end) {
-            selection_style
-        } else {
-            Style::new()
-        };
-        spans.push(Span::styled(&text[a..b], style));
-    }
-    if let Some(glyph) = caret_glyph {
-        if !glyph_placed {
-            spans.push(Span::styled(glyph, cursor_style));
-        }
-    } else if !cursor_visible {
-        // Caret past the final character: draw an inverted space so the
-        // insertion point still stands out.
-        spans.push(Span::styled(" ", cursor_style));
-    }
-    spans
-}
-
 /// tmux's mode-2 output is only parseable by crossterm when tmux reports
 /// modified keys in CSI-u form. With `extended-keys-format xterm` it emits
 /// `CSI 27;…~` instead, so leave the legacy encoding alone in that case.
@@ -7461,12 +7378,11 @@ impl App {
                     let total = self.help_matches().len();
                     let plural = if total == 1 { "match" } else { "matches" };
                     if self.input.as_str().is_empty() {
-                        format!("help search: type to filter · {}", HELP_SEARCH_HINTS[1])
+                        "help search: type to filter · Esc cancel".into()
                     } else {
                         format!(
-                            "help search: {}  [{total} {plural}] · {}",
-                            self.input.as_str(),
-                            HELP_SEARCH_HINTS[1]
+                            "help search: {}  [{total} {plural}] · Enter keep · Esc cancel",
+                            self.input.as_str()
                         )
                     }
                 } else if !self.help_query.is_empty() {
@@ -7645,6 +7561,7 @@ impl App {
                 f.render_widget(Paragraph::new(text).style(status_style), rows[1]);
             }
             Mode::Prompt(p) => self.draw_prompt_status(f, rows[1], p),
+            Mode::Help if self.help_search => self.draw_help_search_status(f, rows[1]),
             _ => f.render_widget(Paragraph::new(text).style(status_style), rows[1]),
         }
         self.draw_completions(f);
@@ -8123,10 +8040,20 @@ impl App {
         self.draw_input_status(f, area, &prefix, hint, &self.input);
     }
 
-    /// Render the help query inside the overlay itself, where it is obvious
-    /// that typing goes into the search rather than the status line.
+    /// Render the help search line with the same editing affordances as the
+    /// rename prompt.
     fn draw_help_search_status(&self, f: &mut Frame, area: Rect) {
-        self.draw_input_status(f, area, " search: ", None, &self.input);
+        let total = self.help_matches().len();
+        let prefix = if self.input.as_str().is_empty() {
+            "help search: ".to_string()
+        } else {
+            format!("help search [{total}]: ")
+        };
+        let avail = (area.width as usize).saturating_sub(Span::raw(prefix.as_str()).width());
+        let hint = HELP_SEARCH_HINTS
+            .into_iter()
+            .find(|hint| Span::raw(*hint).width() + 12 <= avail);
+        self.draw_input_status(f, area, &prefix, hint, &self.input);
     }
 
     /// Render a label and editable buffer, highlighting the selection and
@@ -8153,29 +8080,29 @@ impl App {
         let avail = avail.saturating_sub(hint_w + hint_gap).max(1);
         let text = input.as_str();
         let cursor_col = Span::raw(&text[..input.cursor]).width();
-        // A solid block is much easier to spot than the terminal's thin caret;
-        // reserve one cell for it and scroll the text around it.
-        let caret_glyph = (avail >= 2).then_some("█");
-        let text_avail = avail
-            .saturating_sub(usize::from(caret_glyph.is_some()))
-            .max(1);
-        let scroll = cursor_col.saturating_sub(text_avail.saturating_sub(1));
+        let scroll = cursor_col.saturating_sub(avail.saturating_sub(1));
         let start = byte_at_col(text, scroll);
-        let end = byte_at_col(text, scroll + text_avail);
+        let end = byte_at_col(text, scroll + avail);
 
         let mut spans = vec![Span::raw(prefix)];
-        spans.extend(input_spans(
-            text,
-            input.cursor,
-            input.selection(),
-            start,
-            end,
-            InputStyle {
-                cursor: self.config.theme.cursor,
-                selection: self.config.theme.selection,
-                caret_glyph,
-            },
-        ));
+        let mut pos = start;
+        if let Some(sel) = input.selection() {
+            let sel_start = sel.start.max(start).min(end);
+            let sel_end = sel.end.min(end).max(sel_start);
+            if sel_start > pos {
+                spans.push(Span::raw(&text[pos..sel_start]));
+            }
+            if sel_end > sel_start {
+                spans.push(Span::styled(
+                    &text[sel_start..sel_end],
+                    self.config.theme.selection,
+                ));
+            }
+            pos = sel_end.max(pos);
+        }
+        if end > pos {
+            spans.push(Span::raw(&text[pos..end]));
+        }
 
         f.render_widget(
             Paragraph::new(Line::from(spans)).style(self.config.theme.status_info),
@@ -8263,18 +8190,7 @@ impl App {
             rect.width.saturating_sub(2),
             rect.height.saturating_sub(2),
         );
-        // While searching, put the query line inside the overlay so the caret
-        // is impossible to miss; the status line only carries the key hints.
-        let search_area = self.help_search.then_some(Rect { height: 1, ..inner });
-        let list_area = match search_area {
-            Some(row) => Rect {
-                y: row.y + 1,
-                height: inner.height.saturating_sub(1),
-                ..inner
-            },
-            None => inner,
-        };
-        self.help_page = list_area.height.max(1) as usize;
+        self.help_page = inner.height.max(1) as usize;
         let max_scroll = HELP_ROWS.len().saturating_sub(self.help_page);
         self.help_scroll = self.help_scroll.min(max_scroll);
         let start = self.help_scroll;
@@ -8309,15 +8225,13 @@ impl App {
         }
         f.render_widget(Clear, rect);
         f.render_widget(
-            Block::bordered()
-                .title(title)
-                .border_style(self.config.theme.border),
+            Paragraph::new(lines).block(
+                Block::bordered()
+                    .title(title)
+                    .border_style(self.config.theme.border),
+            ),
             rect,
         );
-        if let Some(row) = search_area {
-            self.draw_help_search_status(f, row);
-        }
-        f.render_widget(Paragraph::new(lines), list_area);
     }
 
     fn draw_preview(&mut self, f: &mut Frame, area: Rect) {
@@ -9391,63 +9305,6 @@ mod tests {
         assert_eq!(input.selection(), Some(0..6));
         assert!(apply_ctrl_edit(&mut input, 'u', false));
         assert_eq!(input.as_str(), "");
-    }
-
-    #[test]
-    fn input_spans_style_the_caret_character() {
-        let caret = Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD);
-        let selected = Style::new().add_modifier(Modifier::REVERSED);
-        let style = |glyph| InputStyle {
-            cursor: caret,
-            selection: selected,
-            caret_glyph: glyph,
-        };
-        let spans = input_spans("notes.txt", 5, Some(0..9), 0, 9, style(None));
-        let dot = spans
-            .iter()
-            .find(|span| span.content.as_ref() == ".")
-            .unwrap();
-        assert_eq!(dot.style, caret);
-        let first = spans.first().unwrap();
-        assert_eq!(first.content.as_ref(), "notes");
-        assert_eq!(first.style, selected);
-
-        let at_end = input_spans("abc", 3, None, 0, 3, style(None));
-        assert_eq!(at_end.last().unwrap().content.as_ref(), " ");
-        assert_eq!(at_end.last().unwrap().style, caret);
-    }
-
-    #[test]
-    fn input_spans_insert_a_visible_caret_block() {
-        let caret = Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD);
-        let selected = Style::new().add_modifier(Modifier::REVERSED);
-        let style = InputStyle {
-            cursor: caret,
-            selection: selected,
-            caret_glyph: Some("█"),
-        };
-        let contents: Vec<_> = input_spans("notes.txt", 5, Some(0..9), 0, 9, style)
-            .into_iter()
-            .map(|span| (span.content.into_owned(), span.style))
-            .collect();
-        assert_eq!(contents[0].0, "notes");
-        assert_eq!(contents[1], ("█".to_string(), caret));
-        assert_eq!(contents[2].0, ".txt");
-        assert_eq!(contents[2].1, selected);
-
-        let at_end = input_spans(
-            "abc",
-            3,
-            None,
-            0,
-            3,
-            InputStyle {
-                cursor: caret,
-                selection: selected,
-                caret_glyph: Some("█"),
-            },
-        );
-        assert_eq!(at_end.last().unwrap().content.as_ref(), "█");
     }
 
     #[test]

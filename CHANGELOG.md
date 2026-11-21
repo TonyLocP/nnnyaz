@@ -8,14 +8,10 @@ All notable changes to nnnyaz are documented here. The format follows
 
 ### Added
 
-- Help search is drawn inside the overlay with a visible caret block, instead
-  of only in the status line.
 - Help-search queries now use the rename prompt's editing keys: `Ctrl+W` word
   delete, `Ctrl+U`/`Ctrl+K` kills, `Ctrl+Z` undo, `Ctrl+A`/`Ctrl+E` movement,
   and shift-based selection.
 - Confirmation prompts accept `Enter` as well as `y`.
-- Inline prompts show a solid `█` caret block, styled by the configurable
-  `cursor` theme role.
 
 ## [0.1.0] - 2026-11-18
 
