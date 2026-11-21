@@ -12,6 +12,13 @@ All notable changes to nnnyaz are documented here. The format follows
   delete, `Ctrl+U`/`Ctrl+K` kills, `Ctrl+Z` undo, `Ctrl+A`/`Ctrl+E` movement,
   and shift-based selection.
 - Confirmation prompts accept `Enter` as well as `y`.
+- A CLI smoke test for `--help` and `--version`.
+
+### Changed
+
+- Session, marks, history, and cwd files are written atomically via a sibling
+  temp file, so a crash cannot leave a truncated state file.
+- The crate forbids `unsafe` code.
 
 ## [0.1.0] - 2026-11-18
 

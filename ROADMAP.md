@@ -5,6 +5,9 @@ are candidates, roughly in priority order.
 
 ## Recently completed
 
+- [x] **Hardening and smoke tests** — the crate forbids `unsafe` code, state
+      files are written atomically, and a CLI integration test covers `--help`
+      and `--version`.
 - [x] **CI and releases** — GitHub Actions runs formatting, clippy, tests, and
       a release build on Linux and macOS. Tagged releases publish archives for
       Linux (x86_64/aarch64) and macOS (Intel/Apple Silicon) with SHA-256
@@ -232,7 +235,14 @@ are candidates, roughly in priority order.
 
 ## Next
 
-- [ ] Nothing queued; keep polishing parity as new Yazi/nnn behavior comes up.
+- [ ] **Deferred metadata** — build the list eagerly but move per-entry
+      metadata off the first-paint path; nnnyaz is ~2× slower than Yazi at
+      50k entries, though key latency is already sub-millisecond.
+- [ ] **More integration coverage** — pty-driven key sequences for help,
+      picker, and confirmations; the new CLI test is the first step.
+- [ ] **Distribution polish** — `--generate-config`, shell completions, a man
+      page, and an MSRV/dependency-audit CI job.
+- [ ] Review the “Known divergences” section and decide which to close.
 
 ## Local setup (outside this repo)
 

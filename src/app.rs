@@ -2952,11 +2952,28 @@ fn chooser_bytes(paths: &[PathBuf], null: bool) -> Vec<u8> {
     out
 }
 
+/// Write a small state file atomically: put the new content in a sibling temp
+/// file first, then rename it over the target. A crash or a concurrent reader
+/// never sees a partially written session, marks, or history file.
+fn write_state_file(path: &Path, content: impl AsRef<[u8]>) -> io::Result<()> {
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(format!(".tmp-{}", std::process::id()).as_str());
+    let tmp = PathBuf::from(tmp_name);
+    fs::write(&tmp, content)?;
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
 /// Write `cwd` to the cwd file so a shell wrapper can `cd` there after nnnyaz
 /// exits. Failures are reported on stderr, which is visible once the terminal
 /// is restored, and do not prevent quitting.
 fn write_cwd_file(path: &Path, cwd: &Path) {
-    if let Err(e) = fs::write(path, format!("{}\n", cwd.display())) {
+    if let Err(e) = write_state_file(path, format!("{}\n", cwd.display())) {
         eprintln!("nnnyaz: cannot write cwd file {}: {e}", path.display());
     }
 }
@@ -3539,7 +3556,7 @@ impl App {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        fs::write(path, text)
+        write_state_file(&path, text)
     }
 
     /// Save the session at exit when started with `-S`.
@@ -4419,7 +4436,7 @@ impl App {
                 return;
             }
         }
-        if let Err(e) = fs::write(&path, format_marks(&self.marks)) {
+        if let Err(e) = write_state_file(&path, format_marks(&self.marks)) {
             self.status = format!("marks: {e}");
         }
     }
@@ -6080,7 +6097,7 @@ impl App {
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        let _ = fs::write(path, text);
+        let _ = write_state_file(path, text);
     }
 
     /// Run a shell command in the current directory. Yazi's `;` runs it in the
@@ -8718,6 +8735,33 @@ mod tests {
         assert!(confirm_yes(&key(KeyCode::Char('y'))));
         assert!(!confirm_yes(&key(KeyCode::Char('n'))));
         assert!(!confirm_yes(&key(KeyCode::Esc)));
+    }
+
+    #[test]
+    fn write_state_file_replaces_content_atomically() {
+        let dir = tmp_dir("state-write");
+        let path = dir.join("state");
+        fs::write(&path, "old").unwrap();
+        write_state_file(&path, "new").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        // The temp file is renamed away, not left behind.
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn small_helpers_keep_their_contracts() {
+        let mut history: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        cap_shell_history(&mut history);
+        assert_eq!(history.len(), SHELL_HISTORY_MAX);
+        assert_eq!(history.first().unwrap(), "4");
+        assert_eq!(history.last().unwrap(), "19");
+
+        assert_eq!(nonblank(Some("  ")), None);
+        assert_eq!(nonblank(Some(" vi ")), Some(" vi ".to_string()));
+
+        let dir = tmp_dir("copy-recursion");
+        assert!(check_copy_recursion(&dir, &dir.join("child")).is_err());
+        assert!(check_copy_recursion(&dir, &dir.with_extension("other")).is_ok());
     }
 
     #[test]
