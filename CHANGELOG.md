@@ -13,6 +13,8 @@ All notable changes to nnnyaz are documented here. The format follows
   and shift-based selection.
 - Confirmation prompts accept `Enter` as well as `y`.
 - A CLI smoke test for `--help` and `--version`.
+- Bash, zsh, and fish completions plus a man page, included in release
+  archives.
 
 ### Changed
 

@@ -45,6 +45,22 @@ cargo build --release
 install -Dm755 target/release/nnnyaz ~/.local/bin/nnnyaz
 ```
 
+Shell completions and a man page are included:
+
+```sh
+# fish
+cp completions/nnnyaz.fish ~/.config/fish/completions/
+
+# bash (from the repo root)
+source completions/nnnyaz.bash
+
+# zsh: put completions/_nnnyaz on your $fpath, then re-run compinit
+cp completions/_nnnyaz ~/.zsh/completions/
+
+# man page
+cp man/nnnyaz.1 ~/.local/share/man/man1/
+```
+
 Run it in a directory:
 
 ```sh

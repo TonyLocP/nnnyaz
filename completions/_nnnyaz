@@ -1,0 +1,38 @@
+#compdef nnnyaz
+# Zsh completion for nnnyaz.
+#
+# Install: put this file in a directory on your $fpath (for example
+# ~/.zsh/completions), then "autoload -Uz compinit && compinit".
+
+_arguments -s \
+  '(-h --help)'{-h,--help}'[Print help and exit]' \
+  '(-V --version)'{-V,--version}'[Print the version and exit]' \
+  '--cwd-file=[Write the current directory here on Q]:file:_files' \
+  '--chooser-file=[Picker mode: write chosen paths here]:file:_files' \
+  '-p[Alias for --chooser-file (- writes to stdout)]:file:_files' \
+  '(-0 --null)'{-0,--null}'[Separate picker paths with NUL]' \
+  '(-H --hidden)'{-H,--hidden}'[Show hidden files at startup]' \
+  '(-i --file-info)'{-i,--file-info}'[Show the hovered file type]' \
+  '(-d --detail)'{-d,--detail}'[Start in detail linemode]' \
+  '(-U --owner)'{-U,--owner}'[Start in owner linemode]' \
+  '(-J --no-auto-advance)'{-J,--no-auto-advance}'[Keep cursor after toggling selection]' \
+  '(-b --bookmark)'{-b,--bookmark}'[Start in a bookmark]:key:' \
+  '(-Q --no-confirm-quit)'{-Q,--no-confirm-quit}'[Quit without task warning]' \
+  '(-o --open-on-enter)'{-o,--open-on-enter}'[Only Enter opens files]' \
+  '(-n --type-to-nav)'{-n,--type-to-nav}'[Start in type-to-nav mode]' \
+  '(-A --no-autoenter)'{-A,--no-autoenter}'[Do not auto-enter lone directory]' \
+  '(-g --regex)'{-g,--regex}'[Use regex filters]' \
+  '(-z --fuzzy)'{-z,--fuzzy}'[Use fuzzy filters]' \
+  '(-e --editor)'{-e,--editor}'[Open text files in $VISUAL/$EDITOR/vi]' \
+  '(-E --internal-editor)'{-E,--internal-editor}'[Use $EDITOR for internal edits]' \
+  '(-c --cli-opener)'{-c,--cli-opener}'[Run NNN_OPENER in the terminal]' \
+  '(-f --history)'{-f,--history}'[Keep a shell command history]' \
+  '(-K --key-collisions)'{-K,--key-collisions}'[Report keymap collisions and exit]' \
+  '(-u --use-selection)'{-u,--use-selection}'[Compatibility no-op]' \
+  '(-R --no-rollover)'{-R,--no-rollover}'[Compatibility no-op]' \
+  '(-s --session)'{-s,--session}'[Load a session (@ is last)]:name:' \
+  '(-S --persistent-session)'{-S,--persistent-session}'[Save session on exit]' \
+  '(-T --sort)'{-T,--sort}'[Sort order]:key:(a d s e t v A D S E T V)' \
+  '(-l --scroll)'{-l,--scroll}'[Mouse wheel lines]:number:' \
+  '(-t --lock-after)'{-t,--lock-after}'[Idle lock timeout]:seconds:' \
+  '*:starting path:_files'

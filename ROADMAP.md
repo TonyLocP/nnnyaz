@@ -8,6 +8,8 @@ are candidates, roughly in priority order.
 - [x] **Hardening and smoke tests** — the crate forbids `unsafe` code, state
       files are written atomically, and a CLI integration test covers `--help`
       and `--version`.
+- [x] **Shell completions and man page** — bash, zsh, and fish completions and
+      `man/nnnyaz.1` ship in the source tree and release archives.
 - [x] **CI and releases** — GitHub Actions runs formatting, clippy, tests, and
       a release build on Linux and macOS. Tagged releases publish archives for
       Linux (x86_64/aarch64) and macOS (Intel/Apple Silicon) with SHA-256
@@ -240,8 +242,8 @@ are candidates, roughly in priority order.
       50k entries, though key latency is already sub-millisecond.
 - [ ] **More integration coverage** — pty-driven key sequences for help,
       picker, and confirmations; the new CLI test is the first step.
-- [ ] **Distribution polish** — `--generate-config`, shell completions, a man
-      page, and an MSRV/dependency-audit CI job.
+- [ ] **Distribution polish** — `--generate-config` and an
+      MSRV/dependency-audit CI job. Completions and the man page are done.
 - [ ] Review the “Known divergences” section and decide which to close.
 
 ## Local setup (outside this repo)

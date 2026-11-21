@@ -1,0 +1,184 @@
+.TH NNNYAZ 1 "2026-11-20" "nnnyaz 0.1.0" "User Commands"
+.SH NAME
+nnnyaz \- a small nnn/Yazi-style terminal file manager
+.SH SYNOPSIS
+.B nnnyaz
+[\fIOPTIONS\fR] [\fIPATH\fR]
+.SH DESCRIPTION
+.B nnnyaz
+is a modal terminal file manager. It combines nnn's startup flags and picker
+mode with Yazi-style keymaps, tabs, marks, a trash bin, a task manager, and a
+native preview pane for text, images, PDFs, archives, and media.
+.PP
+Configuration is read from
+.IR $NNNYAZ_CONFIG_HOME ,
+then
+.IR $XDG_CONFIG_HOME/nnnyaz ,
+then
+.IR ~/.config/nnnyaz .
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print help and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.TP
+.BI \-\-cwd-file= PATH
+Write the current directory to
+.I PATH
+when quitting with
+.BR Q .
+.TP
+.BI \-\-chooser-file= PATH
+Picker mode: write chosen paths to
+.IR PATH .
+Use
+.B \-
+to write to stdout.
+.TP
+.BI \-p " PATH"
+Alias for
+.BR \-\-chooser-file .
+.TP
+.BR \-0 ", " \-\-null
+Separate picker paths with NUL instead of newlines.
+.TP
+.BR \-H ", " \-\-hidden
+Show hidden files at startup.
+.TP
+.BR \-i ", " \-\-file-info
+Show the hovered file's type in the status line.
+.TP
+.BR \-d ", " \-\-detail
+Start with the detail linemode.
+.TP
+.BR \-U ", " \-\-owner
+Start with the owner linemode.
+.TP
+.BR \-J ", " \-\-no-auto-advance
+Keep the cursor on an entry after toggling its selection.
+.TP
+.BI \-b " KEY" ", " \-\-bookmark= KEY
+Start in a bookmark. Ignored if
+.I PATH
+is given.
+.TP
+.BR \-Q ", " \-\-no-confirm-quit
+Quit without warning about running tasks.
+.TP
+.BR \-o ", " \-\-open-on-enter
+Only Enter opens files;
+.B l
+and right-arrow only enter directories.
+.TP
+.BR \-n ", " \-\-type-to-nav
+Start in nnn-style type-to-nav mode.
+.TP
+.BR \-A ", " \-\-no-autoenter
+Do not auto-enter a lone matching directory.
+.TP
+.BR \-g ", " \-\-regex
+Use regex filters.
+.TP
+.BR \-z ", " \-\-fuzzy
+Use fuzzy filters.
+.TP
+.BR \-e ", " \-\-editor
+Open text files in
+.IR $VISUAL ,
+then
+.IR $EDITOR ,
+then
+.BR vi .
+.TP
+.BR \-E ", " \-\-internal-editor
+Use
+.I $EDITOR
+for internal edits such as bulk rename.
+.TP
+.BR \-c ", " \-\-cli-opener
+Run
+.I $NNN_OPENER
+attached to the terminal; this trumps
+.BR \-e .
+.TP
+.BR \-f ", " \-\-history
+Keep a persistent shell command history.
+.TP
+.BR \-K ", " \-\-key-collisions
+Report keymap collisions and exit.
+.TP
+.BR \-u ", " \-\-use-selection
+Accepted for nnn compatibility; nnnyaz always uses the selection.
+.TP
+.BR \-R ", " \-\-no-rollover
+Accepted for nnn compatibility.
+.TP
+.BI \-s " NAME" ", " \-\-session= NAME
+Load a session;
+.B @
+means the last session.
+.TP
+.BR \-S ", " \-\-persistent-session
+Save the session on exit.
+.TP
+.BI \-T " KEY" ", " \-\-sort= KEY
+Sort order:
+.BR a / d / s
+by name, natural, or size;
+.B e
+by extension;
+.B t
+by time;
+.B v
+natural. An uppercase key reverses the order.
+.TP
+.BI \-l " N" ", " \-\-scroll= N
+Lines moved per mouse-wheel step. Default: 1.
+.TP
+.BI \-t " N" ", " \-\-lock-after= N
+Lock the terminal after
+.I N
+idle seconds. Use 0 to disable.
+.SH ENVIRONMENT
+.TP
+.I NNNYAZ_CWD_FILE
+Default for
+.BR \-\-cwd-file .
+.TP
+.I NNNYAZ_CHOOSER_FILE
+Default for
+.BR \-\-chooser-file .
+.TP
+.I NNNYAZ_CONFIG_HOME
+Configuration directory.
+.TP
+.I NNNYAZ_IMAGE_PROTOCOL
+Force
+.BR kitty ,
+.BR sixel ,
+or
+.BR none .
+.TP
+.I NNN_LOCKER
+Terminal locker for
+.BR \-t ;
+default
+.BR vlock .
+.SH FILES
+.TP
+.I ~/.config/nnnyaz/config.toml
+Main configuration.
+.TP
+.I ~/.config/nnnyaz/keymap.toml
+Keymaps.
+.TP
+.I ~/.config/nnnyaz/theme.toml
+Theme roles.
+.TP
+.I ~/.config/nnnyaz/init.lua
+Optional Lua overrides.
+.SH SEE ALSO
+.BR nnn (1),
+.BR yazi (1)
