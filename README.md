@@ -220,11 +220,19 @@ and ghostty, and with sixel in terminals that support it (foot, WezTerm, mlterm,
 xterm with sixel enabled, …). The protocol is detected automatically; set
 `NNNYAZ_IMAGE_PROTOCOL=kitty|sixel|none` to override it.
 
-Inside tmux, enable graphics passthrough:
+Inside tmux, graphics must be allowed to pass through to the client. Prefer
+enabling it only for the pane that runs nnnyaz:
 
-```tmux
-set -g allow-passthrough on
+```sh
+tmux set -p allow-passthrough on
+nnnyaz
 ```
+
+`set -g allow-passthrough on` also works, but it enables passthrough for every
+pane that does not override it. `allow-passthrough all` is broader still: it
+permits passthrough even from hidden panes. Passthrough lets programs in that
+pane send escape sequences straight to the client terminal, so keep it as
+narrow as practical.
 
 tmux hides the client terminal from the pane (`TERM` and DA1 describe tmux
 itself, while inherited Kitty/Ghostty variables describe where the server
