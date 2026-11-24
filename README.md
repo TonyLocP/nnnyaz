@@ -383,8 +383,10 @@ context, matching Yazi.
 blocks into both nnnyaz's `config.toml` and Yazi's `yazi.toml`. It adds one
 opener per available application and one prepend rule per MIME type, reusing
 existing openers when they already launch the same program. Hidden, unavailable,
-and non-file entries are skipped; text editors without `MimeType=` are treated
-as `text/*`.
+and non-file entries are skipped, as are URL-scheme handlers and shell wrappers;
+text editors without `MimeType=` are treated as `text/*`, and commands without a
+file placeholder get `%s` appended. MIME types with identical option lists are
+collapsed into one brace-expanded rule.
 
 ```sh
 python3 scripts/update-openers.py --dry-run   # print the generated configs

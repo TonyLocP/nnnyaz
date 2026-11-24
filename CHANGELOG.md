@@ -11,6 +11,8 @@ All notable changes to nnnyaz are documented here. The format follows
 - `scripts/update-openers.py` generates opener definitions and MIME rules from
   installed desktop applications and updates managed blocks in both nnnyaz and
   Yazi configs. Existing openers are reused when they launch the same program.
+  URL-scheme handlers and shell wrappers are skipped, missing file placeholders
+  are added, and MIME types with identical options share one brace-expanded rule.
 
 ### Fixed
 

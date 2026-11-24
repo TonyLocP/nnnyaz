@@ -28,10 +28,21 @@ GENERIC_LAUNCHERS = {
     "gtk-launch",
     "sh",
     "bash",
+    "zsh",
+    "fish",
     "flatpak",
     "snap",
     "xdg-open",
 }
+SHELL_WRAPPERS = {"sh", "bash", "zsh", "fish", "dash"}
+SKIP_MIME_PREFIXES = (
+    "x-scheme-handler/",
+    "inode/",
+    "folder/",
+    "x-directory/",
+    "vfs/",
+    "trash/",
+)
 DEFAULT_RULE_USES = [
     ("folder/*", ["edit", "open", "reveal"]),
     ("text/*", ["edit", "reveal"]),
@@ -61,6 +72,23 @@ def toml_string(value: str) -> str:
 
 def toml_key(value: str) -> str:
     return value if re.fullmatch(r"[A-Za-z0-9_-]+", value) else toml_string(value)
+
+
+def decode_desktop(value: str) -> str:
+    """Decode the escapes desktop entries use in values."""
+    out: list[str] = []
+    index = 0
+    simple = {"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}
+    while index < len(value):
+        char = value[index]
+        if char != "\\" or index + 1 == len(value):
+            out.append(char)
+            index += 1
+            continue
+        following = value[index + 1]
+        out.append(simple.get(following, following))
+        index += 2
+    return "".join(out)
 
 
 def desktop_dirs(extra: list[Path]) -> list[Path]:
@@ -118,7 +146,7 @@ def parse_desktop(path: Path) -> dict[str, str | list[str] | bool] | None:
         if not in_main or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        key, value = key.strip(), value.strip()
+        key, value = key.strip(), decode_desktop(value.strip())
         if key == "Name" and not values.get("Name"):
             values[key] = value
         elif key.startswith("Name[") and localized_name is None and value:
@@ -137,7 +165,11 @@ def parse_desktop(path: Path) -> dict[str, str | list[str] | bool] | None:
     if hidden or no_display or values.get("Type", "Application") != "Application":
         return None
 
-    mimes = [m for m in values.get("MimeType", "").split(";") if m]
+    mimes = [
+        m
+        for m in values.get("MimeType", "").split(";")
+        if m and not m.startswith(SKIP_MIME_PREFIXES)
+    ]
     categories = [c for c in values.get("Categories", "").split(";") if c]
     if not mimes:
         if "MimeType" in values or "TextEditor" not in categories:
@@ -216,7 +248,7 @@ def usable_apps(apps: list[dict[str, str | list[str] | bool]]) -> list[dict]:
     out: list[dict] = []
     for app in apps:
         program = first_program(str(app["exec"]))
-        if not program:
+        if not program or Path(program).name in SHELL_WRAPPERS:
             continue
         check = str(app["try_exec"]) or program
         if not executable_exists(check):
@@ -224,14 +256,35 @@ def usable_apps(apps: list[dict[str, str | list[str] | bool]]) -> list[dict]:
         command = convert_exec(str(app["exec"]), str(app["name"]), str(app["id"]))
         if not command:
             continue
+        if not re.search(r"%[sS]", command):
+            command = f"{command} %s"
         key = "desktop_" + re.sub(r"[^A-Za-z0-9_]", "_", str(app["id"]).removesuffix(".desktop"))
         out.append({**app, "key": key, "command": command})
     out.sort(key=lambda app: (str(app["name"]).lower(), str(app["id"])))
     return out
 
 
+def run_words(command: str) -> list[str]:
+    """Executable-looking tokens from a command, without paths or flags."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        tokens = command.split()
+    skip = {"usr", "bin", "lib", "lib64", "local", "share", "opt", "home"}
+    words: list[str] = []
+    for token in tokens:
+        if token.startswith("-") or "%" in token or "=" in token:
+            continue
+        word = Path(token).name.lower()
+        if word and word not in skip:
+            words.append(word)
+    return words
+
+
 def binary_key(spec: str) -> str:
     name = Path(spec).name.lower()
+    # `gimp-3.2` and `gimp` should reuse the same hand-written opener.
+    name = re.sub(r"[-_.]?v?\d+(?:[.-]\d+)*$", "", name)
     return re.sub(r"[^a-z0-9]", "", name)
 
 
@@ -242,6 +295,7 @@ def resolve_names(apps: list[dict], existing: dict) -> tuple[list[dict], dict[st
         opener_cfg = {}
     by_binary: dict[str, str] = {}
     by_id: dict[str, str] = {}
+    by_word: dict[str, str] = {}
     for name, value in opener_cfg.items():
         if str(name).startswith("desktop_"):
             continue
@@ -256,6 +310,10 @@ def resolve_names(apps: list[dict], existing: dict) -> tuple[list[dict], dict[st
             program = first_program(run)
             if program and Path(program).name not in GENERIC_LAUNCHERS:
                 by_binary.setdefault(binary_key(program), name)
+            for word in run_words(run):
+                candidate = binary_key(word)
+                if candidate:
+                    by_word.setdefault(candidate, name)
             for app in apps:
                 if str(app["id"]) in run:
                     by_id.setdefault(str(app["id"]), name)
@@ -266,7 +324,12 @@ def resolve_names(apps: list[dict], existing: dict) -> tuple[list[dict], dict[st
     for app in apps:
         key = str(app["key"])
         program = first_program(str(app["command"])) or ""
-        name = by_id.get(str(app["id"])) or by_binary.get(binary_key(program))
+        words = {binary_key(word) for word in run_words(str(app["command"]))}
+        name = (
+            by_id.get(str(app["id"]))
+            or by_binary.get(binary_key(program))
+            or next((by_word[word] for word in words if word in by_word), None)
+        )
         if name and name != key:
             names[key] = name
         elif key in existing_keys:
@@ -361,19 +424,21 @@ def rules_block(apps: list[dict], existing: dict, names: dict[str, str]) -> list
             by_mime.setdefault(str(mime), [])
             if name not in by_mime[str(mime)]:
                 by_mime[str(mime)].append(name)
-    lines = [RULES_START]
     # Specific MIME types must come before wildcard patterns: Yazi uses the
     # first matching rule, so a broad `text/*` rule would hide `text/plain`.
-    for mime in sorted(by_mime, key=lambda m: (m.count("*") + m.count("?"), m)):
-        matching_apps: list[str] = []
-        for other, others in by_mime.items():
-            if other == mime or mime_overlaps(mime, other):
-                for name in others:
-                    if name not in matching_apps:
-                        matching_apps.append(name)
-        uses = rule_uses(existing, mime, matching_apps)
+    def specificity(mime: str) -> tuple[int, str]:
+        return (mime.count("*") + mime.count("?"), mime)
+
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for mime in sorted(by_mime, key=specificity):
+        uses = rule_uses(existing, mime, by_mime[mime])
+        groups.setdefault(tuple(uses), []).append(mime)
+
+    lines = [RULES_START]
+    for uses, mimes in sorted(groups.items(), key=lambda item: specificity(item[1][0])):
+        pattern = mimes[0] if len(mimes) == 1 else "{" + ",".join(mimes) + "}"
         use_list = ", ".join(toml_string(item) for item in uses)
-        lines.append(f"    {{ mime = {toml_string(mime)}, use = [ {use_list} ] }},")
+        lines.append(f"    {{ mime = {toml_string(pattern)}, use = [ {use_list} ] }},")
     lines.append(RULES_END)
     return lines
 
