@@ -6,6 +6,12 @@ All notable changes to nnnyaz are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `O` now appends installed desktop applications that declare support for the
+  selected file's MIME type. Configured openers stay first; hidden, unavailable,
+  and duplicate entries are skipped.
+
 ### Fixed
 
 - Delete confirmations now accept LF as Enter. Some terminals send LF rather

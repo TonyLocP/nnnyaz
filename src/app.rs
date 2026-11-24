@@ -4952,6 +4952,7 @@ impl App {
             });
         }
         options.extend(openwith::options_for(&paths, self.config.open.as_ref()));
+        options.extend(openwith::available_apps_for(&paths, &options));
         if options.is_empty() {
             self.status = "open with: no openers configured".into();
             return;

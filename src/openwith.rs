@@ -6,7 +6,7 @@
 //! with what the user already sees in Yazi.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     iter::Peekable,
     os::unix::ffi::OsStrExt,
@@ -14,6 +14,9 @@ use std::{
     process::{Command, Stdio},
     str::Chars,
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 /// One entry in the open-with menu.
 #[derive(Clone)]
@@ -277,6 +280,308 @@ pub fn options_for(paths: &[PathBuf], doc: Option<&toml::Value>) -> Vec<Opener> 
     }
 }
 
+/// Append installed desktop applications that can open every target.
+///
+/// Configured openers are kept first and are not duplicated. A desktop entry
+/// counts when its `MimeType=` list matches the file's MIME type and its
+/// `TryExec`/`Exec` program is available. Hidden and `NoDisplay` entries are
+/// skipped, and the result is sorted by display name.
+pub fn available_apps_for(paths: &[PathBuf], configured: &[Opener]) -> Vec<Opener> {
+    let mut mimes = Vec::new();
+    for path in paths {
+        let Some(mime) = open_mime(path) else {
+            return Vec::new();
+        };
+        mimes.push(mime);
+    }
+    if mimes.is_empty() {
+        return Vec::new();
+    }
+    desktop_openers_in(&desktop_dirs(), &mimes, configured)
+}
+
+fn desktop_openers_in(dirs: &[PathBuf], mimes: &[String], configured: &[Opener]) -> Vec<Opener> {
+    let configured_names: HashSet<String> =
+        configured.iter().map(|op| match_key(&op.name)).collect();
+    let mut used_binaries: HashSet<String> = configured
+        .iter()
+        .filter_map(|op| command_binary(&op.command))
+        .map(|binary| match_key(&binary))
+        .collect();
+    let mut configured_ids = HashSet::new();
+    for op in configured {
+        for word in shell_words(&op.command) {
+            if word.ends_with(".desktop") {
+                if let Some(id) = Path::new(&word).file_name() {
+                    configured_ids.insert(id.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    let mut configured_keys = configured_names;
+    configured_keys.extend(used_binaries.iter().cloned());
+    let mut seen_ids = HashSet::new();
+    let mut out = Vec::new();
+
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("desktop") {
+                continue;
+            }
+            let Some(app) = parse_desktop_app(&path) else {
+                continue;
+            };
+            if app.hidden || app.no_display {
+                continue;
+            }
+            let matches = app
+                .mime_types
+                .iter()
+                .any(|pattern| mimes.iter().all(|mime| mime_matches(pattern, mime)));
+            if !matches {
+                continue;
+            }
+            let Some(binary) = command_binary(&app.exec) else {
+                continue;
+            };
+            let check = app.try_exec.as_deref().unwrap_or(&binary);
+            if !executable_exists(check) {
+                continue;
+            }
+            let id_key = match_key(app.id.trim_end_matches(".desktop"));
+            if configured_keys.contains(&match_key(&app.name))
+                || configured_keys.contains(&id_key)
+                || configured_ids.contains(&app.id)
+                || !used_binaries.insert(match_key(&binary))
+                || !seen_ids.insert(app.id.clone())
+            {
+                continue;
+            }
+            let command = desktop_command(&app.exec, &app.name, &app.id);
+            out.push(Opener {
+                name: app.name,
+                desc: Some(app.id),
+                command,
+                block: false,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.desc.cmp(&b.desc)));
+    out
+}
+
+struct DesktopApp {
+    id: String,
+    name: String,
+    exec: String,
+    try_exec: Option<String>,
+    mime_types: Vec<String>,
+    hidden: bool,
+    no_display: bool,
+}
+
+fn parse_desktop_app(path: &Path) -> Option<DesktopApp> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let id = path.file_name()?.to_string_lossy().into_owned();
+    let mut app = DesktopApp {
+        id,
+        name: String::new(),
+        exec: String::new(),
+        try_exec: None,
+        mime_types: Vec::new(),
+        hidden: false,
+        no_display: false,
+    };
+    let mut in_main = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_main = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_main {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim() {
+            "Name" => app.name = value.to_string(),
+            "Exec" => app.exec = value.to_string(),
+            "TryExec" if !value.is_empty() => app.try_exec = Some(value.to_string()),
+            "MimeType" => {
+                app.mime_types = value
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+            "Hidden" => app.hidden = desktop_bool(value),
+            "NoDisplay" => app.no_display = desktop_bool(value),
+            _ => {}
+        }
+    }
+    if app.name.is_empty() {
+        app.name = app.id.trim_end_matches(".desktop").to_string();
+    }
+    if app.exec.is_empty() || app.mime_types.is_empty() {
+        None
+    } else {
+        Some(app)
+    }
+}
+
+fn desktop_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+/// Convert a desktop `Exec=` line to a Yazi-style opener command.
+///
+/// `%f`/`%u` become a numbered file placeholder, `%F`/`%U` become the
+/// all-targets placeholder, and `%c`/`%k` are filled from the entry itself.
+/// Unknown field codes are dropped, as required by the desktop spec.
+fn desktop_command(exec: &str, name: &str, id: &str) -> String {
+    let mut out = String::new();
+    let mut chars = exec.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let Some(code) = chars.next() else {
+            out.push('%');
+            break;
+        };
+        match code {
+            'f' | 'u' => out.push_str("%s1"),
+            'F' | 'U' => out.push_str("%s"),
+            'c' => out.push_str(&shell_quote(name)),
+            'k' => out.push_str(&shell_quote(id)),
+            '%' => out.push('%'),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Comparison key for names, binaries, and desktop ids, so `brave_browser` and
+/// `brave-browser.desktop` match.
+fn match_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// First executable program in a shell command, ignoring `env` assignments.
+fn command_binary(command: &str) -> Option<String> {
+    let mut words = shell_words(command).into_iter();
+    let mut first = words.next()?;
+    if first == "env" {
+        for word in words.by_ref() {
+            if word == "--" {
+                break;
+            }
+            if word.starts_with('-') || word.contains('=') {
+                continue;
+            }
+            first = word;
+            break;
+        }
+    }
+    Path::new(&first)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned().to_ascii_lowercase())
+}
+
+/// Minimal shell word splitter for the first token of `Exec=`/`run=` values.
+fn shell_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut started = false;
+    for c in command.chars() {
+        if escaped {
+            current.push(c);
+            escaped = false;
+            started = true;
+            continue;
+        }
+        match quote {
+            Some('\'') => {
+                if c == '\'' {
+                    quote = None;
+                } else {
+                    current.push(c);
+                }
+            }
+            Some('"') => match c {
+                '"' => quote = None,
+                '\\' => escaped = true,
+                _ => current.push(c),
+            },
+            _ => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    started = true;
+                }
+                '\\' => {
+                    escaped = true;
+                    started = true;
+                }
+                c if c.is_whitespace() => {
+                    if started {
+                        words.push(std::mem::take(&mut current));
+                        started = false;
+                    }
+                }
+                _ => {
+                    current.push(c);
+                    started = true;
+                }
+            },
+        }
+    }
+    if started {
+        words.push(current);
+    }
+    words
+}
+
+/// Whether `spec` names an executable file, either directly or through `PATH`.
+fn executable_exists(spec: &str) -> bool {
+    let path = Path::new(spec);
+    if path.components().count() > 1 {
+        return is_executable_file(path);
+    }
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
+    env::split_paths(&paths).any(|dir| is_executable_file(&dir.join(spec)))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+        && std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 fn fallback() -> Vec<Opener> {
     vec![
         Opener {
@@ -494,13 +799,18 @@ fn build_rules(doc: &toml::Value) -> Vec<Rule> {
     rules
 }
 
-/// First `[open]` rule that matches `path`, returning its `use` list.
-fn matching_uses(rules: &[Rule], path: &Path) -> Vec<String> {
-    let mime = if path.is_dir() {
+/// MIME type used for open-with rules and desktop scan matching.
+fn open_mime(path: &Path) -> Option<String> {
+    if path.is_dir() {
         Some("folder/local".to_string())
     } else {
         file_mime(path)
-    };
+    }
+}
+
+/// First `[open]` rule that matches `path`, returning its `use` list.
+fn matching_uses(rules: &[Rule], path: &Path) -> Vec<String> {
+    let mime = open_mime(path);
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -673,19 +983,17 @@ fn normalize_desktop_id(id: &str) -> Option<String> {
     desktop_file(&with_ext).is_some().then_some(with_ext)
 }
 
-/// Locate a desktop file by id in the XDG application directories.
-fn desktop_file(id: &str) -> Option<PathBuf> {
-    let path = Path::new(id);
-    if path.is_absolute() {
-        return path.is_file().then(|| path.to_path_buf());
-    }
-
+/// XDG application directories, user entries first and without duplicates.
+fn desktop_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     match env::var_os("XDG_DATA_HOME") {
-        Some(dir) => dirs.push(PathBuf::from(dir).join("applications")),
+        Some(dir) => push_dir(&mut dirs, PathBuf::from(dir).join("applications")),
         None => {
             if let Some(home) = env::var_os("HOME") {
-                dirs.push(PathBuf::from(home).join(".local/share/applications"));
+                push_dir(
+                    &mut dirs,
+                    PathBuf::from(home).join(".local/share/applications"),
+                );
             }
         }
     }
@@ -693,15 +1001,40 @@ fn desktop_file(id: &str) -> Option<PathBuf> {
         .map(|v| v.to_string_lossy().into_owned())
         .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
     for dir in data_dirs.split(':').filter(|d| !d.is_empty()) {
-        dirs.push(PathBuf::from(dir).join("applications"));
+        push_dir(&mut dirs, PathBuf::from(dir).join("applications"));
     }
-    // Flatpak exports are not always listed in XDG_DATA_DIRS.
-    dirs.push(PathBuf::from("/var/lib/flatpak/exports/share/applications"));
+    // Flatpak and snap exports are not always listed in XDG_DATA_DIRS.
+    push_dir(
+        &mut dirs,
+        PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+    );
     if let Some(home) = env::var_os("HOME") {
-        dirs.push(PathBuf::from(home).join(".local/share/flatpak/exports/share/applications"));
+        push_dir(
+            &mut dirs,
+            PathBuf::from(home).join(".local/share/flatpak/exports/share/applications"),
+        );
     }
+    push_dir(
+        &mut dirs,
+        PathBuf::from("/var/lib/snapd/desktop/applications"),
+    );
+    dirs
+}
 
-    dirs.into_iter()
+fn push_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
+    if !dirs.contains(&dir) {
+        dirs.push(dir);
+    }
+}
+
+/// Locate a desktop file by id in the XDG application directories.
+fn desktop_file(id: &str) -> Option<PathBuf> {
+    let path = Path::new(id);
+    if path.is_absolute() {
+        return path.is_file().then(|| path.to_path_buf());
+    }
+    desktop_dirs()
+        .into_iter()
         .map(|dir| dir.join(id))
         .find(|candidate| candidate.is_file())
 }
@@ -890,6 +1223,89 @@ mod tests {
             command: command.into(),
             block: false,
         }
+    }
+
+    #[test]
+    fn desktop_exec_codes_become_opener_placeholders() {
+        assert_eq!(
+            desktop_command("viewer -n %f", "Viewer", "viewer.desktop"),
+            "viewer -n %s1"
+        );
+        assert_eq!(
+            desktop_command("viewer %F", "Viewer", "v.desktop"),
+            "viewer %s"
+        );
+        assert_eq!(
+            desktop_command("viewer %c %k %%", "A B", "v.desktop"),
+            "viewer 'A B' v.desktop %"
+        );
+    }
+
+    #[test]
+    fn command_binary_skips_env_assignments() {
+        assert_eq!(command_binary("viewer %f").as_deref(), Some("viewer"));
+        assert_eq!(
+            command_binary("env FOO=1 /usr/bin/feh %f").as_deref(),
+            Some("feh")
+        );
+        assert_eq!(match_key("brave_browser"), match_key("brave-browser"));
+    }
+
+    #[test]
+    fn desktop_scan_filters_by_mime_and_deduplicates() {
+        let dir = std::env::temp_dir().join(format!(
+            "nnnyaz-desktop-scan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("viewer.desktop"),
+            "[Desktop Entry]\nName=Viewer\nExec=viewer %f\nTryExec=true\nMimeType=image/png;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("hidden.desktop"),
+            "[Desktop Entry]\nName=Hidden\nExec=hidden %f\nTryExec=true\nMimeType=image/png;\nHidden=true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("text.desktop"),
+            "[Desktop Entry]\nName=Text\nExec=text %f\nTryExec=true\nMimeType=text/plain;\n",
+        )
+        .unwrap();
+
+        let found = desktop_openers_in(std::slice::from_ref(&dir), &["image/png".into()], &[]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Viewer");
+        assert_eq!(found[0].desc.as_deref(), Some("viewer.desktop"));
+        assert_eq!(found[0].command, "viewer %s1");
+
+        let configured = vec![op("viewer %s")];
+        assert!(desktop_openers_in(
+            std::slice::from_ref(&dir),
+            &["image/png".into()],
+            &configured
+        )
+        .is_empty());
+        let configured_desktop = vec![op("gtk-launch viewer.desktop %s1")];
+        assert!(desktop_openers_in(
+            std::slice::from_ref(&dir),
+            &["image/png".into()],
+            &configured_desktop
+        )
+        .is_empty());
+        assert!(desktop_openers_in(
+            std::slice::from_ref(&dir),
+            &["image/png".into(), "text/plain".into()],
+            &[]
+        )
+        .is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
