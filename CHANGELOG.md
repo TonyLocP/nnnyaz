@@ -17,6 +17,8 @@ All notable changes to nnnyaz are documented here. The format follows
 
 ### Fixed
 
+- The open-with menu shows opener descriptions such as `Doom Emacs` instead of
+  internal names like `desktop_doom_emacs`.
 - Delete confirmations now accept LF as Enter. Some terminals send LF rather
   than CR, which crossterm reports as Ctrl+J in raw mode; it previously
   canceled the prompt.

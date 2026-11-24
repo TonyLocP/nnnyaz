@@ -8068,11 +8068,8 @@ impl App {
             .map(|(i, op)| {
                 let marker = if i == state.index { "▸ " } else { "  " };
                 let desc = op.label();
-                let text = if desc.is_empty() {
-                    format!("{marker}{}. {}", i + 1, op.name)
-                } else {
-                    format!("{marker}{}. {} — {}", i + 1, op.name, desc)
-                };
+                let label = if desc.is_empty() { &op.name } else { &desc };
+                let text = format!("{marker}{}. {}", i + 1, label);
                 let style = if i == state.index {
                     Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
                 } else {
