@@ -35,6 +35,21 @@ GENERIC_LAUNCHERS = {
     "xdg-open",
 }
 SHELL_WRAPPERS = {"sh", "bash", "zsh", "fish", "dash"}
+TERMINAL_LAUNCHERS = {
+    "alacritty",
+    "foot",
+    "gnome-terminal",
+    "kitty",
+    "konsole",
+    "rxvt",
+    "st",
+    "terminator",
+    "tilix",
+    "urxvt",
+    "wezterm",
+    "xfce4-terminal",
+    "xterm",
+}
 SKIP_MIME_PREFIXES = (
     "x-scheme-handler/",
     "inode/",
@@ -188,6 +203,20 @@ def parse_desktop(path: Path) -> dict[str, str | list[str] | bool] | None:
     }
 
 
+def unwrap_terminal(command: str) -> tuple[str, bool]:
+    """Turn `alacritty -e nvim` into `nvim`; Yazi runs blocked openers in-terminal."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return command, False
+    if len(tokens) < 3 or Path(tokens[0]).name not in TERMINAL_LAUNCHERS:
+        return command, False
+    if tokens[1] not in ("-e", "--"):
+        return command, False
+    inner = " ".join(tokens[2:]).strip()
+    return (inner, True) if inner else (command, False)
+
+
 def first_program(command: str) -> str | None:
     words = shlex.split(command, posix=True)
     if not words:
@@ -247,19 +276,30 @@ def convert_exec(exec_line: str, name: str, app_id: str) -> str:
 def usable_apps(apps: list[dict[str, str | list[str] | bool]]) -> list[dict]:
     out: list[dict] = []
     for app in apps:
-        program = first_program(str(app["exec"]))
+        exec_line, wrapped = unwrap_terminal(str(app["exec"]))
+        program = first_program(exec_line)
         if not program or Path(program).name in SHELL_WRAPPERS:
             continue
-        check = str(app["try_exec"]) or program
+        original_program = first_program(str(app["exec"])) or program
+        check = str(app["try_exec"]) or original_program
         if not executable_exists(check):
             continue
-        command = convert_exec(str(app["exec"]), str(app["name"]), str(app["id"]))
+        if wrapped and not executable_exists(program):
+            continue
+        command = convert_exec(exec_line, str(app["name"]), str(app["id"]))
         if not command:
             continue
         if not re.search(r"%[sS]", command):
             command = f"{command} %s"
         key = "desktop_" + re.sub(r"[^A-Za-z0-9_]", "_", str(app["id"]).removesuffix(".desktop"))
-        out.append({**app, "key": key, "command": command})
+        out.append(
+            {
+                **app,
+                "key": key,
+                "command": command,
+                "terminal": bool(app["terminal"]) or wrapped,
+            }
+        )
     out.sort(key=lambda app: (str(app["name"]).lower(), str(app["id"])))
     return out
 
