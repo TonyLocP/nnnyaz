@@ -13,6 +13,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     str::Chars,
+    sync::{Mutex, OnceLock},
+    time::SystemTime,
 };
 
 #[cfg(unix)]
@@ -224,7 +226,7 @@ fn scan_placeholder(it: &mut Peekable<Chars<'_>>, p: char) -> bool {
 /// still fall back to Yazi's config and then to built-in defaults. Like yazi's
 /// `Open::match_common`, only openers offered by every target's `[open]` rule
 /// are listed, in the first rule's order.
-pub fn options_for(paths: &[PathBuf], doc: Option<&toml::Value>) -> Vec<Opener> {
+pub fn options_for(paths: &[PathBuf], doc: Option<&toml::Value>, mimes: &[String]) -> Vec<Opener> {
     let mut merged = load_config().unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
     if let Some(over) = doc.and_then(|d| d.as_table()) {
         if let Some(base) = merged.as_table_mut() {
@@ -247,8 +249,11 @@ pub fn options_for(paths: &[PathBuf], doc: Option<&toml::Value>) -> Vec<Opener> 
 
     let rules = build_rules(doc);
     let mut uses: Option<Vec<String>> = None;
-    for path in paths {
-        let path_uses = matching_uses(&rules, path);
+    if mimes.len() != paths.len() {
+        uses = Some(Vec::new());
+    }
+    for (path, mime) in paths.iter().zip(mimes) {
+        let path_uses = matching_uses(&rules, path, mime);
         if path_uses.is_empty() {
             uses = Some(Vec::new());
             break;
@@ -288,21 +293,33 @@ pub fn options_for(paths: &[PathBuf], doc: Option<&toml::Value>) -> Vec<Opener> 
 /// desktop-spec default of `text/plain`, broadened to `text/*` for text
 /// editors. Hidden and `NoDisplay` entries are skipped, and the result is
 /// sorted by display name.
-pub fn available_apps_for(paths: &[PathBuf], configured: &[Opener]) -> Vec<Opener> {
-    let mut mimes = Vec::new();
+pub fn available_apps_for(mimes: &[String], configured: &[Opener]) -> Vec<Opener> {
+    if mimes.is_empty() {
+        return Vec::new();
+    }
+    openers_from_apps(&cached_desktop_apps(&desktop_dirs()), mimes, configured)
+}
+
+/// Detect MIME types for all targets once, for both configured and detected
+/// openers. Returns an empty list when any target cannot be probed, matching
+/// the existing rule-intersection behavior.
+pub fn open_mimes(paths: &[PathBuf]) -> Vec<String> {
+    let mut mimes = Vec::with_capacity(paths.len());
     for path in paths {
         let Some(mime) = open_mime(path) else {
             return Vec::new();
         };
         mimes.push(mime);
     }
-    if mimes.is_empty() {
-        return Vec::new();
-    }
-    desktop_openers_in(&desktop_dirs(), &mimes, configured)
+    mimes
 }
 
+#[cfg(test)]
 fn desktop_openers_in(dirs: &[PathBuf], mimes: &[String], configured: &[Opener]) -> Vec<Opener> {
+    openers_from_apps(&read_desktop_apps(dirs), mimes, configured)
+}
+
+fn openers_from_apps(apps: &[DesktopApp], mimes: &[String], configured: &[Opener]) -> Vec<Opener> {
     let configured_names: HashSet<String> =
         configured.iter().map(|op| match_key(&op.name)).collect();
     let mut used_binaries: HashSet<String> = configured
@@ -325,6 +342,52 @@ fn desktop_openers_in(dirs: &[PathBuf], mimes: &[String], configured: &[Opener])
     let mut seen_ids = HashSet::new();
     let mut out = Vec::new();
 
+    for app in apps {
+        if app.hidden || app.no_display {
+            continue;
+        }
+        if !app.declares_mime && !accepts_files(&app.exec) {
+            continue;
+        }
+        let matches = app
+            .mime_types
+            .iter()
+            .any(|pattern| mimes.iter().all(|mime| mime_matches(pattern, mime)));
+        if !matches {
+            continue;
+        }
+        let Some(program) = command_program(&app.exec) else {
+            continue;
+        };
+        let Some(binary) = command_binary(&app.exec) else {
+            continue;
+        };
+        let check = app.try_exec.as_deref().unwrap_or(&program);
+        if !executable_exists(check) {
+            continue;
+        }
+        let id_key = match_key(app.id.trim_end_matches(".desktop"));
+        if configured_keys.contains(&match_key(&app.name))
+            || configured_keys.contains(&id_key)
+            || configured_ids.contains(&app.id)
+            || !used_binaries.insert(match_key(&binary))
+            || !seen_ids.insert(app.id.clone())
+        {
+            continue;
+        }
+        out.push(Opener {
+            name: app.name.clone(),
+            desc: Some(app.id.clone()),
+            command: desktop_command(&app.exec, &app.name, &app.id),
+            block: false,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.desc.cmp(&b.desc)));
+    out
+}
+
+fn read_desktop_apps(dirs: &[PathBuf]) -> Vec<DesktopApp> {
+    let mut apps = Vec::new();
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
@@ -334,54 +397,75 @@ fn desktop_openers_in(dirs: &[PathBuf], mimes: &[String], configured: &[Opener])
             if path.extension().and_then(|ext| ext.to_str()) != Some("desktop") {
                 continue;
             }
-            let Some(app) = parse_desktop_app(&path) else {
-                continue;
-            };
-            if app.hidden || app.no_display {
+            if let Some(app) = parse_desktop_app(&path) {
+                apps.push(app);
+            }
+        }
+    }
+    apps
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DesktopStamp {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+struct DesktopAppCache {
+    stamp: Vec<DesktopStamp>,
+    apps: Vec<DesktopApp>,
+}
+
+static DESKTOP_APP_CACHE: OnceLock<Mutex<DesktopAppCache>> = OnceLock::new();
+
+/// Parse desktop entries once per process. The directory listing is checked
+/// each time so installs/uninstalls and edits still show up without a restart.
+fn cached_desktop_apps(dirs: &[PathBuf]) -> Vec<DesktopApp> {
+    let stamp = desktop_stamp(dirs);
+    let cache = DESKTOP_APP_CACHE.get_or_init(|| {
+        Mutex::new(DesktopAppCache {
+            stamp: Vec::new(),
+            apps: Vec::new(),
+        })
+    });
+    let mut cache = cache.lock().unwrap_or_else(|err| err.into_inner());
+    if cache.stamp != stamp {
+        cache.apps = read_desktop_apps(dirs);
+        cache.stamp = stamp;
+    }
+    cache.apps.clone()
+}
+
+fn desktop_stamp(dirs: &[PathBuf]) -> Vec<DesktopStamp> {
+    let mut out = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            out.push(DesktopStamp {
+                path: dir.clone(),
+                modified: None,
+                len: 0,
+            });
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("desktop") {
                 continue;
             }
-            if !app.declares_mime && !accepts_files(&app.exec) {
-                continue;
-            }
-            let matches = app
-                .mime_types
-                .iter()
-                .any(|pattern| mimes.iter().all(|mime| mime_matches(pattern, mime)));
-            if !matches {
-                continue;
-            }
-            let Some(program) = command_program(&app.exec) else {
-                continue;
-            };
-            let Some(binary) = command_binary(&app.exec) else {
-                continue;
-            };
-            let check = app.try_exec.as_deref().unwrap_or(&program);
-            if !executable_exists(check) {
-                continue;
-            }
-            let id_key = match_key(app.id.trim_end_matches(".desktop"));
-            if configured_keys.contains(&match_key(&app.name))
-                || configured_keys.contains(&id_key)
-                || configured_ids.contains(&app.id)
-                || !used_binaries.insert(match_key(&binary))
-                || !seen_ids.insert(app.id.clone())
-            {
-                continue;
-            }
-            let command = desktop_command(&app.exec, &app.name, &app.id);
-            out.push(Opener {
-                name: app.name,
-                desc: Some(app.id),
-                command,
-                block: false,
+            let meta = entry.metadata().ok();
+            out.push(DesktopStamp {
+                path,
+                modified: meta.as_ref().and_then(|meta| meta.modified().ok()),
+                len: meta.map(|meta| meta.len()).unwrap_or(0),
             });
         }
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.desc.cmp(&b.desc)));
+    out.sort_by(|a, b| a.path.cmp(&b.path));
     out
 }
 
+#[derive(Clone)]
 struct DesktopApp {
     id: String,
     name: String,
@@ -872,15 +956,14 @@ fn open_mime(path: &Path) -> Option<String> {
 }
 
 /// First `[open]` rule that matches `path`, returning its `use` list.
-fn matching_uses(rules: &[Rule], path: &Path) -> Vec<String> {
-    let mime = open_mime(path);
+fn matching_uses(rules: &[Rule], path: &Path, mime: &str) -> Vec<String> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
     for rule in rules {
-        if rule.matches(mime.as_deref(), &name) {
+        if rule.matches(Some(mime), &name) {
             return rule.uses.clone();
         }
     }
@@ -1438,9 +1521,33 @@ mod tests {
     }
 
     #[test]
+    fn desktop_stamp_detects_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "nnnyaz-desktop-stamp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = dir.join("app.desktop");
+        std::fs::write(&app, "[Desktop Entry]\nName=A\n").unwrap();
+        let before = desktop_stamp(std::slice::from_ref(&dir));
+        std::fs::write(&app, "[Desktop Entry]\nName=A longer name\n").unwrap();
+        let after = desktop_stamp(std::slice::from_ref(&dir));
+        assert_ne!(before, after);
+
+        std::fs::write(dir.join("notes.txt"), "not a desktop entry").unwrap();
+        assert_eq!(after, desktop_stamp(std::slice::from_ref(&dir)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn folders_use_yazi_default_rule() {
         let doc: toml::Value = toml::from_str("").unwrap();
-        let uses = matching_uses(&build_rules(&doc), Path::new("/tmp"));
+        let uses = matching_uses(&build_rules(&doc), Path::new("/tmp"), "folder/local");
         assert_eq!(uses, vec!["edit", "open", "reveal"]);
     }
 
@@ -1455,7 +1562,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            matching_uses(&build_rules(&doc), Path::new("/tmp")),
+            matching_uses(&build_rules(&doc), Path::new("/tmp"), "folder/local"),
             vec!["first"]
         );
 
@@ -1467,7 +1574,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            matching_uses(&build_rules(&doc), Path::new("/tmp")),
+            matching_uses(&build_rules(&doc), Path::new("/tmp"), "folder/local"),
             vec!["custom"]
         );
     }
@@ -1504,7 +1611,7 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
 
         let names = |paths: &[PathBuf]| -> Vec<String> {
-            options_for(paths, Some(&doc))
+            options_for(paths, Some(&doc), &open_mimes(paths))
                 .into_iter()
                 .map(|o| o.name)
                 .collect()

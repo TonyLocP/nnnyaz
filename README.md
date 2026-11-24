@@ -366,7 +366,8 @@ openers come first; nnnyaz then appends installed desktop applications whose
 `MimeType=` matches every selected file, skipping hidden, unavailable, and
 duplicate entries. Desktop entries without `MimeType=` follow the desktop-spec
 default of `text/plain` (or `text/*` for text editors), so editors such as
-Doom Emacs show up for source files too. The built-in `open` opener uses the
+Doom Emacs show up for source files too. The scan is cached for the session and
+refreshes when application directories change. The built-in `open` opener uses the
 system handler for the file's MIME type, but
 browser-associated files follow the browser you selected with
 `xdg-settings set default-web-browser`. For example, if PDFs are registered to

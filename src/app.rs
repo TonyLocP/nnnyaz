@@ -4951,8 +4951,13 @@ impl App {
                 block: false,
             });
         }
-        options.extend(openwith::options_for(&paths, self.config.open.as_ref()));
-        options.extend(openwith::available_apps_for(&paths, &options));
+        let mimes = openwith::open_mimes(&paths);
+        options.extend(openwith::options_for(
+            &paths,
+            self.config.open.as_ref(),
+            &mimes,
+        ));
+        options.extend(openwith::available_apps_for(&mimes, &options));
         if options.is_empty() {
             self.status = "open with: no openers configured".into();
             return;

@@ -103,7 +103,8 @@ are candidates, roughly in priority order.
       yanked, and tab placeholders expand to empty in an opener's context, as
       in Yazi. `O` also appends installed desktop applications whose MIME types
       match the selection, after the configured openers; entries without
-      `MimeType=` use `text/plain` or `text/*` for text editors. Picker `Enter`
+      `MimeType=` use `text/plain` or `text/*` for text editors. The scan reuses
+      MIME probes and caches parsed entries for the session. Picker `Enter`
       now picks directories instead of entering them.
 - [x] **Marks and bookmarks** — `m` + key saves a directory mark and `'` + key
       jumps to it; marks persist in `<config>/marks` and stale or missing

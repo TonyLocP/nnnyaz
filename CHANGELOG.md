@@ -14,6 +14,12 @@ All notable changes to nnnyaz are documented here. The format follows
   `text/plain`, or `text/*` when categorized as a text editor, so Doom Emacs and
   similar editors appear for source files.
 
+### Changed
+
+- `O` reuses one MIME probe per target and caches parsed desktop entries for the
+  session; installs, removals, and edits in application directories still refresh
+  the list.
+
 ### Fixed
 
 - Delete confirmations now accept LF as Enter. Some terminals send LF rather
