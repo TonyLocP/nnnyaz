@@ -101,11 +101,9 @@ are candidates, roughly in priority order.
       numbered forms; commands with an unnumbered `%s`/`%S` run once with all
       targets (Yazi's `spread`), and the rest run once per file. Hovered,
       yanked, and tab placeholders expand to empty in an opener's context, as
-      in Yazi. `O` also appends installed desktop applications whose MIME types
-      match the selection, after the configured openers; entries without
-      `MimeType=` use `text/plain` or `text/*` for text editors. The scan reuses
-      MIME probes and caches parsed entries for the session. Picker `Enter`
-      now picks directories instead of entering them.
+      in Yazi. `scripts/update-openers.py` can refresh both nnnyaz and Yazi
+      configs from installed desktop applications. Picker `Enter` now picks
+      directories instead of entering them.
 - [x] **Marks and bookmarks** — `m` + key saves a directory mark and `'` + key
       jumps to it; marks persist in `<config>/marks` and stale or missing
       marks report a status message instead of changing directory. Keys that

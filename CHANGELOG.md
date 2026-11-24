@@ -8,17 +8,9 @@ All notable changes to nnnyaz are documented here. The format follows
 
 ### Added
 
-- `O` now appends installed desktop applications that declare support for the
-  selected file's MIME type. Configured openers stay first; hidden, unavailable,
-  and duplicate entries are skipped. Desktop entries without `MimeType=` use
-  `text/plain`, or `text/*` when categorized as a text editor, so Doom Emacs and
-  similar editors appear for source files.
-
-### Changed
-
-- `O` reuses one MIME probe per target and caches parsed desktop entries for the
-  session; installs, removals, and edits in application directories still refresh
-  the list.
+- `scripts/update-openers.py` generates opener definitions and MIME rules from
+  installed desktop applications and updates managed blocks in both nnnyaz and
+  Yazi configs. Existing openers are reused when they launch the same program.
 
 ### Fixed
 
