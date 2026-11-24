@@ -10,7 +10,9 @@ All notable changes to nnnyaz are documented here. The format follows
 
 - `O` now appends installed desktop applications that declare support for the
   selected file's MIME type. Configured openers stay first; hidden, unavailable,
-  and duplicate entries are skipped.
+  and duplicate entries are skipped. Desktop entries without `MimeType=` use
+  `text/plain`, or `text/*` when categorized as a text editor, so Doom Emacs and
+  similar editors appear for source files.
 
 ### Fixed
 

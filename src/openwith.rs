@@ -284,8 +284,10 @@ pub fn options_for(paths: &[PathBuf], doc: Option<&toml::Value>) -> Vec<Opener> 
 ///
 /// Configured openers are kept first and are not duplicated. A desktop entry
 /// counts when its `MimeType=` list matches the file's MIME type and its
-/// `TryExec`/`Exec` program is available. Hidden and `NoDisplay` entries are
-/// skipped, and the result is sorted by display name.
+/// `TryExec`/`Exec` program is available. Entries without `MimeType=` use the
+/// desktop-spec default of `text/plain`, broadened to `text/*` for text
+/// editors. Hidden and `NoDisplay` entries are skipped, and the result is
+/// sorted by display name.
 pub fn available_apps_for(paths: &[PathBuf], configured: &[Opener]) -> Vec<Opener> {
     let mut mimes = Vec::new();
     for path in paths {
@@ -338,6 +340,9 @@ fn desktop_openers_in(dirs: &[PathBuf], mimes: &[String], configured: &[Opener])
             if app.hidden || app.no_display {
                 continue;
             }
+            if !app.declares_mime && !accepts_files(&app.exec) {
+                continue;
+            }
             let matches = app
                 .mime_types
                 .iter()
@@ -345,10 +350,13 @@ fn desktop_openers_in(dirs: &[PathBuf], mimes: &[String], configured: &[Opener])
             if !matches {
                 continue;
             }
+            let Some(program) = command_program(&app.exec) else {
+                continue;
+            };
             let Some(binary) = command_binary(&app.exec) else {
                 continue;
             };
-            let check = app.try_exec.as_deref().unwrap_or(&binary);
+            let check = app.try_exec.as_deref().unwrap_or(&program);
             if !executable_exists(check) {
                 continue;
             }
@@ -380,6 +388,8 @@ struct DesktopApp {
     exec: String,
     try_exec: Option<String>,
     mime_types: Vec<String>,
+    categories: Vec<String>,
+    declares_mime: bool,
     hidden: bool,
     no_display: bool,
 }
@@ -393,6 +403,8 @@ fn parse_desktop_app(path: &Path) -> Option<DesktopApp> {
         exec: String::new(),
         try_exec: None,
         mime_types: Vec::new(),
+        categories: Vec::new(),
+        declares_mime: false,
         hidden: false,
         no_display: false,
     };
@@ -415,7 +427,16 @@ fn parse_desktop_app(path: &Path) -> Option<DesktopApp> {
             "Exec" => app.exec = value.to_string(),
             "TryExec" if !value.is_empty() => app.try_exec = Some(value.to_string()),
             "MimeType" => {
+                app.declares_mime = true;
                 app.mime_types = value
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+            "Categories" => {
+                app.categories = value
                     .split(';')
                     .map(str::trim)
                     .filter(|v| !v.is_empty())
@@ -430,11 +451,46 @@ fn parse_desktop_app(path: &Path) -> Option<DesktopApp> {
     if app.name.is_empty() {
         app.name = app.id.trim_end_matches(".desktop").to_string();
     }
-    if app.exec.is_empty() || app.mime_types.is_empty() {
-        None
-    } else {
-        Some(app)
+    if app.exec.is_empty() {
+        return None;
     }
+    if app.mime_types.is_empty() {
+        if app.declares_mime {
+            return None;
+        }
+        // The desktop-entry spec assumes `text/plain` when `MimeType=` is
+        // absent. Treat explicit text editors as supporting other text types
+        // too, which is what users expect from editors such as Doom Emacs.
+        app.mime_types.push(if is_text_editor(&app) {
+            "text/*".to_string()
+        } else {
+            "text/plain".to_string()
+        });
+    }
+    Some(app)
+}
+
+fn is_text_editor(app: &DesktopApp) -> bool {
+    app.categories
+        .iter()
+        .any(|category| category.eq_ignore_ascii_case("TextEditor"))
+}
+
+/// Whether an `Exec=` line has a field code that passes a file to the app.
+/// Required before applying the implicit `text/plain` default.
+fn accepts_files(exec: &str) -> bool {
+    let mut chars = exec.chars();
+    while let Some(c) = chars.next() {
+        if c == '%'
+            && matches!(
+                chars.next(),
+                Some('f' | 'F' | 'u' | 'U' | 'd' | 'D' | 'n' | 'N')
+            )
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn desktop_bool(value: &str) -> bool {
@@ -484,7 +540,8 @@ fn match_key(value: &str) -> String {
 }
 
 /// First executable program in a shell command, ignoring `env` assignments.
-fn command_binary(command: &str) -> Option<String> {
+/// Keeps any path component so absolute `Exec=` programs can be verified.
+fn command_program(command: &str) -> Option<String> {
     let mut words = shell_words(command).into_iter();
     let mut first = words.next()?;
     if first == "env" {
@@ -499,7 +556,13 @@ fn command_binary(command: &str) -> Option<String> {
             break;
         }
     }
-    Path::new(&first)
+    Some(first)
+}
+
+/// Lowercase basename used to dedupe configured and detected openers.
+fn command_binary(command: &str) -> Option<String> {
+    let program = command_program(command)?;
+    Path::new(&program)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned().to_ascii_lowercase())
 }
@@ -1248,6 +1311,10 @@ mod tests {
             command_binary("env FOO=1 /usr/bin/feh %f").as_deref(),
             Some("feh")
         );
+        assert_eq!(
+            command_program("env FOO=1 /usr/bin/feh %f").as_deref(),
+            Some("/usr/bin/feh")
+        );
         assert_eq!(match_key("brave_browser"), match_key("brave-browser"));
     }
 
@@ -1304,6 +1371,68 @@ mod tests {
             &[]
         )
         .is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn desktop_entries_without_mime_type_use_text_defaults() {
+        let dir = std::env::temp_dir().join(format!(
+            "nnnyaz-desktop-implicit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = |name: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let editor = bin("editor-bin");
+        let plain = bin("plain-bin");
+        let nofiles = bin("nofiles-bin");
+        let empty = bin("empty-bin");
+        std::fs::write(
+            dir.join("editor.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Editor\nExec={editor} %F\nCategories=Development;TextEditor;\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("plain.desktop"),
+            format!("[Desktop Entry]\nName=Plain\nExec={plain} %F\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("nofiles.desktop"),
+            format!("[Desktop Entry]\nName=NoFiles\nExec={nofiles}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("empty.desktop"),
+            format!("[Desktop Entry]\nName=Empty\nExec={empty} %F\nMimeType=\n"),
+        )
+        .unwrap();
+
+        let source = desktop_openers_in(std::slice::from_ref(&dir), &["text/x-c".into()], &[]);
+        assert_eq!(source.len(), 1);
+        assert_eq!(source[0].name, "Editor");
+        assert_eq!(source[0].command, format!("{editor} %s"));
+
+        let text = desktop_openers_in(std::slice::from_ref(&dir), &["text/plain".into()], &[]);
+        assert_eq!(text.len(), 2);
+        assert_eq!(text[0].name, "Editor");
+        assert_eq!(text[1].name, "Plain");
+
+        assert!(
+            desktop_openers_in(std::slice::from_ref(&dir), &["image/png".into()], &[]).is_empty()
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
