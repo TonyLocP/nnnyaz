@@ -377,27 +377,6 @@ files, `%d`/`%D` to their parent directories, a 1-based suffix picks one target
 file. Hovered, yanked, and tab placeholders expand to empty in an opener's
 context, matching Yazi.
 
-### Updating openers from installed apps
-
-`scripts/update-openers.py` scans XDG `.desktop` entries and writes managed
-blocks into both nnnyaz's `config.toml` and Yazi's `yazi.toml`. It adds one
-opener per available application and one prepend rule per MIME type, reusing
-existing openers when they already launch the same program. Hidden, unavailable,
-and non-file entries are skipped, as are URL-scheme handlers and shell wrappers;
-text editors without `MimeType=` are treated as `text/*`, terminal wrappers such
-as `alacritty -e nvim` are unwrapped into blocking editor commands, and commands
-without a file placeholder get `%s` appended. MIME types with identical option
-lists are collapsed into one brace-expanded rule.
-
-```sh
-python3 scripts/update-openers.py --dry-run   # print the generated configs
-python3 scripts/update-openers.py             # write both configs
-```
-
-Only the marker-delimited generated blocks are replaced, hand-written config is
-left alone, and the first pre-generation version is kept in a `.bak` file. Use
-`--nnnyaz-config`, `--yazi-config`, or repeated `--scan-dir` to override paths.
-
 ### `keymap.toml`
 
 Bindings map a key sequence to an action command. Contexts are `mgr`, `tasks`,

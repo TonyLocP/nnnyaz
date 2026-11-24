@@ -101,9 +101,9 @@ are candidates, roughly in priority order.
       numbered forms; commands with an unnumbered `%s`/`%S` run once with all
       targets (Yazi's `spread`), and the rest run once per file. Hovered,
       yanked, and tab placeholders expand to empty in an opener's context, as
-      in Yazi. `scripts/update-openers.py` can refresh both nnnyaz and Yazi
-      configs from installed desktop applications. Picker `Enter` now picks
-      directories instead of entering them.
+      in Yazi. Openers are configured in TOML (or inherited from Yazi), and
+      `O` shows only the options that apply to the selection. Picker `Enter` now
+      picks directories instead of entering them.
 - [x] **Marks and bookmarks** — `m` + key saves a directory mark and `'` + key
       jumps to it; marks persist in `<config>/marks` and stale or missing
       marks report a status message instead of changing directory. Keys that
