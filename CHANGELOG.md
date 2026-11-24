@@ -15,6 +15,9 @@ All notable changes to nnnyaz are documented here. The format follows
   The pane's `TERM`, DA1 reply, and inherited Kitty/Ghostty variables describe
   tmux or where the server started, so foot's Sixel support was previously
   missed or overridden and previews stayed disabled.
+- The shipped fish wrapper enables tmux graphics passthrough only for the pane
+  running nnnyaz and restores the previous setting on exit. A global
+  `allow-passthrough` setting is no longer needed.
 
 ## [0.1.1] - 2026-11-20
 

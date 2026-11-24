@@ -228,6 +228,9 @@ tmux set -p allow-passthrough on
 nnnyaz
 ```
 
+The shipped fish wrapper does this automatically and restores the previous pane
+setting when nnnyaz exits.
+
 `set -g allow-passthrough on` also works, but it enables passthrough for every
 pane that does not override it. `allow-passthrough all` is broader still: it
 permits passthrough even from hidden panes. Passthrough lets programs in that
