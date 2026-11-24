@@ -557,8 +557,8 @@ python3 scripts/bench-reload.py 20000 target/release/nnnyaz
 ## Development
 
 Run the unit and CLI tests with `cargo test`. For a quick end-to-end check of
-the help overlay and picker against a real terminal, build first and then run
-the manual pty smoke test:
+the help overlay, picker, and delete confirmation against a real terminal,
+build first and then run the manual pty smoke test:
 
 ```sh
 cargo build

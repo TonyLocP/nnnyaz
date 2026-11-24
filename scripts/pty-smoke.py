@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Manual pty smoke test for nnnyaz.
 
-Exercises the help/search overlay and picker mode against a real terminal.
+Exercises the help/search overlay, picker mode, and delete confirmation
+against a real terminal.
 This is intentionally *not* wired into CI: pty timing is platform-dependent
 and would make the build flaky. Run it locally after UI changes:
 
@@ -123,6 +124,27 @@ def test_picker(bin_path, cwd, home):
     print("  picker Enter writes hovered path: ok")
 
 
+def test_delete_confirmation(bin_path, root):
+    cwd = os.path.join(root, "delete-work")
+    home = os.path.join(root, "delete-home")
+    os.makedirs(cwd)
+    os.makedirs(os.path.join(home, ".config", "nnnyaz"))
+    victim = os.path.join(cwd, "bye.txt")
+    with open(victim, "w") as handle:
+        handle.write("bye")
+
+    session = Session([bin_path], cwd, home)
+    try:
+        session.wait_for("1/1")
+        session.send_and_wait(b"d", "Trash 1 selected file?")
+        # Some terminals send LF for Enter; crossterm reports that as Ctrl+J.
+        session.press(b"\n")
+    finally:
+        session.close()
+    assert not os.path.exists(victim), "LF Enter did not confirm the delete prompt"
+    print("  delete confirmation accepts LF Enter: ok")
+
+
 def main():
     bin_path = binary()
     if not os.path.exists(bin_path):
@@ -138,6 +160,7 @@ def main():
         print(f"pty smoke test: {bin_path}")
         test_help_search(bin_path, cwd, home)
         test_picker(bin_path, cwd, home)
+        test_delete_confirmation(bin_path, root)
     print("all pty checks passed")
 
 

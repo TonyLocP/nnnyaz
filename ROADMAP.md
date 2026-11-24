@@ -24,6 +24,8 @@ are candidates, roughly in priority order.
       phases. A 20k-file release reload went from ~24 ms to ~14 ms here.
 - [x] **Fish wrapper** — `wrappers/nnnyaz.fish` ships with the release archives
       and provides cd-on-quit plus the `f` alias (`y` remains yazi).
+- [x] **Delete confirmation Enter fix** — LF/Ctrl+J is accepted as Enter, with
+      a pty regression check in `scripts/pty-smoke.py`.
 - [x] **CI and releases** — GitHub Actions runs formatting, clippy, tests, and
       a release build on Linux and macOS. Tagged releases publish archives for
       Linux (x86_64/aarch64) and macOS (Intel/Apple Silicon) with SHA-256

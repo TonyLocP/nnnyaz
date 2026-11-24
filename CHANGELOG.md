@@ -6,6 +6,12 @@ All notable changes to nnnyaz are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Delete confirmations now accept LF as Enter. Some terminals send LF rather
+  than CR, which crossterm reports as Ctrl+J in raw mode; it previously
+  canceled the prompt.
+
 ## [0.1.1] - 2026-11-20
 
 ### Added

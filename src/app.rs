@@ -111,8 +111,13 @@ impl Prompt {
 }
 
 /// Confirmation prompts treat `y` and Enter as yes; anything else cancels.
+/// In raw mode crossterm reports LF as Ctrl+J rather than `KeyCode::Enter`,
+/// but many terminals send LF for Enter, so accept both encodings.
 fn confirm_yes(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Char('y') | KeyCode::Enter)
+    matches!(
+        key.code,
+        KeyCode::Char('y') | KeyCode::Enter | KeyCode::Char('\n')
+    ) || (key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL))
 }
 
 /// A pending mark operation waiting for its single-character key.
@@ -8834,6 +8839,11 @@ mod tests {
     fn enter_confirms_prompts() {
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         assert!(confirm_yes(&key(KeyCode::Enter)));
+        assert!(confirm_yes(&key(KeyCode::Char('\n'))));
+        assert!(confirm_yes(&KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL
+        )));
         assert!(confirm_yes(&key(KeyCode::Char('y'))));
         assert!(!confirm_yes(&key(KeyCode::Char('n'))));
         assert!(!confirm_yes(&key(KeyCode::Esc)));
