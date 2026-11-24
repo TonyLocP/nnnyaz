@@ -84,6 +84,11 @@ are candidates, roughly in priority order.
       `image_delay` in addition to `cache_size`; invalid values warn and keep
       the default. nnnyaz keeps its faster defaults (1920×1080, box filter,
       quality 90) rather than Yazi's 600×900/triangle/75.
+- [x] **Sixel previews inside tmux** — protocol detection prefers tmux's client
+      terminal name over stale Kitty/Ghostty environment hints, so foot is
+      recognized even though the pane's `TERM` and DA1 reply describe tmux.
+      `NNNYAZ_DEBUG=1` reports the client terminal, and
+      `NNNYAZ_IMAGE_PROTOCOL=sixel` remains an explicit override.
 - [x] **Font and archive previews** — font files (`ttf`, `otf`, `ttc`, `woff`,
       …) render a glyph sheet through ImageMagick (`magick`/`convert`) and go
       through the same image cache and preload path as photos. Archive listings

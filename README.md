@@ -226,6 +226,13 @@ Inside tmux, enable graphics passthrough:
 set -g allow-passthrough on
 ```
 
+tmux hides the client terminal from the pane (`TERM` and DA1 describe tmux
+itself, while inherited Kitty/Ghostty variables describe where the server
+started), so nnnyaz asks tmux for the attached client's terminal name. This lets
+foot's Sixel previews work inside tmux. If detection still fails, set
+`NNNYAZ_IMAGE_PROTOCOL=sixel`; `NNNYAZ_DEBUG=1` prints the detected protocol and
+client terminal.
+
 Video thumbnails are generated with `ffmpeg`. PDFs are rendered a page at a
 time with `pdftoppm` (poppler), and `J`/`K` or scrolling over the preview
 switches pages. Page counts come from `pdfinfo` when it is installed.

@@ -24,9 +24,10 @@ fn main() -> io::Result<()> {
     let shm = protocol == preview::ImageProtocol::Kitty && probe_shm();
     if std::env::var_os("NNNYAZ_DEBUG").is_some() {
         eprintln!(
-            "nnnyaz: protocol={protocol:?} font={font:?} shm={shm} term={:?} tmux={}",
+            "nnnyaz: protocol={protocol:?} font={font:?} shm={shm} term={:?} tmux={} client_term={:?}",
             std::env::var("TERM").unwrap_or_default(),
-            preview::tmux_active()
+            preview::tmux_active(),
+            tmux_client_termname()
         );
     }
     app.preview_configure(protocol, font, shm);
@@ -260,28 +261,68 @@ fn detect_protocol() -> preview::ImageProtocol {
 /// True when the outer terminal is kitty or ghostty (the two terminals with a
 /// native kitty graphics protocol implementation this driver targets).
 fn kitty_supported() -> bool {
+    // Inside tmux, `TERM` and inherited Kitty/Ghostty variables can describe
+    // where the tmux server started rather than the attached client. A concrete
+    // client terminal wins over those hints; a generic tmux client keeps the
+    // old fallback for nested sessions.
+    if preview::tmux_active() {
+        if let Some(client) = tmux_client_termname() {
+            if term_is_kitty(&client) {
+                return true;
+            }
+            if term_implies_sixel(&client) {
+                return false;
+            }
+        }
+    }
     let nonempty = |k: &str| std::env::var(k).is_ok_and(|v| !v.is_empty());
     if nonempty("KITTY_WINDOW_ID") || nonempty("GHOSTTY_RESOURCES_DIR") {
         return true;
     }
     let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
     let term = std::env::var("TERM").unwrap_or_default();
-    let k = |s: &str| {
-        s.to_ascii_lowercase().contains("ghostty") || s.to_ascii_lowercase().contains("kitty")
-    };
-    k(&term_program) || k(&term)
+    term_is_kitty(&term_program) || term_is_kitty(&term)
 }
 
-/// Sixel support: a `TERM` hint, or the DA1 reply advertising attribute 4.
+fn term_is_kitty(term: &str) -> bool {
+    let term = term.to_ascii_lowercase();
+    term.contains("ghostty") || term.contains("kitty")
+}
+
+/// Sixel support: a `TERM` hint (including tmux's client terminal), or the DA1
+/// reply advertising attribute 4.
 fn sixel_supported() -> bool {
-    let term = std::env::var("TERM")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if term.contains("foot") || term.contains("sixel") {
+    let term = std::env::var("TERM").unwrap_or_default();
+    if term_implies_sixel(&term) {
+        return true;
+    }
+    // foot inside tmux has `TERM=tmux-256color`, and tmux answers DA1 itself,
+    // so neither signal reveals foot's sixel support. Ask tmux for the outer
+    // client terminal name before falling back to a DA1 query.
+    if preview::tmux_active()
+        && tmux_client_termname()
+            .as_deref()
+            .is_some_and(term_implies_sixel)
+    {
         return true;
     }
     let reply = query_terminal(b"\x1b[c", 500, b'c');
     da1_has_sixel(&reply)
+}
+
+fn term_implies_sixel(term: &str) -> bool {
+    let term = term.to_ascii_lowercase();
+    term.contains("foot") || term.contains("sixel")
+}
+
+/// The client terminal name tmux sees, e.g. `foot` or `tmux-256color`.
+fn tmux_client_termname() -> Option<String> {
+    let out = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "#{client_termname}"])
+        .output()
+        .ok()?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 /// `ESC[?...;4;...c` — DA1 attribute 4 means sixel graphics.
@@ -468,4 +509,23 @@ fn parse_cell_size(bytes: &[u8]) -> Option<(u16, u16)> {
     let h = parts.next()?.parse::<u16>().ok()?;
     let w = parts.next()?.parse::<u16>().ok()?;
     Some((w, h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn graphics_term_hints_match_outer_tmux_terminals() {
+        assert!(term_implies_sixel("foot"));
+        assert!(term_implies_sixel("foot-extra"));
+        assert!(term_implies_sixel("xterm-sixel"));
+        assert!(!term_implies_sixel("tmux-256color"));
+        assert!(!term_implies_sixel("xterm-256color"));
+
+        assert!(term_is_kitty("kitty"));
+        assert!(term_is_kitty("ghostty-2024"));
+        assert!(!term_is_kitty("foot"));
+        assert!(!term_is_kitty("tmux-256color"));
+    }
 }

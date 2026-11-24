@@ -11,6 +11,10 @@ All notable changes to nnnyaz are documented here. The format follows
 - Delete confirmations now accept LF as Enter. Some terminals send LF rather
   than CR, which crossterm reports as Ctrl+J in raw mode; it previously
   canceled the prompt.
+- Image previews inside tmux detect foot through tmux's client terminal name.
+  The pane's `TERM`, DA1 reply, and inherited Kitty/Ghostty variables describe
+  tmux or where the server started, so foot's Sixel support was previously
+  missed or overridden and previews stayed disabled.
 
 ## [0.1.1] - 2026-11-20
 
