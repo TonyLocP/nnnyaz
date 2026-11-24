@@ -414,12 +414,14 @@ def expand_braces(pattern: str) -> list[str]:
     return out
 
 
+def pattern_matches(pattern: str, mime: str) -> bool:
+    """Whether a MIME pattern, such as `text/*`, covers a concrete MIME type."""
+    return any(fnmatch.fnmatchcase(mime, expanded) for expanded in expand_braces(pattern))
+
+
 def mime_overlaps(pattern: str, mime: str) -> bool:
     """Whether a configured MIME pattern and a generated MIME type can match."""
-    return any(
-        fnmatch.fnmatchcase(mime, expanded) or fnmatch.fnmatchcase(expanded, mime)
-        for expanded in expand_braces(pattern)
-    )
+    return pattern_matches(pattern, mime) or pattern_matches(mime, pattern)
 
 
 def rule_uses(existing: dict, mime: str, generated: list[str]) -> list[str]:
@@ -471,7 +473,15 @@ def rules_block(apps: list[dict], existing: dict, names: dict[str, str]) -> list
 
     groups: dict[tuple[str, ...], list[str]] = {}
     for mime in sorted(by_mime, key=specificity):
-        uses = rule_uses(existing, mime, by_mime[mime])
+        # A broad desktop pattern such as `text/*` must also be offered for
+        # specific types like `text/plain`, which Yazi matches first.
+        matching_apps: list[str] = []
+        for pattern, others in by_mime.items():
+            if pattern == mime or pattern_matches(pattern, mime):
+                for name in others:
+                    if name not in matching_apps:
+                        matching_apps.append(name)
+        uses = rule_uses(existing, mime, matching_apps)
         groups.setdefault(tuple(uses), []).append(mime)
 
     lines = [RULES_START]
